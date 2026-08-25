@@ -1,4 +1,4 @@
-import { readdir, readFile, stat, writeFile, mkdir } from "node:fs/promises";
+import { readdir, writeFile, mkdir, open } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { assertWithinRoot, containsTraversal, isDangerousRoot } from "../security.ts";
 import type { JsonObject, ToolExecutionResult } from "../types.ts";
@@ -64,20 +64,25 @@ export async function readApproved(
     return { ok: false, epistemic: "could_not_access", summary: resolved.summary };
   }
   try {
-    const info = await stat(resolved.path);
-    if (info.isDirectory()) {
-      return listApproved(approvedRoots, requested);
+    const handle = await open(resolved.path, "r");
+    try {
+      const info = await handle.stat();
+      if (info.isDirectory()) {
+        return listApproved(approvedRoots, requested);
+      }
+      if (info.size > 256_000) {
+        return { ok: false, epistemic: "could_not_access", summary: "File is larger than the 256 KB read limit." };
+      }
+      const text = await handle.readFile("utf8");
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: `Read ${relative(resolved.root, resolved.path)} (${text.length} chars).`,
+        data: { path: relative(resolved.root, resolved.path), text: text.slice(0, 8000) },
+      };
+    } finally {
+      await handle.close().catch(() => undefined);
     }
-    if (info.size > 256_000) {
-      return { ok: false, epistemic: "could_not_access", summary: "File is larger than the 256 KB read limit." };
-    }
-    const text = await readFile(resolved.path, "utf8");
-    return {
-      ok: true,
-      epistemic: "checked",
-      summary: `Read ${relative(resolved.root, resolved.path)} (${text.length} chars).`,
-      data: { path: relative(resolved.root, resolved.path), text: text.slice(0, 8000) },
-    };
   } catch (error) {
     return {
       ok: false,

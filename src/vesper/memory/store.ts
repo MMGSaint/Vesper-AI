@@ -1,6 +1,6 @@
 import { createId, nowIso } from "../id.ts";
 import type { StorageAdapter } from "../storage.ts";
-import type { JsonValue, MemoryCategory, MemoryEntry } from "../types.ts";
+import { MEMORY_CATEGORIES, type JsonValue, type MemoryCategory, type MemoryEntry } from "../types.ts";
 
 const KEY = "memory.entries";
 
@@ -183,6 +183,51 @@ export class MemoryStore {
     return { persistent: persistent.length, session: this.sessionEntries.length };
   }
 
+  async exportPersistent(): Promise<MemoryEntry[]> {
+    return (await this.loadPersistent()).map((entry) => structuredClone(entry));
+  }
+
+  async importPersistent(
+    incoming: unknown,
+    mode: "merge" | "replace" = "merge",
+  ): Promise<{ imported: number; skipped: number }> {
+    return this.runExclusive(async () => {
+      const parsed = Array.isArray(incoming) ? incoming : [];
+      const valid: MemoryEntry[] = [];
+      let skipped = 0;
+      for (const item of parsed) {
+        const entry = normalizeImported(item);
+        if (!entry) {
+          skipped += 1;
+          continue;
+        }
+        valid.push(entry);
+      }
+      if (mode === "replace") {
+        await this.savePersistent(valid);
+        return { imported: valid.length, skipped };
+      }
+      const current = await this.loadPersistent();
+      for (const entry of valid) {
+        const existing = current.find(
+          (item) =>
+            item.key === entry.key &&
+            item.category === entry.category &&
+            (item.workspaceId ?? "") === (entry.workspaceId ?? ""),
+        );
+        if (existing) {
+          existing.value = entry.value;
+          existing.updatedAt = nowIso();
+          if (entry.tags) existing.tags = entry.tags;
+        } else {
+          current.push(entry);
+        }
+      }
+      await this.savePersistent(current);
+      return { imported: valid.length, skipped };
+    });
+  }
+
   clearSession() {
     this.sessionEntries = [];
   }
@@ -197,4 +242,39 @@ function applyPatch(
   if (patch.category !== undefined) entry.category = patch.category;
   if (patch.key !== undefined) entry.key = patch.key;
   entry.updatedAt = nowIso();
+}
+
+function normalizeImported(item: unknown): MemoryEntry | null {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const rec = item as Record<string, unknown>;
+  if (typeof rec.key !== "string" || rec.key.trim().length === 0) return null;
+  if (typeof rec.value !== "string") return null;
+  const category = MEMORY_CATEGORIES.includes(rec.category as MemoryCategory)
+    ? (rec.category as MemoryCategory)
+    : "fact";
+  const source =
+    rec.source === "agent" || rec.source === "seed" || rec.source === "system" || rec.source === "user"
+      ? rec.source
+      : "user";
+  let provenance: MemoryEntry["provenance"] = { origin: "import", kind: "stated" };
+  if (rec.provenance && typeof rec.provenance === "object" && !Array.isArray(rec.provenance)) {
+    const raw = rec.provenance as { origin?: unknown; kind?: unknown };
+    const kind = raw.kind === "stated" || raw.kind === "observed" || raw.kind === "inferred" ? raw.kind : "stated";
+    provenance = {
+      origin: typeof raw.origin === "string" ? raw.origin : "import",
+      kind,
+    };
+  }
+  return {
+    id: typeof rec.id === "string" ? rec.id : createId("mem"),
+    category,
+    key: rec.key,
+    value: rec.value,
+    workspaceId: typeof rec.workspaceId === "string" ? rec.workspaceId : undefined,
+    createdAt: typeof rec.createdAt === "string" ? rec.createdAt : nowIso(),
+    updatedAt: typeof rec.updatedAt === "string" ? rec.updatedAt : nowIso(),
+    source,
+    tags: Array.isArray(rec.tags) ? rec.tags.filter((tag): tag is string => typeof tag === "string") : undefined,
+    provenance,
+  };
 }

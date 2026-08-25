@@ -1,4 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { createRuntime, type RuntimeOptions, type VesperRuntime } from "../runtime.ts";
 import { FileStorage } from "../storage.ts";
 import { createLogger } from "../logging.ts";
@@ -23,6 +24,7 @@ export interface ProductionHost {
   configSource: "file" | "default";
   writeHealth(): Promise<string>;
   writeLastError(): Promise<void>;
+  exportMemory(): Promise<string>;
   doctor(): Promise<DoctorReport>;
   shutdown(): Promise<void>;
 }
@@ -84,6 +86,16 @@ export async function createProductionHost(options?: {
       const error = await runtime.lastError();
       if (!error) return;
       await writeFile(lastErrorFile(dirs), JSON.stringify(error, null, 2), "utf8");
+    },
+    async exportMemory() {
+      const entries = await runtime.memory.exportPersistent();
+      const path = join(dirs.data, "memory-export.json");
+      await writeFile(
+        path,
+        `${JSON.stringify({ exportedAt: new Date().toISOString(), count: entries.length, memories: entries }, null, 2)}\n`,
+        "utf8",
+      );
+      return path;
     },
     async doctor() {
       const error = await runtime.lastError();

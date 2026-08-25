@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { randomBytes } from "node:crypto";
 import type { JsonValue } from "./types.ts";
 
 export interface StorageAdapter {
@@ -79,7 +80,8 @@ export class FileStorage implements StorageAdapter {
         this.corrupted = true;
         this.cache = {};
         try {
-          await writeFile(`${this.filePath}.corrupt`, raw, "utf8");
+          const backup = join(dirname(this.filePath), `${basename(this.filePath)}.corrupt`);
+          await writeFile(backup, raw, "utf8");
         } catch {
           // Backup is best-effort; continue with empty state.
         }
@@ -98,7 +100,7 @@ export class FileStorage implements StorageAdapter {
   private async persist() {
     const data = this.cache ?? {};
     await mkdir(dirname(this.filePath), { recursive: true });
-    const tmp = `${this.filePath}.tmp`;
+    const tmp = join(dirname(this.filePath), `.vesper-write-${randomBytes(8).toString("hex")}`);
     await writeFile(tmp, JSON.stringify(data, null, 2), "utf8");
     await rename(tmp, this.filePath);
   }

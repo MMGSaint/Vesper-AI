@@ -2,15 +2,18 @@
 
 Phase: **public repository hardening + software-only host reliability**
 
-Latest commit on `main`: pending this cycle
+Latest commit on `main`: `0612049` plus follow-up memory export / CodeQL default-setup disable
 
 Latest validation (local, this cycle):
 
-- Vesper tests: run after implementation
-- Typecheck: pending
-- Hygiene: pending
-- Production build: `tsc --noEmit`
-- GitHub: public as `MMGSaint/Vesper-AI`
+- Vesper tests: **118/118 passing**
+- Typecheck: passing
+- Hygiene: passing
+- Security tests: 14/14
+- Production build: `tsc --noEmit` passing
+- GitHub CI (`test` job): passing on `0612049`
+- Advanced CodeQL SARIF upload: blocked while default setup was enabled; default setup is now disabled so the advanced workflow can own scanning
+
 
 ## Completed (software-only)
 

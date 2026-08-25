@@ -18,8 +18,8 @@ The previous name `Vesper-personal-assistant-` redirects to `Vesper-AI`.
 | Dependabot version updates | `.github/dependabot.yml` (npm + GitHub Actions, majors ignored) |
 | Secret scanning | enabled |
 | Secret scanning push protection | enabled |
-| CodeQL default setup | configured, query suite `extended`, languages javascript-typescript + actions, weekly |
-| CodeQL advanced workflow | `.github/workflows/codeql.yml` (push, PR, weekly, workflow_dispatch) |
+| CodeQL default setup | disabled after it conflicted with advanced SARIF upload |
+| CodeQL advanced workflow | `.github/workflows/codeql.yml` (push, PR, weekly, workflow_dispatch, `security-extended`) |
 | CI | `.github/workflows/ci.yml` — typecheck, tests, security, hygiene, build |
 | Nightly maintenance | `.github/workflows/nightly.yml` — tests + audit + report artifact; no deploy |
 | Branch ruleset `Protect main` | active — blocks deletion and force-push; repository admins may bypass so autonomous development remains possible |

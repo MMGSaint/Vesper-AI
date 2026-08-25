@@ -7,6 +7,7 @@ export type CliCommand =
   | { kind: "health"; skipDiscovery: boolean }
   | { kind: "doctor"; skipDiscovery: boolean }
   | { kind: "config-check" }
+  | { kind: "export-memory" }
   | { kind: "unknown"; reason: string };
 
 const COMMANDS = new Set([
@@ -19,6 +20,7 @@ const COMMANDS = new Set([
   "--health",
   "--doctor",
   "--config-check",
+  "--export-memory",
 ]);
 
 export function parseCli(argv: string[]): CliCommand {
@@ -46,6 +48,8 @@ export function parseCli(argv: string[]): CliCommand {
       return { kind: "doctor", skipDiscovery };
     case "--config-check":
       return { kind: "config-check" };
+    case "--export-memory":
+      return { kind: "export-memory" };
     default:
       return {
         kind: "unknown",
@@ -70,6 +74,7 @@ Commands:
   --health          Write health.json and print the path
   --doctor          Run local self-checks (no hardware claims)
   --config-check    Parse config and exit
+  --export-memory   Write persistent memories to data/memory-export.json
 
 Flags:
   --skip-discovery  Skip first-boot backend probes

@@ -15,6 +15,7 @@ describe("cli", () => {
       skipDiscovery: true,
     });
     assert.equal(parseCli(["--config-check"]).kind, "config-check");
+    assert.equal(parseCli(["--export-memory"]).kind, "export-memory");
   });
 
   it("rejects unknown and extra arguments", () => {

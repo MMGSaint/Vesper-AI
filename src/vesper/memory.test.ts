@@ -73,4 +73,20 @@ describe("memory", () => {
     const all = await store.all();
     assert.equal(all.length, 12);
   });
+
+  it("exports persistent memories and merges an import without session data", async () => {
+    const store = new MemoryStore(new MemoryStorage());
+    await store.remember({ category: "fact", key: "pc", value: "9950X" });
+    await store.remember({ category: "session", key: "now", value: "ephemeral" });
+    const exported = await store.exportPersistent();
+    assert.equal(exported.some((entry) => entry.category === "session"), false);
+    const other = new MemoryStore(new MemoryStorage());
+    const result = await other.importPersistent(
+      [...exported, { key: "pc", value: "9950X/96GB", category: "fact" }, { nope: true }],
+      "merge",
+    );
+    assert.equal(result.imported >= 1, true);
+    assert.equal(result.skipped, 1);
+    assert.equal((await other.retrieve("pc"))?.value, "9950X/96GB");
+  });
 });

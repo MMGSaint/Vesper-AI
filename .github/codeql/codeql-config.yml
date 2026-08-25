@@ -1,0 +1,5 @@
+name: Vesper CodeQL
+paths-ignore:
+  - "**/*.test.ts"
+  - "**/test-helpers.ts"
+  - "scripts/**"

@@ -32,7 +32,12 @@ async function main() {
     return;
   }
 
-  const skipDiscovery = "skipDiscovery" in command ? command.skipDiscovery : process.env.VESPER_SKIP_DISCOVERY === "1";
+  const skipDiscovery =
+    command.kind === "export-memory"
+      ? true
+      : "skipDiscovery" in command
+        ? command.skipDiscovery
+        : process.env.VESPER_SKIP_DISCOVERY === "1";
   const host = await createProductionHost({
     production: process.env.VESPER_ENV === "production",
     runtime: { skipDiscovery },
@@ -82,6 +87,12 @@ async function main() {
     const report = await host.doctor();
     console.log(formatDoctor(report));
     await shutdown(report.ok ? 0 : 1);
+    return;
+  }
+  if (command.kind === "export-memory") {
+    const path = await host.exportMemory();
+    console.log(path);
+    await shutdown(0);
     return;
   }
 

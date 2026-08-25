@@ -7,7 +7,7 @@ Use only: **IMPLEMENTED + TESTED**, **IMPLEMENTED + HARDWARE DEPENDENT**, **MOCK
 | Config, logging, permissions, tool registry | IMPLEMENTED + TESTED |
 | Agent intents, confirmation, recovery | IMPLEMENTED + TESTED |
 | Confirmation persistence across restarts | IMPLEMENTED + TESTED |
-| Memory (remember/search/update/forget/summarize, session vs persistent, provenance, FileStorage, concurrency) | IMPLEMENTED + TESTED |
+| Memory (remember/search/update/forget/summarize, session vs persistent, provenance, FileStorage, concurrency, export/import) | IMPLEMENTED + TESTED |
 | Workspaces | IMPLEMENTED + TESTED |
 | Knowledge search (keyword/BM25-lite + lexical-hash embeddings), chunking, provenance, source register/remove, path confinement | IMPLEMENTED + TESTED |
 | Neural/GPU embedding models | DOCUMENTED BUT NOT IMPLEMENTED (provider abstraction exists) |

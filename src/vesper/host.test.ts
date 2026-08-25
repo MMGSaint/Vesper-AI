@@ -28,6 +28,9 @@ describe("production host", () => {
     assert.equal(health.version, VESPER_VERSION);
     const doctor = await host.doctor();
     assert.equal(doctor.ok, true);
+    const exportPath = await host.exportMemory();
+    const exported = JSON.parse(await readFile(exportPath, "utf8")) as { count: number };
+    assert.equal(typeof exported.count, "number");
     await host.shutdown();
     assert.equal(host.runtime.started, false);
     assert.equal(host.runtime.background.state(), "stopped");
