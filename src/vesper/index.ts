@@ -25,4 +25,13 @@ export { parseCli } from "./cli.ts";
 export { loadHostConfig, writeConfigIfMissing } from "./config-file.ts";
 export { runDoctor, formatDoctor } from "./doctor.ts";
 export { VESPER_VERSION } from "./version.ts";
+export {
+  CLIENT_PROTOCOL_ID,
+  CLIENT_PROTOCOL_VERSION,
+  DEFAULT_COMPANION_SCOPES,
+  FORBIDDEN_REMOTE_POWERS,
+  isClientError,
+} from "./client/protocol.ts";
+export { ClientSessionStore } from "./client/session.ts";
+export { VesperClientGateway, createClientGateway } from "./client/gateway.ts";
 export type * from "./types.ts";
