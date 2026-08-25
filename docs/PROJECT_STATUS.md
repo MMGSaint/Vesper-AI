@@ -2,7 +2,7 @@
 
 Phase: **software-only completion boundary**
 
-Latest commit on `main`: `09517c6`
+Latest commit on `main`: `90e8d44`
 
 Latest validation:
 
@@ -10,7 +10,7 @@ Latest validation:
 - Typecheck: passing
 - Security tests: 14/14 passing
 - Production build (preview console): passing
-- GitHub Actions CI: **passing** — [run 32825857958](https://github.com/MMGSaint/Vesper-personal-assistant-/actions/runs/32825857958)
+- GitHub Actions CI: **passing** — [run 32826859008](https://github.com/MMGSaint/Vesper-personal-assistant-/actions/runs/32826859008)
 
 ## Completed (software-only)
 
@@ -30,7 +30,7 @@ Latest validation:
 - Benchmark harness that refuses fake numbers
 - Confined filesystem tools
 - Hostile security tests
-- GitHub Actions CI, Dependabot (majors ignored), CodeQL, agent docs
+- GitHub Actions CI, Dependabot (majors ignored), agent docs
 
 ## Active
 
@@ -44,6 +44,10 @@ None that can be completed without the physical PC or the real optimizer API.
 - Microphone/speaker validation
 - Actual Ollama/llama.cpp model assignment on the target PC
 - Real optimizer connectivity
+
+## GitHub-side note
+
+CodeQL SARIF upload is not enabled on this private repository (GitHub code scanning / GHAS is off). Security regression is enforced by `npm run security` inside CI. CodeQL can be re-added after code scanning is enabled in repo settings.
 
 ## Next on the real PC
 
