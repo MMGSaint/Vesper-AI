@@ -14,6 +14,7 @@ export interface OpenAiCompatOptions {
   defaultModel: string;
   kind: "local" | "optional-cloud" | "test";
   timeoutMs?: number;
+  fetchImpl?: typeof fetch;
 }
 
 function toOpenAiMessages(messages: ChatMessage[]) {
@@ -46,17 +47,33 @@ function toOpenAiMessages(messages: ChatMessage[]) {
 export async function probeOpenAiCompatible(
   baseUrl: string,
   timeoutMs = 800,
+  fetchImpl: typeof fetch = fetch,
 ): Promise<{ available: boolean; detail: string }> {
+  const listed = await listOpenAiModels(baseUrl, timeoutMs, fetchImpl);
+  return { available: listed.available, detail: listed.detail };
+}
+
+export async function listOpenAiModels(
+  baseUrl: string,
+  timeoutMs = 800,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ available: boolean; models: string[]; detail: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const url = baseUrl.replace(/\/$/, "");
   try {
-    const url = baseUrl.replace(/\/$/, "");
-    const res = await fetch(`${url}/models`, { signal: controller.signal });
-    if (!res.ok) return { available: false, detail: `HTTP ${res.status} from ${url}` };
-    return { available: true, detail: `Reached ${url}` };
+    const res = await fetchImpl(`${url}/models`, { signal: controller.signal });
+    if (!res.ok) return { available: false, models: [], detail: `HTTP ${res.status} from ${url}` };
+    const json = (await res.json()) as { data?: { id?: string }[] };
+    const models = (json.data ?? []).map((item) => item.id).filter((id): id is string => Boolean(id));
+    return {
+      available: true,
+      models,
+      detail: models.length ? `Reached ${url} (${models.length} models)` : `Reached ${url}`,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { available: false, detail: `Unreachable: ${message}` };
+    return { available: false, models: [], detail: `Unreachable: ${message}` };
   } finally {
     clearTimeout(timer);
   }
@@ -65,6 +82,7 @@ export async function probeOpenAiCompatible(
 export function createOpenAiCompatProvider(options: OpenAiCompatOptions) {
   let available =
     options.kind === "test" || (options.kind === "optional-cloud" && Boolean(options.apiKey));
+  const fetchImpl = options.fetchImpl ?? fetch;
 
   return {
     id: options.id,
@@ -79,7 +97,7 @@ export function createOpenAiCompatProvider(options: OpenAiCompatOptions) {
         available = true;
         return { available, detail: "Optional cloud key present (not probed on every boot)" };
       }
-      const result = await probeOpenAiCompatible(options.baseUrl, options.timeoutMs ?? 1200);
+      const result = await probeOpenAiCompatible(options.baseUrl, options.timeoutMs ?? 1200, fetchImpl);
       available = result.available;
       return result;
     },
@@ -111,11 +129,15 @@ export function createOpenAiCompatProvider(options: OpenAiCompatOptions) {
       }
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      const controller = new AbortController();
+      const timeoutMs = options.timeoutMs ?? 60_000;
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const res = await fetch(url, {
+        const res = await fetchImpl(url, {
           method: "POST",
           headers,
           body: JSON.stringify(body),
+          signal: controller.signal,
         });
         if (!res.ok) {
           const text = await res.text();
@@ -148,6 +170,8 @@ export function createOpenAiCompatProvider(options: OpenAiCompatOptions) {
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         return unavailable(options.id, model, request.role, detail);
+      } finally {
+        clearTimeout(timer);
       }
     },
   };

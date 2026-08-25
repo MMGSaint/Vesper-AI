@@ -1,12 +1,10 @@
 # Permissions
 
-The model cannot override this system.
+Levels: `read` | `safe` | `confirm` | `never`.
 
-| Level | Meaning | Examples |
-| --- | --- | --- |
-| read | Observation only | system_info, process_list, memory_search, optimizer_status |
-| safe | Low-risk automation | app_launch (approved), notify, memory_remember, workspace_switch |
-| confirm | Needs the user | app_close, memory_forget, optimizer_request |
-| never | Refused even if “confirmed” | disk_wipe, credential_extract, security disable, dangerous hardware control |
+- The model cannot relax a tool’s level. Overrides may only restrict further.
+- `never` matches both an explicit list and name patterns (wipe, credentials, disable defender/firewall/uac, kernel, raw MSR, flash BIOS).
+- Confirmation-gated tools queue a `PendingConfirmation` and do not run until the user approves.
+- Tray / host controls (pause, exit, diagnostics) are not model tools and still cannot call `never` tools.
 
-Policy overrides may only **restrict** further (`safe` → `confirm`), never relax `never`.
+See `src/vesper/permissions.ts` and `src/vesper/security.ts`.

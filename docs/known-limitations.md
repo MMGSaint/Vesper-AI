@@ -1,10 +1,12 @@
 # Known limitations
 
-- Physical Ryzen 9 9950X + RX 7900 XT machine was **off**. No live AMD telemetry, clocks, power, or model benches.
-- Optimizer is a **mock**. Real API not published here.
-- Mortis is **not** in this repo. Only a boundary + workspace.
-- Voice, tray, Windows startup, and live filesystem indexing of the user PC are not implemented.
-- Optional cloud inference may appear in the web preview when an environment key exists. Production default is local-only (`allowOptionalCloud: false`).
-- Knowledge search is keyword/BM25-lite, not embedding RAG.
-- Application launch/close mutates the simulator, not real Win32 processes.
-- The web console is a control surface, not the eventual tray app.
+- The target Windows PC (9950X / 7900 XT / 96 GB) was powered off during development.
+- No live AMD telemetry, clocks, power, or temperatures.
+- No local-model throughput numbers. Do not treat role defaults as benchmark winners.
+- Native Windows tray, toasts, startup registry, and `tasklist` were not executed on Windows.
+- Voice binaries were not opened against a real microphone/speaker.
+- Embedding RAG is an interface plus BM25 fallback, not a vector index.
+- The real PC optimizer API does not exist in this repo; only the adapter contract does.
+- Mortis remains a separate project. Only the approved Mortis knowledge source is in-scope.
+
+When the PC is on, run the host, read the first-boot report, and treat any hardware-dependent step that did not succeed as unfinished.

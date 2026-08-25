@@ -10,6 +10,7 @@ import type { WorkspaceManager } from "./workspaces.ts";
 import type { SimulatedHardware } from "./hardware/simulated.ts";
 import type { OptimizerAdapter } from "./specialists/optimizer.ts";
 import { VESPER_SYSTEM_PROMPT, composeStatusReply } from "./personality.ts";
+import { formatWorkloadContext, inspectWorkload } from "./specialists/context.ts";
 import type {
   AgentTurn,
   ChatMessage,
@@ -46,7 +47,8 @@ interface DirectIntent {
     | "optimize"
     | "ready"
     | "scenario"
-    | "confirm";
+    | "confirm"
+    | "diagnostics";
   confidence: number;
   slots: Record<string, string>;
 }
@@ -269,6 +271,9 @@ export class Agent {
           .recent({ limit: 3 })
           .map((event) => event.title)
           .join("; ");
+        const context = inspectWorkload(this.deps.hardware, {
+          optimizerActive: opt.result?.ok === true,
+        });
         const reply = composeStatusReply({
           simulated: snapshot.mode === "simulated",
           workspace: workspace.name,
@@ -279,7 +284,7 @@ export class Agent {
             : "GPU telemetry unavailable.",
           ram: `RAM ${snapshot.ram.usedGB} of ${snapshot.ram.totalGB} GB.`,
           optimizer: opt.result?.summary ?? "I could not access the optimizer.",
-          processes: running ? `Running: ${running}.` : "No simulated user apps running.",
+          processes: running ? `Running: ${running}. ${formatWorkloadContext(context)}` : `No simulated user apps running. ${formatWorkloadContext(context)}`,
           events: recent ? `Recent: ${recent}.` : "",
         });
         return this.turn(
@@ -407,6 +412,17 @@ export class Agent {
           at,
         );
       }
+      case "diagnostics": {
+        const record = await invoke("diagnostics_report", {});
+        return this.turn(
+          userText,
+          record.result?.summary ?? "I could not generate diagnostics.",
+          [record.result?.epistemic ?? "could_not_access"],
+          toolCalls,
+          [],
+          at,
+        );
+      }
       default:
         return this.groundedFallback(userText);
     }
@@ -487,6 +503,10 @@ export function classifyIntent(text: string): DirectIntent | null {
     trimmed,
   );
   if (ws) return { kind: "workspace", confidence: 0.95, slots: { name: ws[1].toLowerCase() } };
+
+  if (/vesper diagnostics|diagnostic(s)? report|^diagnostics\b/i.test(lower)) {
+    return { kind: "diagnostics", confidence: 0.96, slots: {} };
+  }
 
   if (/what('?s| is) happening|status|how('?s| is) (the )?(pc|system|box)/i.test(lower)) {
     return { kind: "status", confidence: 0.93, slots: {} };

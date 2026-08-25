@@ -44,6 +44,16 @@ export const FEATURE_STATUSES = [
 ] as const;
 export type FeatureStatus = (typeof FEATURE_STATUSES)[number];
 
+export const BACKGROUND_STATES = [
+  "stopped",
+  "starting",
+  "running",
+  "paused",
+  "stopping",
+  "degraded",
+] as const;
+export type BackgroundState = (typeof BACKGROUND_STATES)[number];
+
 export type JsonValue =
   | string
   | number
@@ -181,7 +191,7 @@ export interface VesperNotification {
   title: string;
   body: string;
   at: string;
-  kind: "info" | "success" | "warning" | "system";
+  kind: "info" | "success" | "warning" | "system" | "error";
   cooldownKey?: string;
 }
 
@@ -247,7 +257,7 @@ export interface CapabilityProfile {
 }
 
 export interface BackendAvailability {
-  id: "ollama" | "llamacpp" | "llamacpp-vulkan" | "llamacpp-rocm" | "xai-optional";
+  id: "ollama" | "llamacpp" | "llamacpp-vulkan" | "llamacpp-rocm" | "xai-optional" | "cpu-offload";
   available: boolean;
   endpoint?: string;
   detail: string;
@@ -347,6 +357,13 @@ export interface OptimizerTelemetry {
   notes: string[];
 }
 
+export interface OptimizerHealth {
+  reachable: boolean;
+  latencyMs: number | null;
+  lastError: string | null;
+  mode: OptimizerStatus["mode"];
+}
+
 export interface AuditEntry {
   id: string;
   at: string;
@@ -358,8 +375,91 @@ export interface AuditEntry {
     | "event"
     | "error"
     | "lifecycle"
-    | "memory";
+    | "memory"
+    | "windows"
+    | "voice"
+    | "health"
+    | "diagnostics";
   level: "debug" | "info" | "warn" | "error";
   message: string;
   data?: JsonObject;
+}
+
+export interface WorkloadContext {
+  vrchatRunning: boolean;
+  obsRunning: boolean;
+  obsRecording: boolean | "unknown";
+  obsStreaming: boolean | "unknown";
+  gameRunning: boolean;
+  games: string[];
+  optimizerActive: boolean;
+  notes: string[];
+}
+
+export interface BackgroundHealth {
+  state: BackgroundState;
+  startedAt: string | null;
+  paused: boolean;
+  startOnLogin: boolean;
+}
+
+export interface TrayMenuItem {
+  id: string;
+  label: string;
+  enabled: boolean;
+  role: "open" | "status" | "diagnostics" | "pause" | "resume" | "startup" | "exit" | "separator";
+}
+
+export interface FirstBootStep {
+  id: string;
+  title: string;
+  ok: boolean;
+  detail: string;
+  status: FeatureStatus;
+}
+
+export interface FirstBootReport {
+  startedAt: string;
+  finishedAt: string;
+  steps: FirstBootStep[];
+  profile: CapabilityProfile;
+  defaults: {
+    hardwareMode: string;
+    optimizerMode: string;
+    voiceEnabled: boolean;
+    preferredBackend: string | null;
+  };
+  reportText: string;
+  persisted: boolean;
+}
+
+export interface DiagnosticReport {
+  generatedAt: string;
+  runtime: { instanceId: string; started: boolean; health: BackgroundState };
+  models: { active: string; available: { id: string; kind: string; available: boolean }[] };
+  memory: { persistent: number; session: number };
+  tools: { count: number };
+  permissions: { neverAllowAutonomous: string[] };
+  optimizer: OptimizerStatus;
+  windows: {
+    platform: string;
+    simulated: boolean;
+    trayAvailable: boolean;
+    notificationsAvailable: boolean;
+    startOnLogin: boolean;
+  };
+  voice: { enabled: boolean; stt: string; tts: string; available: boolean };
+  context: WorkloadContext;
+  capability: CapabilityProfile | null;
+  recentErrors: { at: string; message: string }[];
+  classification: Record<string, FeatureStatus>;
+  reportText: string;
+}
+
+export interface VesperDirs {
+  root: string;
+  config: string;
+  data: string;
+  logs: string;
+  models: string;
 }

@@ -6,9 +6,10 @@ Researched against current AMD RDNA3 practice. **No throughput numbers in this f
 
 1. **llama.cpp + Vulkan** — currently the most practical, well-supported AMD path; often easier and competitive with ROCm on RDNA3
 2. **Ollama** — best operator UX (model pull/list). Prefer its Vulkan backend when both HIP and Vulkan are present; Ollama may otherwise prefer ROCm
-3. **llama.cpp + ROCm/HIP** — AMD publishes validated Windows binaries for gfx110X; keep as a probed alternative, not an assumed winner
+3. **llama.cpp + ROCm/HIP** — secondary AMD path; probed only when `VESPER_LLAMA_BACKEND=rocm`
+4. **CPU offload** — fallback for models that do not fit in 20 GB VRAM; not auto-selected without a benchmark
 
-ROCm 7.x exists as a combined Windows/Linux line. Do not assume it is faster than Vulkan on this card without a local benchmark.
+ROCm is never assumed faster than Vulkan.
 
 ## Endpoints (defaults)
 
@@ -17,6 +18,8 @@ ROCm 7.x exists as a combined Windows/Linux line. Do not assume it is faster tha
 | Ollama | `http://127.0.0.1:11434/v1` | OpenAI-compatible |
 | llama.cpp server | `http://127.0.0.1:8088/v1` | Not 8080 — reserved for the console |
 | Optional xAI | `https://api.x.ai/v1` | Preview/dev only |
+
+Discovery lists `/v1/models` with short timeouts. Completions abort after 60s so a hung backend cannot freeze the assistant.
 
 ## Candidate models (unbenchmarked)
 
@@ -29,12 +32,3 @@ These are **starting candidates** for 20 GB VRAM + 96 GB RAM, not proven default
 - large: 32B–70B quantized with offload
 
 First-boot must discover what is actually installed and only then bind roles.
-
-## First-boot procedure (target PC)
-
-1. Discover CPU, GPU, VRAM, RAM, OS
-2. Probe Ollama, llama.cpp Vulkan, llama.cpp ROCm
-3. List installed models
-4. Run a local bench harness (not implemented against real hardware yet)
-5. Assign roles and write a capability profile
-6. Fall back to echo/tools if nothing local is reachable

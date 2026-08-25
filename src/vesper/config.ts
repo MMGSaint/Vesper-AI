@@ -143,21 +143,31 @@ export const vesperConfigSchema = z.object({
     .object({
       mode: z.enum(["mock", "live", "off"]).default("mock"),
       endpoint: z.string().nullable().default(null),
+      timeoutMs: z.number().default(2500),
+      retries: z.number().default(1),
     })
-    .default({ mode: "mock", endpoint: null }),
+    .default({ mode: "mock", endpoint: null, timeoutMs: 2500, retries: 1 }),
   voice: z
     .object({
       enabled: z.boolean().default(false),
       stt: z.string().default("faster-whisper"),
       tts: z.string().default("piper"),
+      pushToTalk: z.boolean().default(false),
     })
-    .default({ enabled: false, stt: "faster-whisper", tts: "piper" }),
+    .default({ enabled: false, stt: "faster-whisper", tts: "piper", pushToTalk: false }),
   notifications: z
     .object({
       enabled: z.boolean().default(true),
       cooldownMs: z.number().default(60_000),
     })
     .default({ enabled: true, cooldownMs: 60_000 }),
+  windows: z
+    .object({
+      enableTray: z.boolean().default(true),
+      startOnLogin: z.boolean().default(false),
+      nativeNotifications: z.boolean().default(true),
+    })
+    .default({ enableTray: true, startOnLogin: false, nativeNotifications: true }),
   agent: z
     .object({
       maxToolIterations: z.number().default(8),

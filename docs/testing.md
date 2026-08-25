@@ -2,10 +2,11 @@
 
 ```bash
 npm test
+npm run typecheck
 ```
 
-Vesper tests live in `src/vesper/*.test.ts` and run with Node's test runner + `--experimental-strip-types`.
+Core tests: `src/vesper/**/*.test.ts` (Node test runner, TypeScript stripped).
 
-Covered: config, routing, agent, tools, permissions (allow/deny/never), memory, workspaces, events, notifications, optimizer mock, logging redaction, hardware sim vs live discovery, knowledge workspace scoping, recovery from bad config / agent throw / missing optimizer / missing model.
+They cover agent intents, permissions, memory, knowledge, model routing, optimizer mock + HTTP failure, recovery, diagnostics, first-boot, backends, Windows runtime, voice stubs, security boundaries, and the production host.
 
-Hardware-dependent paths are mocked. No test claims physical GPU validation.
+A local LLM is not required.

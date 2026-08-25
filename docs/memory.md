@@ -1,9 +1,13 @@
 # Memory
 
-Persistent local memory, independent of chat history.
+Persistent local memory with:
 
-Categories: preference, fact, project, workflow, routine, task, config, context, session.
+- remember / retrieve / search / update / forget / summarize
+- session vs persistent (`category: "session"` is in-memory only)
+- FileStorage atomic writes + corrupt-JSON recovery
+- serialized concurrent writes
+- seed memories on first empty store
 
-Operations: remember, retrieve, search, update, forget, summarize.
+Secrets are not written to the audit log. Memory values themselves stay local.
 
-Storage adapters: in-memory (tests/preview), JSON file (local Node/Windows). Nothing is sent off-box by default.
+Classification: **IMPLEMENTED + TESTED**.

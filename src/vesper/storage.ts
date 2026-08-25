@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { JsonValue } from "./types.ts";
 
@@ -41,23 +41,50 @@ export class MemoryStorage implements StorageAdapter {
 
 export class FileStorage implements StorageAdapter {
   private readonly filePath: string;
+  private cache: Record<string, JsonValue> | null = null;
+  private corrupted = false;
+  private queue: Promise<unknown> = Promise.resolve();
+
   constructor(filePath: string) {
     this.filePath = filePath;
   }
 
-  private cache: Record<string, JsonValue> | null = null;
+  wasCorrupted(): boolean {
+    return this.corrupted;
+  }
+
+  private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(fn, fn);
+    this.queue = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
 
   private async load(): Promise<Record<string, JsonValue>> {
     if (this.cache) return this.cache;
     try {
       const raw = await readFile(this.filePath, "utf8");
-      const parsed = JSON.parse(raw) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          this.corrupted = true;
+          this.cache = {};
+          return this.cache;
+        }
+        this.cache = parsed as Record<string, JsonValue>;
+        return this.cache;
+      } catch {
+        this.corrupted = true;
         this.cache = {};
+        try {
+          await writeFile(`${this.filePath}.corrupt`, raw, "utf8");
+        } catch {
+          // Backup is best-effort; continue with empty state.
+        }
         return this.cache;
       }
-      this.cache = parsed as Record<string, JsonValue>;
-      return this.cache;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT") {
@@ -77,24 +104,30 @@ export class FileStorage implements StorageAdapter {
   }
 
   async get(key: string) {
-    const data = await this.load();
-    return data[key];
+    return this.runExclusive(async () => {
+      const data = await this.load();
+      return data[key];
+    });
   }
 
   async set(key: string, value: JsonValue) {
-    const data = await this.load();
-    data[key] = value;
-    await this.persist();
+    await this.runExclusive(async () => {
+      const data = await this.load();
+      data[key] = value;
+      await this.persist();
+    });
   }
 
   async delete(key: string) {
-    const data = await this.load();
-    delete data[key];
-    await this.persist();
+    await this.runExclusive(async () => {
+      const data = await this.load();
+      delete data[key];
+      await this.persist();
+    });
   }
 
   async keys() {
-    return Object.keys(await this.load());
+    return this.runExclusive(async () => Object.keys(await this.load()));
   }
 }
 

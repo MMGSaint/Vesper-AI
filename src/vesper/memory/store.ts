@@ -22,16 +22,32 @@ function score(entry: MemoryEntry, query: string): number {
 
 export class MemoryStore {
   private readonly storage: StorageAdapter;
+  private sessionEntries: MemoryEntry[] = [];
+  private queue: Promise<unknown> = Promise.resolve();
+
   constructor(storage: StorageAdapter) {
     this.storage = storage;
   }
 
-  private async load(): Promise<MemoryEntry[]> {
+  private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(fn, fn);
+    this.queue = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  private async loadPersistent(): Promise<MemoryEntry[]> {
     return asEntries(await this.storage.get(KEY));
   }
 
-  private async save(entries: MemoryEntry[]) {
+  private async savePersistent(entries: MemoryEntry[]) {
     await this.storage.set(KEY, entries as unknown as JsonValue);
+  }
+
+  private merged(persistent: MemoryEntry[]): MemoryEntry[] {
+    return [...persistent, ...this.sessionEntries];
   }
 
   async remember(input: {
@@ -42,39 +58,42 @@ export class MemoryStore {
     source?: MemoryEntry["source"];
     tags?: string[];
   }): Promise<MemoryEntry> {
-    const entries = await this.load();
-    const existing = entries.find(
-      (entry) =>
-        entry.key === input.key &&
-        entry.category === input.category &&
-        (entry.workspaceId ?? "") === (input.workspaceId ?? ""),
-    );
-    const now = nowIso();
-    if (existing) {
-      existing.value = input.value;
-      existing.updatedAt = now;
-      if (input.tags) existing.tags = input.tags;
-      await this.save(entries);
-      return existing;
-    }
-    const entry: MemoryEntry = {
-      id: createId("mem"),
-      category: input.category,
-      key: input.key,
-      value: input.value,
-      workspaceId: input.workspaceId,
-      createdAt: now,
-      updatedAt: now,
-      source: input.source ?? "user",
-      tags: input.tags,
-    };
-    entries.push(entry);
-    await this.save(entries);
-    return entry;
+    return this.runExclusive(async () => {
+      const now = nowIso();
+      const session = input.category === "session";
+      const pool = session ? this.sessionEntries : await this.loadPersistent();
+      const existing = pool.find(
+        (entry) =>
+          entry.key === input.key &&
+          entry.category === input.category &&
+          (entry.workspaceId ?? "") === (input.workspaceId ?? ""),
+      );
+      if (existing) {
+        existing.value = input.value;
+        existing.updatedAt = now;
+        if (input.tags) existing.tags = input.tags;
+        if (!session) await this.savePersistent(pool);
+        return existing;
+      }
+      const entry: MemoryEntry = {
+        id: createId("mem"),
+        category: input.category,
+        key: input.key,
+        value: input.value,
+        workspaceId: input.workspaceId,
+        createdAt: now,
+        updatedAt: now,
+        source: input.source ?? "user",
+        tags: input.tags,
+      };
+      pool.push(entry);
+      if (!session) await this.savePersistent(pool);
+      return entry;
+    });
   }
 
   async retrieve(idOrKey: string, workspaceId?: string): Promise<MemoryEntry | undefined> {
-    const entries = await this.load();
+    const entries = this.merged(await this.loadPersistent());
     return entries.find(
       (entry) =>
         (entry.id === idOrKey || entry.key === idOrKey) &&
@@ -83,7 +102,7 @@ export class MemoryStore {
   }
 
   async search(query: string, options?: { category?: MemoryCategory; workspaceId?: string; limit?: number }) {
-    const entries = await this.load();
+    const entries = this.merged(await this.loadPersistent());
     const filtered = entries.filter((entry) => {
       if (options?.category && entry.category !== options.category) return false;
       if (options?.workspaceId && entry.workspaceId && entry.workspaceId !== options.workspaceId) {
@@ -103,24 +122,34 @@ export class MemoryStore {
   }
 
   async update(id: string, patch: Partial<Pick<MemoryEntry, "value" | "tags" | "category" | "key">>) {
-    const entries = await this.load();
-    const entry = entries.find((item) => item.id === id);
-    if (!entry) return undefined;
-    if (patch.value !== undefined) entry.value = patch.value;
-    if (patch.tags !== undefined) entry.tags = patch.tags;
-    if (patch.category !== undefined) entry.category = patch.category;
-    if (patch.key !== undefined) entry.key = patch.key;
-    entry.updatedAt = nowIso();
-    await this.save(entries);
-    return entry;
+    return this.runExclusive(async () => {
+      const sessionHit = this.sessionEntries.find((item) => item.id === id);
+      if (sessionHit) {
+        applyPatch(sessionHit, patch);
+        return sessionHit;
+      }
+      const entries = await this.loadPersistent();
+      const entry = entries.find((item) => item.id === id);
+      if (!entry) return undefined;
+      applyPatch(entry, patch);
+      await this.savePersistent(entries);
+      return entry;
+    });
   }
 
   async forget(idOrKey: string): Promise<boolean> {
-    const entries = await this.load();
-    const next = entries.filter((entry) => entry.id !== idOrKey && entry.key !== idOrKey);
-    if (next.length === entries.length) return false;
-    await this.save(next);
-    return true;
+    return this.runExclusive(async () => {
+      const sessionNext = this.sessionEntries.filter(
+        (entry) => entry.id !== idOrKey && entry.key !== idOrKey,
+      );
+      const sessionChanged = sessionNext.length !== this.sessionEntries.length;
+      this.sessionEntries = sessionNext;
+      const entries = await this.loadPersistent();
+      const next = entries.filter((entry) => entry.id !== idOrKey && entry.key !== idOrKey);
+      const persistentChanged = next.length !== entries.length;
+      if (persistentChanged) await this.savePersistent(next);
+      return sessionChanged || persistentChanged;
+    });
   }
 
   async summarize(workspaceId?: string): Promise<string> {
@@ -140,6 +169,26 @@ export class MemoryStore {
   }
 
   async all(): Promise<MemoryEntry[]> {
-    return this.load();
+    return this.merged(await this.loadPersistent());
   }
+
+  async stats(): Promise<{ persistent: number; session: number }> {
+    const persistent = await this.loadPersistent();
+    return { persistent: persistent.length, session: this.sessionEntries.length };
+  }
+
+  clearSession() {
+    this.sessionEntries = [];
+  }
+}
+
+function applyPatch(
+  entry: MemoryEntry,
+  patch: Partial<Pick<MemoryEntry, "value" | "tags" | "category" | "key">>,
+) {
+  if (patch.value !== undefined) entry.value = patch.value;
+  if (patch.tags !== undefined) entry.tags = patch.tags;
+  if (patch.category !== undefined) entry.category = patch.category;
+  if (patch.key !== undefined) entry.key = patch.key;
+  entry.updatedAt = nowIso();
 }

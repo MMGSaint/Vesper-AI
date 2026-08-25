@@ -1,7 +1,18 @@
 # Tools
 
-`ToolRegistry` is the only effect channel.
+Every host or optimizer effect goes through the tool registry.
 
-Builtin tools include system_info, process_list, app_launch, app_close, notify, memory_*, workspace_switch, knowledge_search, optimizer_*, set_scenario, plus never-autonomous traps (disk_wipe, credential_extract).
+Built-in groups:
 
-Unknown tools fail closed. Thrown handlers become `could_not_access` results.
+- system / process / approved app launch & close
+- memory remember / search / forget
+- workspace switch
+- knowledge search / reindex / register / remove
+- optimizer status / analyze / request
+- notifications
+- diagnostics, backend status, voice status, workload context
+- background pause / resume (confirmation-gated from the model)
+- simulator scenario (development)
+- never: `disk_wipe`, `credential_extract`
+
+Unknown apps cannot be launched. Knowledge roots cannot escape approved directories. High-risk names stay `never` even if confirmation is supplied.

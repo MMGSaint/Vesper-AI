@@ -2,16 +2,22 @@
 
 Designed for:
 
-- background operation
-- system tray
-- startup
-- toast notifications
-- process inspection
+- background operation (`src/vesper/windows/runtime.ts`)
+- system tray menu model (`createTrayMenu` / `invokeTrayAction`)
+- start-on-login preference (HKCU Run is not written from Linux)
+- toast notifications (adapter present; native toasts not sent here)
+- process inspection (CSV parser + optional `tasklist`)
 - approved application control
 - structured logging
 - crash recovery
-- cheap idle
+- cheap idle (event-driven, no polling loop)
 
-**Current status:** `src/vesper/windows/host.ts` is a simulated host. Tray, Win32 notifications, and real process control are **IMPLEMENTED + HARDWARE DEPENDENT** (interface present) / **MOCKED** on non-Windows.
+**Current status**
 
-The console does not need a terminal window. A future tray process should host `VesperRuntime` and keep the UI optional.
+- Background state machine, tray actions, and startup preference: **IMPLEMENTED + TESTED**
+- Native tray icon, Win32 toasts, real process spawn, HKCU startup: **IMPLEMENTED + HARDWARE DEPENDENT**
+- Host adapter used in tests: **MOCKED / SIMULATED**
+
+The production entry is `src/vesper/host/main.ts`. Packaging scripts live in `packaging/windows/`. The web console is an optional control surface, not a runtime requirement.
+
+Tray actions (open, status, diagnostics, pause/resume, startup, exit) do not go through the language model and cannot relax the permission gate.

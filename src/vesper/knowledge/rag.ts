@@ -1,6 +1,8 @@
 import { readdir, readFile, stat } from "node:fs/promises";
-import { extname, join, relative } from "node:path";
+import { extname, join, relative, resolve } from "node:path";
 import type { KnowledgeHit, KnowledgeSource } from "../types.ts";
+import { containsTraversal, isDangerousRoot, isPathInside } from "../security.ts";
+import { createUnavailableEmbeddings, type EmbeddingProvider } from "./embeddings.ts";
 
 const TEXT_EXT = new Set([".md", ".txt", ".json", ".ts", ".js", ".cs", ".yml", ".yaml"]);
 
@@ -35,18 +37,24 @@ function bm25ish(query: string, text: string): number {
   return score;
 }
 
-async function walk(root: string, acc: string[]): Promise<void> {
+async function walk(root: string, acc: string[], approvedRoots: string[]): Promise<void> {
+  if (containsTraversal(root) || isDangerousRoot(root)) return;
+  const resolvedRoot = resolve(root);
+  if (approvedRoots.length && !approvedRoots.some((item) => isPathInside(item, resolvedRoot))) {
+    return;
+  }
   let entries;
   try {
-    entries = await readdir(root, { withFileTypes: true });
+    entries = await readdir(resolvedRoot, { withFileTypes: true });
   } catch {
     return;
   }
   for (const entry of entries) {
-    const full = join(root, entry.name);
+    const full = join(resolvedRoot, entry.name);
+    if (!isPathInside(resolvedRoot, full)) continue;
     if (entry.isDirectory()) {
       if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "bin") continue;
-      await walk(full, acc);
+      await walk(full, acc, approvedRoots.length ? approvedRoots : [resolvedRoot]);
     } else if (TEXT_EXT.has(extname(entry.name).toLowerCase())) {
       const info = await stat(full);
       if (info.size <= 256_000) acc.push(full);
@@ -56,13 +64,58 @@ async function walk(root: string, acc: string[]): Promise<void> {
 
 export class KnowledgeIndex {
   private documents: KnowledgeDocument[] = [];
-  private readonly sources: KnowledgeSource[];
+  private sources: KnowledgeSource[];
   private readonly seed: KnowledgeDocument[];
+  private readonly approvedRoots: string[];
+  readonly embeddings: EmbeddingProvider;
 
-  constructor(sources: KnowledgeSource[], seed: KnowledgeDocument[] = []) {
-    this.sources = sources;
+  constructor(
+    sources: KnowledgeSource[],
+    seed: KnowledgeDocument[] = [],
+    options?: { approvedRoots?: string[]; embeddings?: EmbeddingProvider },
+  ) {
+    this.sources = sources.map((source) => ({ ...source }));
     this.seed = seed;
     this.documents = [...seed];
+    this.approvedRoots = (options?.approvedRoots ?? []).map((root) => resolve(root));
+    this.embeddings = options?.embeddings ?? createUnavailableEmbeddings();
+  }
+
+  listSources(): KnowledgeSource[] {
+    return this.sources.map((source) => ({ ...source }));
+  }
+
+  registerSource(source: KnowledgeSource): { ok: boolean; summary: string } {
+    if (this.sources.some((item) => item.id === source.id)) {
+      return { ok: false, summary: `Knowledge source '${source.id}' already exists.` };
+    }
+    if (source.roots.some((root) => containsTraversal(root) || isDangerousRoot(root))) {
+      return { ok: false, summary: "Refused to register a dangerous or traversing knowledge root." };
+    }
+    if (this.approvedRoots.length) {
+      const allowed = source.roots.every((root) =>
+        this.approvedRoots.some((item) => isPathInside(item, resolve(root))),
+      );
+      if (!allowed) {
+        return { ok: false, summary: "Knowledge roots must stay inside approved directories." };
+      }
+    }
+    this.sources.push({ ...source });
+    return { ok: true, summary: `Registered knowledge source '${source.id}'.` };
+  }
+
+  removeSource(id: string): { ok: boolean; summary: string } {
+    const next = this.sources.filter((source) => source.id !== id);
+    if (next.length === this.sources.length) {
+      return { ok: false, summary: `No knowledge source '${id}'.` };
+    }
+    this.sources = next;
+    this.documents = this.documents.filter((doc) => doc.sourceId !== id || this.seed.includes(doc));
+    this.documents = [
+      ...this.seed.filter((doc) => doc.sourceId === id || this.sources.some((source) => source.id === doc.sourceId)),
+      ...this.documents.filter((doc) => this.sources.some((source) => source.id === doc.sourceId)),
+    ];
+    return { ok: true, summary: `Removed knowledge source '${id}'.` };
   }
 
   async reindex(): Promise<number> {
@@ -70,7 +123,7 @@ export class KnowledgeIndex {
     for (const source of this.sources.filter((item) => item.enabled)) {
       for (const root of source.roots) {
         const files: string[] = [];
-        await walk(root, files);
+        await walk(root, files, this.approvedRoots);
         for (const file of files) {
           try {
             const text = await readFile(file, "utf8");

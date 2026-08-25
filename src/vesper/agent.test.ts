@@ -10,6 +10,7 @@ describe("agent", () => {
     assert.equal(classifyIntent("switch to vrchat")?.kind, "workspace");
     assert.equal(classifyIntent("optimize this")?.kind, "optimize");
     assert.equal(classifyIntent("get me ready for VRChat")?.kind, "ready");
+    assert.equal(classifyIntent("Vesper diagnostics")?.kind, "diagnostics");
   });
 
   it("stores memory through the agent", async () => {

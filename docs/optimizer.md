@@ -1,16 +1,19 @@
 # Optimizer adapter
 
-The PC optimizer is a **separate product**. Vesper must not reimplement it.
+The PC optimizer is a specialist. Vesper never performs low-level hardware optimization itself.
 
-`src/vesper/specialists/optimizer.ts` defines the adapter:
+Interface (`src/vesper/specialists/optimizer.ts`):
 
-- Mock adapter for development (`mode: mock`) — **MOCKED / SIMULATED**
-- HTTP adapter (`mode: live` + endpoint) — waits for the real API — **DOCUMENTED, interface ready, not a live integration**
+- `getStatus` `getTelemetry` `getCurrentProfile` `getPerformanceState`
+- `analyze` `requestOptimization` `requestRollback`
+- `getLastAction` `getOptimizationResult` `getHealth`
 
-Vesper should:
+Mock adapter: **MOCKED / SIMULATED**. Used by default.
 
-- query status/telemetry
-- interpret mock/live results honestly
-- provide workload context (OBS started, game launched)
-- request analysis / optimize / rollback through the adapter
-- keep working if the optimizer is down
+HTTP adapter: timeouts, GET retries, JSON validation, and a hard rule that `accepted` must be boolean `true` before Vesper will say an optimization happened. Malformed `{ "ok": true }` is **not** confirmation.
+
+There is still no published production optimizer API. Do not invent one.
+
+Cooperation (`src/vesper/specialists/context.ts`): when analysis says GPU-bound, Vesper explains that raising CPU is unlikely to help, and can mention OBS/VRChat/game context from the host adapter. That context is simulated until the target PC is on.
+
+`optimize this` remains confirmation-gated.

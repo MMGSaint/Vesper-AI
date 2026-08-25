@@ -4,7 +4,9 @@
   "type": "module",
   "description": "Local-first personal AI assistant for Windows. Not Mortis. Not the PC optimizer.",
   "scripts": {
-    "test": "node --experimental-strip-types --test src/vesper/**/*.test.ts"
+    "test": "node --experimental-strip-types --test src/vesper/**/*.test.ts",
+    "start": "node --experimental-strip-types src/vesper/host/main.ts",
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
     "node": ">=22"

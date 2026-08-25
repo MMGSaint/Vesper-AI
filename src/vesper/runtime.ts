@@ -15,13 +15,25 @@ import {
   createHttpOptimizerAdapter,
   type OptimizerAdapter,
 } from "./specialists/optimizer.ts";
+import { inspectWorkload } from "./specialists/context.ts";
 import { createSimulatedWindowsHost } from "./windows/host.ts";
-import { createDisabledVoice } from "./voice/types.ts";
+import { createBackgroundRuntime, createTrayMenu, type BackgroundRuntime } from "./windows/runtime.ts";
+import { createDisabledVoice, type VoiceModule } from "./voice/types.ts";
+import { createVoiceModule } from "./voice/providers.ts";
 import { createModelRouter, type ModelRouter } from "./models/router.ts";
 import { Agent } from "./agent.ts";
-import { firstBoot, conservativeModelPlan } from "./bootstrap.ts";
+import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
+import { buildDiagnostics } from "./diagnostics.ts";
 import { createId } from "./id.ts";
-import type { AgentTurn, CapabilityProfile, ChatMessage, PendingConfirmation } from "./types.ts";
+import { describeStartupRegistration } from "./windows/startup.ts";
+import type {
+  AgentTurn,
+  CapabilityProfile,
+  ChatMessage,
+  DiagnosticReport,
+  FirstBootReport,
+  PendingConfirmation,
+} from "./types.ts";
 
 export interface RuntimeOptions {
   config?: Partial<VesperConfig> | Record<string, unknown>;
@@ -49,7 +61,10 @@ export class VesperRuntime {
   readonly agent: Agent;
   readonly confirmations: Map<string, PendingConfirmation>;
   readonly instanceId = createId("runtime");
+  readonly background: BackgroundRuntime;
+  readonly voice: VoiceModule;
   capability: CapabilityProfile | null = null;
+  firstBootReport: FirstBootReport | null = null;
   started = false;
   private readonly skipDiscovery: boolean;
 
@@ -70,6 +85,8 @@ export class VesperRuntime {
       agent: Agent;
       confirmations: Map<string, PendingConfirmation>;
       skipDiscovery: boolean;
+      background: BackgroundRuntime;
+      voice: VoiceModule;
     },
   ) {
     this.config = config;
@@ -87,6 +104,8 @@ export class VesperRuntime {
     this.agent = parts.agent;
     this.confirmations = parts.confirmations;
     this.skipDiscovery = parts.skipDiscovery;
+    this.background = parts.background;
+    this.voice = parts.voice;
   }
 
   async start() {
@@ -94,6 +113,7 @@ export class VesperRuntime {
     this.log.info("lifecycle", "Vesper starting", { instanceId: this.instanceId });
     await this.seedMemories();
     this.started = true;
+    await this.background.start();
     this.events.emit({
       type: "lifecycle.start",
       title: "Vesper is awake",
@@ -114,7 +134,10 @@ export class VesperRuntime {
 
   private async discoverInBackground() {
     try {
-      this.capability = await firstBoot(this.config, this.log);
+      this.firstBootReport = await runFirstBootAutomation(this.config, this.log, {
+        storage: this.storage,
+      });
+      this.capability = this.firstBootReport.profile;
       await this.models.probeAll();
     } catch (error) {
       this.log.error("lifecycle", "First-boot discovery failed; continuing degraded", {
@@ -125,7 +148,17 @@ export class VesperRuntime {
 
   async stop() {
     this.started = false;
+    this.memory.clearSession();
+    await this.background.stop();
     this.log.info("lifecycle", "Vesper stopped");
+  }
+
+  async pause() {
+    await this.background.pause();
+  }
+
+  async resume() {
+    await this.background.resume();
   }
 
   async chat(text: string, options?: { confirmId?: string; approve?: boolean }): Promise<AgentTurn> {
@@ -150,8 +183,52 @@ export class VesperRuntime {
     }
   }
 
+  async diagnostics(): Promise<DiagnosticReport> {
+    const optimizer = await this.optimizer.getStatus().catch(() => ({
+      available: false,
+      mode: "unavailable" as const,
+      currentProfile: null,
+      lastAction: null,
+      lastResult: null,
+      performanceState: null,
+      detail: "Optimizer status failed.",
+    }));
+    const memory = await this.memory.stats();
+    const errors = this.log
+      .recent(50)
+      .filter((entry) => entry.level === "error")
+      .slice(-5)
+      .map((entry) => ({ at: entry.at, message: entry.message }));
+    return buildDiagnostics({
+      instanceId: this.instanceId,
+      started: this.started,
+      health: this.background.state(),
+      models: this.models.status(),
+      memory,
+      tools: { count: this.tools.list().length },
+      permissions: { neverAllowAutonomous: this.config.permissions.neverAllowAutonomous },
+      optimizer,
+      windows: {
+        platform: process.platform,
+        simulated: true,
+        trayAvailable: this.config.windows.enableTray,
+        notificationsAvailable: this.config.notifications.enabled,
+        startOnLogin: this.background.startOnLogin(),
+      },
+      voice: this.voice.status(),
+      context: inspectWorkload(this.hardware, { optimizerActive: optimizer.available }),
+      capability: this.capability,
+      recentErrors: errors,
+    });
+  }
+
   snapshot() {
     const hardware = this.hardware.snapshot();
+    const health = this.background.health();
+    const startup = describeStartupRegistration({
+      enabled: health.startOnLogin,
+      platform: process.platform,
+    });
     return {
       instanceId: this.instanceId,
       started: this.started,
@@ -173,6 +250,23 @@ export class VesperRuntime {
         description: tool.description,
       })),
       audit: this.log.recent(30),
+      health,
+      tray: createTrayMenu(health),
+      voice: this.voice.status(),
+      context: inspectWorkload(this.hardware),
+      startup,
+      firstBoot: this.firstBootReport
+        ? {
+            finishedAt: this.firstBootReport.finishedAt,
+            persisted: this.firstBootReport.persisted,
+            preferredBackend: this.firstBootReport.defaults.preferredBackend,
+            steps: this.firstBootReport.steps.map((step) => ({
+              id: step.id,
+              ok: step.ok,
+              title: step.title,
+            })),
+          }
+        : null,
     };
   }
 
@@ -242,20 +336,24 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   }
   const storage = options.storage ?? new MemoryStorage();
   const memory = new MemoryStore(storage);
-  const knowledge = new KnowledgeIndex(config.knowledgeSources, [
-    {
-      sourceId: "vesper-docs",
-      path: "docs/architecture.md",
-      title: "Architecture",
-      text: "Vesper is a local-first personal assistant. Mortis is separate. The PC optimizer is a specialist adapter.",
-    },
-    {
-      sourceId: "mortis-approved",
-      path: "knowledge/mortis/boundary.md",
-      title: "Mortis boundary",
-      text: "Mortis remains an independent codebase. Vesper may use approved notes only when the Mortis workspace is active.",
-    },
-  ]);
+  const knowledge = new KnowledgeIndex(
+    config.knowledgeSources,
+    [
+      {
+        sourceId: "vesper-docs",
+        path: "docs/architecture.md",
+        title: "Architecture",
+        text: "Vesper is a local-first personal assistant. Mortis is separate. The PC optimizer is a specialist adapter.",
+      },
+      {
+        sourceId: "mortis-approved",
+        path: "knowledge/mortis/boundary.md",
+        title: "Mortis boundary",
+        text: "Mortis remains an independent codebase. Vesper may use approved notes only when the Mortis workspace is active.",
+      },
+    ],
+    { approvedRoots: config.approvedRoots },
+  );
   const workspaces = new WorkspaceManager(config);
   const events = new EventBus(log);
   const notifications = new NotificationHub(
@@ -265,13 +363,40 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   const hardware = createSimulatedHardware(config);
   const optimizer: OptimizerAdapter =
     config.optimizer.mode === "live" && config.optimizer.endpoint
-      ? createHttpOptimizerAdapter(config.optimizer.endpoint)
+      ? createHttpOptimizerAdapter(config.optimizer.endpoint, {
+          timeoutMs: config.optimizer.timeoutMs,
+          retries: config.optimizer.retries,
+          log,
+        })
       : createMockOptimizer(hardware);
-  const windows = createSimulatedWindowsHost(hardware);
-  createDisabledVoice();
+  if (config.optimizer.mode === "off") optimizer.setAvailable?.(false);
+  const windows = createSimulatedWindowsHost(hardware, {
+    nativeNotifications: config.windows.nativeNotifications,
+  });
+  const voice = config.voice.enabled
+    ? await createVoiceModule({
+        enabled: true,
+        stt: config.voice.stt,
+        tts: config.voice.tts,
+        pushToTalk: config.voice.pushToTalk,
+      })
+    : createDisabledVoice();
+  const background = createBackgroundRuntime({
+    events,
+    log,
+    startOnLogin: config.windows.startOnLogin,
+  });
   const gate = createPermissionGate(config.permissions, log);
   const confirmations = new Map<string, PendingConfirmation>();
   const tools = new ToolRegistry(gate, log, confirmations);
+  const models = createModelRouter({
+    config,
+    providers: options.providers,
+    xaiKey: options.xaiKey,
+  });
+  const history: ChatMessage[] = [];
+
+  const runtimeRef: { current: VesperRuntime | null } = { current: null };
   registerBuiltinTools({
     registry: tools,
     config,
@@ -283,13 +408,14 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     workspaces,
     events,
     notifications,
+    voice,
+    background,
+    models,
+    getDiagnostics: async () => {
+      if (!runtimeRef.current) throw new Error("Runtime not ready");
+      return runtimeRef.current.diagnostics();
+    },
   });
-  const models = createModelRouter({
-    config,
-    providers: options.providers,
-    xaiKey: options.xaiKey,
-  });
-  const history: ChatMessage[] = [];
   const agent = new Agent({
     log,
     memory,
@@ -305,7 +431,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     history,
     maxToolIterations: config.agent.maxToolIterations,
   });
-  return new VesperRuntime(config, {
+  const runtime = new VesperRuntime(config, {
     log,
     storage,
     memory,
@@ -320,7 +446,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     agent,
     confirmations,
     skipDiscovery: options.skipDiscovery ?? false,
+    background,
+    voice,
   });
+  runtimeRef.current = runtime;
+  return runtime;
 }
 
 function emptyProfile(config: VesperConfig): CapabilityProfile {

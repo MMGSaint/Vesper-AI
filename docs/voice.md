@@ -1,13 +1,14 @@
 # Voice
 
-Voice is modular and **not required**.
+Voice is optional. Vesper runs fully without a microphone or speakers.
 
-Abstractions in `src/vesper/voice/types.ts`:
+Planned local providers:
 
-- speech-to-text
-- text-to-speech
-- push-to-talk binding
+- STT: faster-whisper
+- TTS: Piper (default) or Kokoro
 
-Planned local backends: faster-whisper (STT), Piper or Kokoro (TTS).
+Interfaces live in `src/vesper/voice/`. A simulated provider exists for tests. Live capture/playback was **not** opened in this environment.
 
-**Status:** documented, disabled stub. Wake-word is explicitly later.
+Push-to-talk is a boolean preference (`voice.pushToTalk`). Keyboard shortcut binding on Windows is **IMPLEMENTED + HARDWARE DEPENDENT** / not applied here.
+
+Classification: **DOCUMENTED BUT NOT IMPLEMENTED** for physical audio; **IMPLEMENTED + TESTED** for the disabled/simulated module.
