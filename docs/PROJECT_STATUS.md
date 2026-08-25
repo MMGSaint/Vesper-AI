@@ -2,7 +2,15 @@
 
 Phase: **software-only completion boundary**
 
-Latest local validation: Vesper unit/integration suite passing; typecheck and production build run in this environment.
+Latest commit on `main`: `09517c6`
+
+Latest validation:
+
+- Vesper tests: **107/107 passing** (original 75 preserved)
+- Typecheck: passing
+- Security tests: 14/14 passing
+- Production build (preview console): passing
+- GitHub Actions CI: **passing** — [run 32825857958](https://github.com/MMGSaint/Vesper-personal-assistant-/actions/runs/32825857958)
 
 ## Completed (software-only)
 
@@ -22,7 +30,7 @@ Latest local validation: Vesper unit/integration suite passing; typecheck and pr
 - Benchmark harness that refuses fake numbers
 - Confined filesystem tools
 - Hostile security tests
-- GitHub Actions CI, Dependabot, agent docs
+- GitHub Actions CI, Dependabot (majors ignored), CodeQL, agent docs
 
 ## Active
 
