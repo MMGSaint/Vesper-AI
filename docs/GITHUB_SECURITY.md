@@ -13,14 +13,14 @@ The previous name `Vesper-personal-assistant-` redirects to `Vesper-AI`.
 | Control | Status |
 | --- | --- |
 | Repository visibility | public |
-| Dependabot alerts | enabled (204 from vulnerability-alerts API) |
+| Dependabot alerts | enabled; **0 open** (verified via Dependabot alerts API) |
 | Dependabot security updates | enabled |
 | Dependabot version updates | `.github/dependabot.yml` (npm + GitHub Actions, majors ignored) |
-| Secret scanning | enabled |
+| Secret scanning | enabled; **0 open alerts** |
 | Secret scanning push protection | enabled |
 | CodeQL default setup | disabled after it conflicted with advanced SARIF upload |
-| CodeQL advanced workflow | `.github/workflows/codeql.yml` (push, PR, weekly, workflow_dispatch, `security-extended`) |
-| CI | `.github/workflows/ci.yml` — typecheck, tests, security, hygiene, build |
+| CodeQL advanced workflow | `.github/workflows/codeql.yml` (push, PR, weekly, workflow_dispatch, `security-extended`); latest HEAD run passing, **0 open alerts** |
+| CI | `.github/workflows/ci.yml` — typecheck, tests, security, hygiene, build; latest HEAD run passing |
 | Nightly maintenance | `.github/workflows/nightly.yml` — tests + audit + report artifact; no deploy |
 | Branch ruleset `Protect main` | active — blocks deletion and force-push; repository admins may bypass so autonomous development remains possible |
 | Security policy | `SECURITY.md` |
@@ -45,6 +45,7 @@ Agents with admin access can push to `main` because the ruleset bypasses reposit
 2. Never disable push protection
 3. Never grant `write-all` to workflows
 4. Never execute untrusted PR code with write tokens
+5. Not invent features or refactor working architecture merely to remain active
 
 ## Hygiene
 

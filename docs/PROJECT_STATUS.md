@@ -2,18 +2,23 @@
 
 Phase: **software-only target complete; remaining work is hardware-dependent or unpublished APIs**
 
-Latest implementation commit on `main`: `2ab8ec4`
+Latest commit on `main`: `f983e25`
 
-Latest validation:
+Latest validation (re-verified this session, no code changes):
 
-- GitHub CI on `a37f2b9`: **passing** — [run 32831754097](https://github.com/MMGSaint/Vesper-AI/actions/runs/32831754097)
-- Client/host/security tests on this host: **20/20 passing** for the new surfaces
-- Prior full local suite after client+host work: **125/125 passing**
-- Typecheck / hygiene / `tsc --noEmit` passed on the implementation host
-- Last completed CodeQL success: [run 32830336076](https://github.com/MMGSaint/Vesper-AI/actions/runs/32830336076)
-- CodeQL open alerts: **0** (17 fixed)
+- Tests: **125/125 passing** on this host
+- Typecheck / hygiene / production check (`tsc --noEmit`): passing
+- Security tests: **15/15 passing**
+- GitHub CI on `f983e25`: **passing** — [run 32832036235](https://github.com/MMGSaint/Vesper-AI/actions/runs/32832036235)
+- CodeQL on `f983e25`: **passing** — [run 32832036290](https://github.com/MMGSaint/Vesper-AI/actions/runs/32832036290)
+- CodeQL open alerts: **0**
 - Secret scanning alerts: **0**
 - Dependabot alerts: **0**
+- Open pull requests: **0**
+- Open issues: **0**
+
+Latest implementation commit (client protocol + host CLI): `2ab8ec4`  
+Docs-only commits after that restored ownership, client-protocol honesty, and Windows packaging notes.
 
 ## Completed (software-only)
 
@@ -44,6 +49,8 @@ Latest validation:
 
 None that can be completed without the physical PC or the real optimizer API.
 
+No further software-only feature work will be invented to remain active. CI and security stay under watch; the next integration target is the physical Windows PC.
+
 ## Blocked / hardware-dependent
 
 - Live AMD telemetry, clocks, power, temperatures
@@ -71,5 +78,7 @@ None that can be completed without the physical PC or the real optimizer API.
 5. Re-run first-boot and the benchmark harness
 6. Point the optimizer adapter at the real API when it is published
 7. Pair a companion only after an authenticated, encrypted, scoped transport exists
+
+When hardware becomes available, resume from this file and **validate every hardware-dependent item rather than simulating success**.
 
 See `docs/status.md` for the feature classification table and `docs/GITHUB_SECURITY.md` for repository controls.
