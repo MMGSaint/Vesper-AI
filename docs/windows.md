@@ -1,9 +1,22 @@
-# Windows runtime
+# Windows integration
 
-Classification:
+Designed for:
 
-- Background runtime / tray menu logic: **IMPLEMENTED + TESTED** (logic)
-- Native tray / HKCU startup / toasts: **IMPLEMENTED + HARDWARE DEPENDENT**
+- background operation (`src/vesper/windows/runtime.ts`)
+- system tray menu model (`createTrayMenu` / `invokeTrayAction` / native tray adapter)
+- start-on-login preference (HKCU Run is not written from Linux)
+- toast notifications (adapter present; native toasts not sent here)
+- process inspection (CSV parser + optional `tasklist`)
+- approved application detection/control
+- installer / uninstaller / reset plans
+- structured logging
+- crash recovery and graceful shutdown hooks
+- cheap idle (event-driven scheduler, no aggressive polling)
+
+**Current status**
+
+- Background state machine, tray actions, and startup preference: **IMPLEMENTED + TESTED**
+- Native tray icon, Win32 toasts, real process spawn, HKCU startup: **IMPLEMENTED + HARDWARE DEPENDENT**
 - Host adapter used in tests: **MOCKED / SIMULATED**
 - Packaging scripts: **IMPLEMENTED + HARDWARE DEPENDENT**
 
