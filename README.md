@@ -1,9 +1,6 @@
 # Vesper
 
-Local-first personal AI assistant for a Windows PC.
-
-Vesper is **not** Mortis. Mortis remains a separate RP/world/project.  
-Vesper is **not** the PC optimizer. The optimizer is a specialist Vesper can call through an adapter.
+Local-first Morris-themed personal AI assistant for a Windows PC.
 
 ## What this is
 
