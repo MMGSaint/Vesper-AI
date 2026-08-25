@@ -26,6 +26,7 @@ describe("doctor", () => {
     });
     assert.equal(report.ok, true);
     assert.ok(report.checks.some((check) => check.id === "node" && check.ok));
+    assert.ok(report.checks.some((check) => check.id === "client-protocol" && check.ok));
     const text = formatDoctor(report);
     assert.equal(text.includes("AMD telemetry"), true);
     assert.equal(/passed on the target PC/i.test(text), false);

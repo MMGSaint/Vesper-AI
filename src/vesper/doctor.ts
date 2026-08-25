@@ -86,6 +86,12 @@ export async function runDoctor(input: {
       ok: !input.lastError,
       detail: input.lastError ? `Last recorded error: ${input.lastError}` : "No persisted last-error",
     },
+    {
+      id: "client-protocol",
+      ok: true,
+      detail:
+        "vesper.client v1 is in-process only. Remote OS control is UNAVAILABLE. No companion network listener is bound.",
+    },
   ];
   return {
     ok: checks.every((check) => check.ok || check.id === "last-error"),

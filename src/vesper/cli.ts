@@ -8,6 +8,7 @@ export type CliCommand =
   | { kind: "doctor"; skipDiscovery: boolean }
   | { kind: "config-check" }
   | { kind: "export-memory" }
+  | { kind: "client-hello"; skipDiscovery: boolean }
   | { kind: "unknown"; reason: string };
 
 const COMMANDS = new Set([
@@ -21,6 +22,7 @@ const COMMANDS = new Set([
   "--doctor",
   "--config-check",
   "--export-memory",
+  "--client-hello",
 ]);
 
 export function parseCli(argv: string[]): CliCommand {
@@ -50,6 +52,8 @@ export function parseCli(argv: string[]): CliCommand {
       return { kind: "config-check" };
     case "--export-memory":
       return { kind: "export-memory" };
+    case "--client-hello":
+      return { kind: "client-hello", skipDiscovery };
     default:
       return {
         kind: "unknown",
@@ -75,6 +79,7 @@ Commands:
   --doctor          Run local self-checks (no hardware claims)
   --config-check    Parse config and exit
   --export-memory   Write persistent memories to data/memory-export.json
+  --client-hello    Print the companion protocol hello (no listener, no token)
 
 Flags:
   --skip-discovery  Skip first-boot backend probes

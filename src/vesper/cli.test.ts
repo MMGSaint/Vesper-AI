@@ -16,6 +16,7 @@ describe("cli", () => {
     });
     assert.equal(parseCli(["--config-check"]).kind, "config-check");
     assert.equal(parseCli(["--export-memory"]).kind, "export-memory");
+    assert.equal(parseCli(["--client-hello"]).kind, "client-hello");
   });
 
   it("rejects unknown and extra arguments", () => {
