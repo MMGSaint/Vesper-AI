@@ -23,6 +23,8 @@ describe("production host", () => {
     });
     assert.equal(host.runtime.started, true);
     assert.equal(host.runtime.background.state(), "running");
+    assert.equal(host.gateway.hello().protocol, "vesper.client");
+    assert.equal(host.gateway.hello().version, 1);
     const healthPath = await host.writeHealth();
     const health = JSON.parse(await readFile(healthPath, "utf8")) as { version?: string };
     assert.equal(health.version, VESPER_VERSION);

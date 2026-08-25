@@ -17,9 +17,11 @@ import {
 import { runDoctor, formatDoctor, type DoctorReport } from "../doctor.ts";
 import type { VesperDirs } from "../types.ts";
 import { VESPER_VERSION } from "../version.ts";
+import { createClientGateway, type VesperClientGateway } from "../client/gateway.ts";
 
 export interface ProductionHost {
   runtime: VesperRuntime;
+  gateway: VesperClientGateway;
   dirs: VesperDirs;
   configSource: "file" | "default";
   writeHealth(): Promise<string>;
@@ -59,8 +61,10 @@ export async function createProductionHost(options?: {
     logger: log,
   });
   await runtime.start();
+  const gateway = createClientGateway(runtime);
   const host: ProductionHost = {
     runtime,
+    gateway,
     dirs,
     configSource: loaded.source,
     async writeHealth() {
@@ -74,6 +78,12 @@ export async function createProductionHost(options?: {
         models: runtime.models.status(),
         optimizer: diagnostics.optimizer.available,
         pendingConfirmations: runtime.confirmations.size,
+        client: {
+          protocol: gateway.hello().protocol,
+          version: gateway.hello().version,
+          transport: "in-process",
+          remoteOs: "UNAVAILABLE",
+        },
       };
       const path = healthFile(dirs);
       await writeFile(path, JSON.stringify(payload, null, 2), "utf8");
