@@ -21,9 +21,9 @@ The physical target PC was **off** during this implementation. Hardware snapshot
 
 ```bash
 npm test
+npm run typecheck
+npm run dev
 ```
-
-Requires Node 22+. Tests do not need a local LLM.
 
 ## Docs
 
