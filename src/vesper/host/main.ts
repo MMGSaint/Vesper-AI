@@ -95,6 +95,22 @@ async function main() {
     await shutdown(0);
     return;
   }
+  if (command.kind === "client-hello") {
+    console.log(
+      JSON.stringify(
+        {
+          ...host.gateway.hello(),
+          transport: "in-process",
+          forbidden: host.gateway.forbiddenPowers(),
+          note: "No network listener. Tokens are issued by the host, not by this command.",
+        },
+        null,
+        2,
+      ),
+    );
+    await shutdown(0);
+    return;
+  }
 
   console.log(`Vesper host ${VESPER_VERSION} started (${runtime.instanceId}). Type a message, /diagnostics, /status, /doctor, /pause, /resume, or /exit.`);
 
