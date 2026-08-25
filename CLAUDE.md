@@ -83,8 +83,10 @@ Workspace `mortis` exists. Knowledge source `mortis-approved` is opt-in and work
 ```bash
 npm test                 # includes src/vesper/**/*.test.ts
 npm run typecheck
-npm run dev              # web console
+npm run security         # standalone repo; in this workspace run the security tests directly
+npm run dev              # optional web console
 node --experimental-strip-types src/vesper/host/main.ts
+
 ```
 
 Core tests do not require a local LLM.

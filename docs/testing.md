@@ -3,10 +3,11 @@
 ```bash
 npm test
 npm run typecheck
+npm run security
 ```
 
-Core tests: `src/vesper/**/*.test.ts` (Node test runner, TypeScript stripped).
+Core tests run with Node 22 `--experimental-strip-types` and do not require a local LLM.
 
-They cover agent intents, permissions, memory, knowledge, model routing, optimizer mock + HTTP failure, recovery, diagnostics, first-boot, backends, Windows runtime, voice stubs, security boundaries, and the production host.
+Regression lock: do not remove or weaken existing tests to make new work easier.
 
-A local LLM is not required.
+Coverage includes config, permissions, tools, memory, workspaces, knowledge/RAG, agent, optimizer HTTP, hardware simulator, recovery, first-boot, diagnostics, Windows runtime/packaging contracts, voice session, scheduler, filesystem confinement, hostile security, gaming/OBS/VRChat scenarios, and the benchmark refusal path.

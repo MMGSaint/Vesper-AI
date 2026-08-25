@@ -111,7 +111,7 @@ export function createSimulatedHardware(config: VesperConfig) {
       "gpu-bound": ["explorer.exe", "steam.exe", "SquadGame.exe", "obs64.exe"],
       "cpu-bound": ["explorer.exe", "Code.exe", "chrome.exe"],
       vrchat: ["explorer.exe", "VRChat.exe", "Discord.exe", "steam.exe"],
-      thermal: ["explorer.exe", "SquadGame.exe", "obs64.exe"],
+      thermal: ["explorer.exe", "SquadGame.exe", "obs64.exe", "WhereWindsMeet.exe"],
     };
     const active = new Set(runningByScenario[next]);
     for (const proc of processes) proc.running = active.has(proc.name);
@@ -125,6 +125,7 @@ function defaultProcesses(): SimulatedProcess[] {
     { pid: 330, name: "obs64.exe", title: "OBS Studio", running: false, cpuPct: 12, memoryMB: 900, approved: true },
     { pid: 440, name: "steam.exe", title: "Steam", running: false, cpuPct: 3, memoryMB: 380, approved: true },
     { pid: 550, name: "SquadGame.exe", title: "Squad", running: false, cpuPct: 40, memoryMB: 6200, approved: true },
+    { pid: 560, name: "WhereWindsMeet.exe", title: "Where Winds Meet", running: false, cpuPct: 38, memoryMB: 5800, approved: true },
     { pid: 660, name: "VRChat.exe", title: "VRChat", running: false, cpuPct: 35, memoryMB: 5400, approved: true },
     { pid: 770, name: "Code.exe", title: "Visual Studio Code", running: true, cpuPct: 6, memoryMB: 1100, approved: true },
     { pid: 880, name: "chrome.exe", title: "Google Chrome", running: false, cpuPct: 8, memoryMB: 1600, approved: true },

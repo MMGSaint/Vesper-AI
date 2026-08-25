@@ -47,6 +47,27 @@ export function inspectWorkload(
       : "The optimizer is mocked or unavailable.",
   ];
 
+  const snapshot = hardware.snapshot();
+  const conclusions: WorkloadContext["conclusions"] = [
+    {
+      statement: vrchat ? "VRChat is running." : "VRChat is not running.",
+      kind: "observed",
+      evidence: vrchat ? "Process list includes VRChat.exe." : "VRChat.exe is absent.",
+    },
+    {
+      statement: obs ? "OBS is running." : "OBS is not running.",
+      kind: "observed",
+      evidence: obs ? "Process list includes obs64.exe." : "OBS is absent.",
+    },
+  ];
+  if (snapshot.gpu && snapshot.gpu.utilizationPct >= 85) {
+    conclusions.push({
+      statement: "The workload is GPU-heavy.",
+      kind: snapshot.mode === "simulated" ? "inferred" : "observed",
+      evidence: `GPU ${snapshot.gpu.utilizationPct}% (${snapshot.mode}).`,
+    });
+  }
+
   return {
     vrchatRunning: vrchat,
     obsRunning: obs,
@@ -56,6 +77,7 @@ export function inspectWorkload(
     games,
     optimizerActive: Boolean(options?.optimizerActive),
     notes,
+    conclusions,
   };
 }
 

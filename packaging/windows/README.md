@@ -5,7 +5,7 @@ Target sequence on the real PC:
 1. Copy this repository (or a release folder) onto the machine.
 2. Install Node.js 22 LTS if it is not already present.
 3. Run `packaging/windows/install.ps1`.
-4. Launch Vesper from the Start Menu shortcut or `vesper-host.cmd`.
+4. Launch Vesper from `vesper-host.cmd`.
 5. First-boot discovery writes `%LOCALAPPDATA%\Vesper\logs\first-boot.txt`.
 
 This environment is Linux. The scripts are **IMPLEMENTED + HARDWARE DEPENDENT**: they were not executed on Windows.
@@ -35,5 +35,6 @@ It does **not** install Ollama, llama.cpp, faster-whisper, or Piper. Those stay 
 
 - `uninstall.ps1` removes the startup entry and launcher
 - `uninstall.ps1 -PurgeData` also deletes `%LOCALAPPDATA%\Vesper`
+- `reset.ps1` clears local state so first-boot runs again (keeps a `.corrupt` backup of memory if present)
 
 Normal runtime does not need GitHub, a browser, or a developer terminal. The web console is an optional control surface.

@@ -4,14 +4,20 @@
   "type": "module",
   "description": "Local-first personal AI assistant for Windows. Not Mortis. Not the PC optimizer.",
   "scripts": {
-    "test": "node --experimental-strip-types --test src/vesper/**/*.test.ts",
+    "test": "node scripts/run-vesper-tests.mjs",
     "start": "node --experimental-strip-types src/vesper/host/main.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "security": "node --experimental-strip-types --test src/vesper/security.test.ts src/vesper/security-hostile.test.ts",
+    "build": "tsc --noEmit"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
     "zod": "^4.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.16.5",
+    "typescript": "^5.7.0"
   }
 }

@@ -151,6 +151,34 @@ export async function runFirstBootAutomation(
     ),
   );
 
+  steps.push(
+    step(
+      "runtime-deps",
+      "Inspect runtime dependencies",
+      true,
+      `Node ${process.versions.node}. TypeScript host can run without a local LLM.`,
+      "implemented_tested",
+    ),
+  );
+  steps.push(
+    step(
+      "applications",
+      "Inspect approved application catalog",
+      true,
+      `${config.approvedApps.length} approved apps. Live detection waits for the Windows host.`,
+      "implemented_tested",
+    ),
+  );
+  steps.push(
+    step(
+      "benchmark",
+      "Model benchmark harness",
+      true,
+      "Harness is installed. It refuses to invent TTFT/throughput unless a local backend actually generates tokens. Not run automatically because this host has no proven local model.",
+      "documented_not_implemented",
+    ),
+  );
+
   const preferredBackend =
     profile.backends.find((backend) => backend.id === "ollama" && backend.available)?.id ??
     profile.backends.find((backend) => backend.id === "llamacpp" && backend.available)?.id ??

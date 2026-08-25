@@ -20,7 +20,10 @@ import { createSimulatedWindowsHost } from "./windows/host.ts";
 import { createBackgroundRuntime, createTrayMenu, type BackgroundRuntime } from "./windows/runtime.ts";
 import { createDisabledVoice, type VoiceModule } from "./voice/types.ts";
 import { createVoiceModule } from "./voice/providers.ts";
+import { createVoiceSession, type VoiceSession } from "./voice/session.ts";
 import { createModelRouter, type ModelRouter } from "./models/router.ts";
+import { createBenchmarkHarness, type BenchmarkHarness } from "./models/benchmark.ts";
+import { createIdleScheduler, type IdleScheduler } from "./scheduler.ts";
 import { Agent } from "./agent.ts";
 import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
 import { buildDiagnostics } from "./diagnostics.ts";
@@ -63,6 +66,9 @@ export class VesperRuntime {
   readonly instanceId = createId("runtime");
   readonly background: BackgroundRuntime;
   readonly voice: VoiceModule;
+  readonly voiceSession: VoiceSession;
+  readonly scheduler: IdleScheduler;
+  readonly benchmark: BenchmarkHarness;
   capability: CapabilityProfile | null = null;
   firstBootReport: FirstBootReport | null = null;
   started = false;
@@ -87,6 +93,9 @@ export class VesperRuntime {
       skipDiscovery: boolean;
       background: BackgroundRuntime;
       voice: VoiceModule;
+      voiceSession: VoiceSession;
+      scheduler: IdleScheduler;
+      benchmark: BenchmarkHarness;
     },
   ) {
     this.config = config;
@@ -106,6 +115,9 @@ export class VesperRuntime {
     this.skipDiscovery = parts.skipDiscovery;
     this.background = parts.background;
     this.voice = parts.voice;
+    this.voiceSession = parts.voiceSession;
+    this.scheduler = parts.scheduler;
+    this.benchmark = parts.benchmark;
   }
 
   async start() {
@@ -114,6 +126,9 @@ export class VesperRuntime {
     await this.seedMemories();
     this.started = true;
     await this.background.start();
+    if (this.config.agent.idleEventDriven) {
+      this.scheduler.start();
+    }
     this.events.emit({
       type: "lifecycle.start",
       title: "Vesper is awake",
@@ -149,6 +164,7 @@ export class VesperRuntime {
   async stop() {
     this.started = false;
     this.memory.clearSession();
+    this.scheduler.stop();
     await this.background.stop();
     this.log.info("lifecycle", "Vesper stopped");
   }
@@ -255,6 +271,7 @@ export class VesperRuntime {
       voice: this.voice.status(),
       context: inspectWorkload(this.hardware),
       startup,
+      scheduler: this.scheduler.status(),
       firstBoot: this.firstBootReport
         ? {
             finishedAt: this.firstBootReport.finishedAt,
@@ -316,7 +333,7 @@ export class VesperRuntime {
       },
     ];
     for (const seed of seeds) {
-      await this.memory.remember({ ...seed, source: "seed" });
+      await this.memory.remember({ ...seed, source: "seed", provenance: { origin: "seed", kind: "stated" } });
     }
   }
 }
@@ -381,10 +398,34 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
         pushToTalk: config.voice.pushToTalk,
       })
     : createDisabledVoice();
+  const voiceSession = createVoiceSession(voice);
   const background = createBackgroundRuntime({
     events,
     log,
     startOnLogin: config.windows.startOnLogin,
+  });
+  const scheduler = createIdleScheduler({
+    events,
+    log,
+    intervalMs: config.agent.idleIntervalMs,
+    state: () => background.state(),
+    isGamingHeavy: () => {
+      const snap = hardware.snapshot();
+      const scenario = hardware.getScenario();
+      return (
+        scenario === "gaming" ||
+        scenario === "vrchat" ||
+        scenario === "gpu-bound" ||
+        (snap.gpu?.utilizationPct ?? 0) >= 85
+      );
+    },
+    onTick: async () => {
+      events.emit({
+        type: "lifecycle.idle_tick",
+        title: "Idle maintenance tick",
+        severity: "info",
+      });
+    },
   });
   const gate = createPermissionGate(config.permissions, log);
   const confirmations = new Map<string, PendingConfirmation>();
@@ -394,6 +435,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     providers: options.providers,
     xaiKey: options.xaiKey,
   });
+  const benchmark = createBenchmarkHarness({ providers: models.providers() });
   const history: ChatMessage[] = [];
 
   const runtimeRef: { current: VesperRuntime | null } = { current: null };
@@ -409,8 +451,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     events,
     notifications,
     voice,
+    voiceSession,
     background,
     models,
+    scheduler,
+    benchmark,
     getDiagnostics: async () => {
       if (!runtimeRef.current) throw new Error("Runtime not ready");
       return runtimeRef.current.diagnostics();
@@ -448,6 +493,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     skipDiscovery: options.skipDiscovery ?? false,
     background,
     voice,
+    voiceSession,
+    scheduler,
+    benchmark,
   });
   runtimeRef.current = runtime;
   return runtime;

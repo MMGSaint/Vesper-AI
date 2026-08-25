@@ -1,10 +1,12 @@
 import type { AuditEntry, JsonObject, JsonValue } from "./types.ts";
+import { looksLikeSecretValue } from "./security.ts";
 
 const SECRET_KEY =
   /(pass(word)?|secret|token|api[_-]?key|authorization|credential|cookie)/i;
 
 function redactValue(key: string, value: JsonValue): JsonValue {
   if (SECRET_KEY.test(key)) return "[redacted]";
+  if (typeof value === "string" && looksLikeSecretValue(value)) return "[redacted]";
   if (Array.isArray(value)) return value.map((item) => redactValue(key, item));
   if (value && typeof value === "object") {
     return redactObject(value as JsonObject) ?? {};
@@ -31,12 +33,18 @@ export function createLogger(options?: { sink?: (entry: AuditEntry) => void; now
     message: string,
     data?: JsonObject,
   ): AuditEntry {
+    const safeMessage = looksLikeSecretValue(message)
+      ? message.replace(
+          /\b(sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|xai-[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9._\-]+)\b/gi,
+          "[redacted]",
+        )
+      : message;
     const entry: AuditEntry = {
       id: `log_${entries.length + 1}_${now().getTime()}`,
       at: now().toISOString(),
       category,
       level,
-      message,
+      message: safeMessage,
       data: redactObject(data),
     };
     entries.push(entry);

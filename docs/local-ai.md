@@ -21,6 +21,10 @@ ROCm is never assumed faster than Vulkan.
 
 Discovery lists `/v1/models` with short timeouts. Completions abort after 60s so a hung backend cannot freeze the assistant.
 
+## Benchmark harness
+
+`src/vesper/models/benchmark.ts` times a real completion when a local backend is up. If none is reachable, it **refuses to invent** TTFT or tokens/sec.
+
 ## Candidate models (unbenchmarked)
 
 These are **starting candidates** for 20 GB VRAM + 96 GB RAM, not proven defaults:

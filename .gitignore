@@ -1,10 +1,11 @@
 node_modules
 dist
+.vercel
 data/vesper
 *.log
 *.tmp
+.DS_Store
+coverage
 .env
 .env.*
 *.corrupt
-coverage
-.DS_Store

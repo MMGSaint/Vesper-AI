@@ -12,6 +12,7 @@ export interface ModelRouter {
   };
   setActive: (id: string) => void;
   probeAll: () => Promise<void>;
+  providers: () => AnyProvider[];
 }
 
 const CODING = /\b(code|refactor|typescript|python|bug|compile|function|class|diff)\b/i;
@@ -128,6 +129,9 @@ export function createModelRouter(input: {
     },
     async probeAll() {
       await Promise.all(providers.map((provider) => provider.probe?.()));
+    },
+    providers() {
+      return providers.slice();
     },
     async complete(request: CompletionRequest): Promise<CompletionResult> {
       const selected = await pick(request.role);

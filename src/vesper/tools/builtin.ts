@@ -6,13 +6,20 @@ import type { MemoryStore } from "../memory/store.ts";
 import type { NotificationHub } from "../notifications.ts";
 import type { OptimizerAdapter } from "../specialists/optimizer.ts";
 import { explainPerformance, inspectWorkload } from "../specialists/context.ts";
+import { gpuConsumers, groundedConclusions } from "../specialists/gaming.ts";
 import type { ToolRegistry } from "./registry.ts";
 import type { DiagnosticReport, JsonObject, MemoryCategory, ToolSpec } from "../types.ts";
 import type { WindowsHost } from "../windows/host.ts";
 import type { WorkspaceManager } from "../workspaces.ts";
 import type { VoiceModule } from "../voice/types.ts";
+import type { VoiceSession } from "../voice/session.ts";
 import type { BackgroundRuntime } from "../windows/runtime.ts";
 import type { ModelRouter } from "../models/router.ts";
+import type { IdleScheduler } from "../scheduler.ts";
+import type { BenchmarkHarness } from "../models/benchmark.ts";
+import { listApproved, readApproved, writeApproved } from "./filesystem.ts";
+import { mcpBridgeStatus } from "../integrations/mcp.ts";
+import { detectApprovedApps } from "../windows/apps.ts";
 
 function str(args: JsonObject, key: string): string {
   const value = args[key];
@@ -46,8 +53,11 @@ export function registerBuiltinTools(input: {
   events: EventBus;
   notifications: NotificationHub;
   voice?: VoiceModule;
+  voiceSession?: VoiceSession;
   background?: BackgroundRuntime;
   models?: ModelRouter;
+  scheduler?: IdleScheduler;
+  benchmark?: BenchmarkHarness;
   getDiagnostics?: () => Promise<DiagnosticReport>;
 }) {
   const {
@@ -62,8 +72,11 @@ export function registerBuiltinTools(input: {
     events,
     notifications,
     voice,
+    voiceSession,
     background,
     models,
+    scheduler,
+    benchmark,
     getDiagnostics,
   } = input;
 
@@ -89,6 +102,27 @@ export function registerBuiltinTools(input: {
         epistemic: "checked",
         summary: `${list.length} running processes.`,
         data: list as unknown as JsonObject,
+      };
+    },
+  );
+
+  registry.register(
+    spec("app_detect", "Detect approved applications on the host adapter.", "read", {}),
+    async () => {
+      const detected = detectApprovedApps(config.approvedApps, windows.listProcesses());
+      const running = detected.filter((item) => item.running).map((item) => item.app.name);
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: running.length
+          ? `Approved apps running: ${running.join(", ")}.`
+          : "No approved applications are currently running.",
+        data: detected.map((item) => ({
+          id: item.app.id,
+          running: item.running,
+          launchable: item.launchable,
+          detail: item.detail,
+        })) as unknown as JsonObject,
       };
     },
   );
@@ -210,6 +244,7 @@ export function registerBuiltinTools(input: {
         value: str(args, "value"),
         workspaceId: context.workspaceId,
         source: "agent",
+        provenance: { origin: "user-request", kind: "stated" },
       });
       return { ok: true, epistemic: "changed", summary: `Remembered ${entry.key}.`, data: { id: entry.id, key: entry.key, category: entry.category } };
     },
@@ -356,6 +391,39 @@ export function registerBuiltinTools(input: {
   );
 
   registry.register(
+    spec(
+      "fs_list",
+      "List files inside an approved root.",
+      "read",
+      { path: { type: "string" } },
+      ["path"],
+    ),
+    async (args) => listApproved(config.approvedRoots, str(args, "path")),
+  );
+
+  registry.register(
+    spec(
+      "fs_read",
+      "Read a text file inside an approved root.",
+      "read",
+      { path: { type: "string" } },
+      ["path"],
+    ),
+    async (args) => readApproved(config.approvedRoots, str(args, "path")),
+  );
+
+  registry.register(
+    spec(
+      "fs_write",
+      "Write a text file inside an approved root.",
+      "confirm",
+      { path: { type: "string" }, content: { type: "string" } },
+      ["path", "content"],
+    ),
+    async (args, context) => writeApproved(config.approvedRoots, str(args, "path"), str(args, "content"), context.dryRun),
+  );
+
+  registry.register(
     spec("optimizer_status", "Query the PC optimizer adapter.", "read", {}),
     async () => {
       const status = await optimizer.getStatus();
@@ -419,11 +487,13 @@ export function registerBuiltinTools(input: {
     spec("context_status", "Read VRChat, OBS, and game context from the host adapter.", "read", {}),
     async () => {
       const context = inspectWorkload(hardware);
+      const conclusions = groundedConclusions(hardware);
+      const gpu = gpuConsumers(hardware);
       return {
         ok: true,
         epistemic: "checked",
         summary: context.notes.join(" "),
-        data: context as unknown as JsonObject,
+        data: { ...context, conclusions, gpu } as unknown as JsonObject,
       };
     },
   );
@@ -444,9 +514,29 @@ export function registerBuiltinTools(input: {
   );
 
   registry.register(
+    spec("benchmark_run", "Run the local model benchmark harness. Refuses to invent numbers.", "safe", {}),
+    async () => {
+      if (!benchmark) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary: "Benchmark harness is not attached.",
+        };
+      }
+      const report = await benchmark.run();
+      return {
+        ok: true,
+        epistemic: report.ran ? "checked" : "could_not_access",
+        summary: report.reason,
+        data: report as unknown as JsonObject,
+      };
+    },
+  );
+
+  registry.register(
     spec("voice_status", "Read optional voice module status.", "read", {}),
     async () => {
-      const status = voice?.status() ?? {
+      const status = voiceSession?.diagnostics() ?? voice?.status() ?? {
         enabled: false,
         stt: "none",
         tts: "none",
@@ -457,7 +547,7 @@ export function registerBuiltinTools(input: {
       return {
         ok: true,
         epistemic: "checked",
-        summary: status.detail,
+        summary: "detail" in status ? status.detail : "Voice status.",
         data: status as unknown as JsonObject,
       };
     },
@@ -479,6 +569,42 @@ export function registerBuiltinTools(input: {
         epistemic: "checked",
         summary: report.reportText,
         data: report as unknown as JsonObject,
+      };
+    },
+  );
+
+  registry.register(
+    spec("scheduler_status", "Read idle scheduler status.", "read", {}),
+    async () => {
+      const status = scheduler?.status() ?? {
+        enabled: false,
+        paused: false,
+        lastTickAt: null,
+        ticks: 0,
+        skippedForGaming: 0,
+        idleIntervalMs: 0,
+        gamingThrottle: false,
+      };
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: status.enabled
+          ? `Idle scheduler on; interval ${status.idleIntervalMs}ms; skipped-for-gaming ${status.skippedForGaming}.`
+          : "Idle scheduler is not running.",
+        data: status as unknown as JsonObject,
+      };
+    },
+  );
+
+  registry.register(
+    spec("mcp_status", "Read optional MCP bridge status. MCP is never required at runtime.", "read", {}),
+    async () => {
+      const status = mcpBridgeStatus({ enabled: false });
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: status.detail,
+        data: status as unknown as JsonObject,
       };
     },
   );

@@ -48,7 +48,10 @@ interface DirectIntent {
     | "ready"
     | "scenario"
     | "confirm"
-    | "diagnostics";
+    | "diagnostics"
+    | "gpu"
+    | "thermal"
+    | "obs";
   confidence: number;
   slots: Record<string, string>;
 }
@@ -423,6 +426,61 @@ export class Agent {
           at,
         );
       }
+      case "gpu": {
+        await invoke("system_info", {});
+        const context = await invoke("context_status", {});
+        const analysis = await invoke("optimizer_analyze", {});
+        const snapshot = this.deps.hardware.snapshot();
+        const gpu = snapshot.gpu;
+        const reply = [
+          snapshot.mode === "simulated"
+            ? "I checked the simulated snapshot — this is not live AMD telemetry."
+            : "I checked the current hardware snapshot.",
+          gpu
+            ? `GPU ${gpu.name} is at ${gpu.utilizationPct}% (${gpu.vramUsedGB}/${gpu.vramGB} GB VRAM).`
+            : "No GPU snapshot is available.",
+          context.result?.summary ?? "",
+          analysis.result?.summary ?? "",
+          "Live GPU-time attribution per process was not measured.",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        return this.turn(userText, reply, ["checked"], toolCalls, [], at);
+      }
+      case "thermal": {
+        await invoke("system_info", {});
+        const snapshot = this.deps.hardware.snapshot();
+        const reply = [
+          snapshot.mode === "simulated"
+            ? "Fan and thermal numbers here are simulated. Live AMD telemetry was not read."
+            : "I checked the current thermal snapshot.",
+          `CPU ${snapshot.cpu.tempC ?? "n/a"}°C at ${snapshot.cpu.utilizationPct}%.`,
+          snapshot.gpu
+            ? `GPU ${snapshot.gpu.tempC ?? "n/a"}°C at ${snapshot.gpu.utilizationPct}%.`
+            : "GPU thermal data unavailable.",
+          snapshot.cpu.tempC != null && snapshot.cpu.tempC >= 85
+            ? "The snapshot shows elevated CPU temperature."
+            : "The snapshot does not show a thermal alarm.",
+        ].join(" ");
+        return this.turn(userText, reply, ["checked"], toolCalls, [], at);
+      }
+      case "obs": {
+        const context = await invoke("context_status", {});
+        const analysis = await invoke("optimizer_analyze", {});
+        const workload = inspectWorkload(this.deps.hardware);
+        const reply = [
+          workload.obsRunning
+            ? "OBS is running. I observed the process; I did not read OBS WebSocket capture state unless the simulator scenario is streaming."
+            : "OBS is not running on the host adapter, so it is not affecting this snapshot.",
+          workload.obsRunning && analysis.result?.summary
+            ? analysis.result.summary
+            : "",
+          context.result?.summary ?? "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        return this.turn(userText, reply, ["checked"], toolCalls, [], at);
+      }
       default:
         return this.groundedFallback(userText);
     }
@@ -510,6 +568,18 @@ export function classifyIntent(text: string): DirectIntent | null {
 
   if (/what('?s| is) happening|status|how('?s| is) (the )?(pc|system|box)/i.test(lower)) {
     return { kind: "status", confidence: 0.93, slots: {} };
+  }
+
+  if (/what('?s| is) using (my )?gpu|gpu (usage|bound)|what is using the gpu/i.test(lower)) {
+    return { kind: "gpu", confidence: 0.94, slots: {} };
+  }
+
+  if (/why are (my )?fans|fans ramping|overheat|thermal|why is it hot/i.test(lower)) {
+    return { kind: "thermal", confidence: 0.92, slots: {} };
+  }
+
+  if (/is obs affecting|obs affecting|is obs (the )?problem/i.test(lower)) {
+    return { kind: "obs", confidence: 0.93, slots: {} };
   }
 
   if (/optimize( this)?|request optimization|rollback (that|optimization)/i.test(lower)) {

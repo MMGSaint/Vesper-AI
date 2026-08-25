@@ -172,8 +172,9 @@ export const vesperConfigSchema = z.object({
     .object({
       maxToolIterations: z.number().default(8),
       idleEventDriven: z.boolean().default(true),
+      idleIntervalMs: z.number().default(30_000),
     })
-    .default({ maxToolIterations: 8, idleEventDriven: true }),
+    .default({ maxToolIterations: 8, idleEventDriven: true, idleIntervalMs: 30_000 }),
 });
 
 export type VesperConfig = z.infer<typeof vesperConfigSchema>;
@@ -223,7 +224,13 @@ export const DEFAULT_APPS = [
   { id: "discord", name: "Discord", executable: "Discord.exe", aliases: ["discord"] },
   { id: "obs", name: "OBS Studio", executable: "obs64.exe", aliases: ["obs", "obs studio"] },
   { id: "steam", name: "Steam", executable: "steam.exe", aliases: ["steam"] },
-  { id: "squad", name: "Squad", executable: "SquadGame.exe", aliases: ["squad"] },
+  {
+    id: "wwm",
+    name: "Where Winds Meet",
+    executable: "WhereWindsMeet.exe",
+    aliases: ["where winds meet", "wwm"],
+    workspaces: ["gaming"],
+  },
   {
     id: "vrchat",
     name: "VRChat",

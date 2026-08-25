@@ -57,6 +57,7 @@ export class MemoryStore {
     workspaceId?: string;
     source?: MemoryEntry["source"];
     tags?: string[];
+    provenance?: MemoryEntry["provenance"];
   }): Promise<MemoryEntry> {
     return this.runExclusive(async () => {
       const now = nowIso();
@@ -72,6 +73,7 @@ export class MemoryStore {
         existing.value = input.value;
         existing.updatedAt = now;
         if (input.tags) existing.tags = input.tags;
+        if (input.provenance) existing.provenance = input.provenance;
         if (!session) await this.savePersistent(pool);
         return existing;
       }
@@ -85,6 +87,10 @@ export class MemoryStore {
         updatedAt: now,
         source: input.source ?? "user",
         tags: input.tags,
+        provenance: input.provenance ?? {
+          origin: input.source ?? "user",
+          kind: input.source === "agent" ? "inferred" : "stated",
+        },
       };
       pool.push(entry);
       if (!session) await this.savePersistent(pool);

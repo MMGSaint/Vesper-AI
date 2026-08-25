@@ -7,6 +7,7 @@ Persistent local memory with:
 - FileStorage atomic writes + corrupt-JSON recovery
 - serialized concurrent writes
 - seed memories on first empty store
+- explicit provenance (`stated` / `observed` / `inferred`)
 
 Secrets are not written to the audit log. Memory values themselves stay local.
 

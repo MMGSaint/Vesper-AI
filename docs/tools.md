@@ -1,18 +1,12 @@
 # Tools
 
-Every host or optimizer effect goes through the tool registry.
+Built-in tools (all gated):
 
-Built-in groups:
+| Tool | Level |
+| --- | --- |
+| system_info, process_list, app_detect, context_status, backend_status, knowledge_search, memory_search, optimizer_status, optimizer_analyze, voice_status, diagnostics_report, scheduler_status, mcp_status, fs_list, fs_read | read |
+| app_launch, notify, memory_remember, workspace_switch, knowledge_reindex, set_scenario, benchmark_run | safe |
+| app_close, memory_forget, knowledge_register, knowledge_remove, optimizer_request, fs_write, runtime_pause, runtime_resume | confirm |
+| disk_wipe, credential_extract | never |
 
-- system / process / approved app launch & close
-- memory remember / search / forget
-- workspace switch
-- knowledge search / reindex / register / remove
-- optimizer status / analyze / request
-- notifications
-- diagnostics, backend status, voice status, workload context
-- background pause / resume (confirmation-gated from the model)
-- simulator scenario (development)
-- never: `disk_wipe`, `credential_extract`
-
-Unknown apps cannot be launched. Knowledge roots cannot escape approved directories. High-risk names stay `never` even if confirmation is supplied.
+The model cannot register a tool that skips this table. Unknown tools are denied.

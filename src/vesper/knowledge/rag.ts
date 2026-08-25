@@ -2,7 +2,12 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
 import type { KnowledgeHit, KnowledgeSource } from "../types.ts";
 import { containsTraversal, isDangerousRoot, isPathInside } from "../security.ts";
-import { createUnavailableEmbeddings, type EmbeddingProvider } from "./embeddings.ts";
+import { chunkText } from "./chunk.ts";
+import {
+  cosineSimilarity,
+  createHashEmbeddings,
+  type EmbeddingProvider,
+} from "./embeddings.ts";
 
 const TEXT_EXT = new Set([".md", ".txt", ".json", ".ts", ".js", ".cs", ".yml", ".yaml"]);
 
@@ -11,6 +16,7 @@ export interface KnowledgeDocument {
   path: string;
   title: string;
   text: string;
+  offset?: number;
 }
 
 function tokenize(text: string): string[] {
@@ -68,6 +74,8 @@ export class KnowledgeIndex {
   private readonly seed: KnowledgeDocument[];
   private readonly approvedRoots: string[];
   readonly embeddings: EmbeddingProvider;
+  private vectors: number[][] | null = null;
+  private lastError: string | null = null;
 
   constructor(
     sources: KnowledgeSource[],
@@ -78,11 +86,15 @@ export class KnowledgeIndex {
     this.seed = seed;
     this.documents = [...seed];
     this.approvedRoots = (options?.approvedRoots ?? []).map((root) => resolve(root));
-    this.embeddings = options?.embeddings ?? createUnavailableEmbeddings();
+    this.embeddings = options?.embeddings ?? createHashEmbeddings();
   }
 
   listSources(): KnowledgeSource[] {
     return this.sources.map((source) => ({ ...source }));
+  }
+
+  lastIndexError(): string | null {
+    return this.lastError;
   }
 
   registerSource(source: KnowledgeSource): { ok: boolean; summary: string } {
@@ -110,16 +122,35 @@ export class KnowledgeIndex {
       return { ok: false, summary: `No knowledge source '${id}'.` };
     }
     this.sources = next;
-    this.documents = this.documents.filter((doc) => doc.sourceId !== id || this.seed.includes(doc));
     this.documents = [
-      ...this.seed.filter((doc) => doc.sourceId === id || this.sources.some((source) => source.id === doc.sourceId)),
-      ...this.documents.filter((doc) => this.sources.some((source) => source.id === doc.sourceId)),
+      ...this.seed.filter((doc) => this.sources.some((source) => source.id === doc.sourceId)),
+      ...this.documents.filter(
+        (doc) => this.sources.some((source) => source.id === doc.sourceId) && !this.seed.includes(doc),
+      ),
     ];
+    this.vectors = null;
     return { ok: true, summary: `Removed knowledge source '${id}'.` };
   }
 
   async reindex(): Promise<number> {
-    const docs: KnowledgeDocument[] = [...this.seed];
+    const docs: KnowledgeDocument[] = [];
+    for (const seed of this.seed) {
+      const chunks = chunkText(seed.text);
+      if (chunks.length <= 1) {
+        docs.push({ ...seed, offset: 0 });
+      } else {
+        for (const chunk of chunks) {
+          docs.push({
+            sourceId: seed.sourceId,
+            path: seed.path,
+            title: seed.title,
+            text: chunk.text,
+            offset: chunk.offset,
+          });
+        }
+      }
+    }
+    this.lastError = null;
     for (const source of this.sources.filter((item) => item.enabled)) {
       for (const root of source.roots) {
         const files: string[] = [];
@@ -127,19 +158,34 @@ export class KnowledgeIndex {
         for (const file of files) {
           try {
             const text = await readFile(file, "utf8");
-            docs.push({
-              sourceId: source.id,
-              path: relative(root, file) || file,
-              title: file.split(/[\\/]/).at(-1) ?? file,
-              text,
-            });
-          } catch {
-            // Skip unreadable files rather than failing the assistant.
+            const rel = relative(root, file) || file;
+            const title = file.split(/[\\/]/).at(-1) ?? file;
+            const chunks = chunkText(text);
+            for (const chunk of chunks) {
+              docs.push({
+                sourceId: source.id,
+                path: rel,
+                title,
+                text: chunk.text,
+                offset: chunk.offset,
+              });
+            }
+          } catch (error) {
+            this.lastError = error instanceof Error ? error.message : String(error);
           }
         }
       }
     }
     this.documents = docs;
+    this.vectors = null;
+    if (this.embeddings.available() && docs.length) {
+      try {
+        this.vectors = await this.embeddings.embed(docs.map((doc) => `${doc.title}\n${doc.text}`));
+      } catch (error) {
+        this.lastError = error instanceof Error ? error.message : String(error);
+        this.vectors = null;
+      }
+    }
     return docs.length;
   }
 
@@ -153,21 +199,30 @@ export class KnowledgeIndex {
         })
         .map((source) => source.id),
     );
+    const queryVec = this.embeddings.embedSync?.(query);
     const scored = this.documents
-      .filter((doc) => allowedSources.has(doc.sourceId))
-      .map((doc) => {
-        const score = bm25ish(query, `${doc.title}\n${doc.text}`);
-        const idx = doc.text.toLowerCase().indexOf(query.toLowerCase());
+      .map((doc, index) => ({ doc, index }))
+      .filter((row) => allowedSources.has(row.doc.sourceId))
+      .map((row) => {
+        const lexical = bm25ish(query, `${row.doc.title}\n${row.doc.text}`);
+        const docVec = this.vectors?.[row.index];
+        const dense = queryVec && docVec ? cosineSimilarity(queryVec, docVec) : 0;
+        const idx = row.doc.text.toLowerCase().indexOf(query.toLowerCase());
         const snippet =
           idx >= 0
-            ? doc.text.slice(Math.max(0, idx - 80), idx + query.length + 120).trim()
-            : doc.text.slice(0, 180).trim();
+            ? row.doc.text.slice(Math.max(0, idx - 80), idx + query.length + 120).trim()
+            : row.doc.text.slice(0, 180).trim();
         return {
-          sourceId: doc.sourceId,
-          path: doc.path,
-          title: doc.title,
+          sourceId: row.doc.sourceId,
+          path: row.doc.path,
+          title: row.doc.title,
           snippet,
-          score,
+          score: lexical + dense * 2,
+          provenance: {
+            sourceId: row.doc.sourceId,
+            path: row.doc.path,
+            offset: row.doc.offset ?? 0,
+          },
         } satisfies KnowledgeHit;
       })
       .filter((hit) => hit.score > 0)
@@ -178,5 +233,6 @@ export class KnowledgeIndex {
   addSeed(doc: KnowledgeDocument) {
     this.documents.push(doc);
     this.seed.push(doc);
+    this.vectors = null;
   }
 }

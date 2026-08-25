@@ -145,6 +145,7 @@ export interface MemoryEntry {
   updatedAt: string;
   source: "user" | "system" | "seed" | "agent";
   tags?: string[];
+  provenance?: { origin: string; kind: "stated" | "observed" | "inferred" };
 }
 
 export interface KnowledgeSource {
@@ -163,6 +164,7 @@ export interface KnowledgeHit {
   title: string;
   snippet: string;
   score: number;
+  provenance?: { sourceId: string; path: string; offset: number };
 }
 
 export interface WorkspaceDefinition {
@@ -394,6 +396,7 @@ export interface WorkloadContext {
   games: string[];
   optimizerActive: boolean;
   notes: string[];
+  conclusions?: { statement: string; kind: "observed" | "inferred"; evidence: string }[];
 }
 
 export interface BackgroundHealth {
@@ -431,6 +434,11 @@ export interface FirstBootReport {
   };
   reportText: string;
   persisted: boolean;
+  benchmark?: {
+    ran: boolean;
+    refused: boolean;
+    reason: string;
+  };
 }
 
 export interface DiagnosticReport {
