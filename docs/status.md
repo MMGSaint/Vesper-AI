@@ -6,6 +6,7 @@ Use only: **IMPLEMENTED + TESTED**, **IMPLEMENTED + HARDWARE DEPENDENT**, **MOCK
 | --- | --- |
 | Config, logging, permissions, tool registry | IMPLEMENTED + TESTED |
 | Agent intents, confirmation, recovery | IMPLEMENTED + TESTED |
+| Confirmation persistence across restarts | IMPLEMENTED + TESTED |
 | Memory (remember/search/update/forget/summarize, session vs persistent, provenance, FileStorage, concurrency) | IMPLEMENTED + TESTED |
 | Workspaces | IMPLEMENTED + TESTED |
 | Knowledge search (keyword/BM25-lite + lexical-hash embeddings), chunking, provenance, source register/remove, path confinement | IMPLEMENTED + TESTED |
@@ -27,10 +28,11 @@ Use only: **IMPLEMENTED + TESTED**, **IMPLEMENTED + HARDWARE DEPENDENT**, **MOCK
 | Installer / uninstaller / reset scripts | IMPLEMENTED + HARDWARE DEPENDENT (not executed on Windows here) |
 | Voice STT/TTS (faster-whisper / Piper / Kokoro) | DOCUMENTED BUT NOT IMPLEMENTED for live audio; interfaces + PTT session + simulated provider TESTED |
 | First-boot discovery + report | IMPLEMENTED + TESTED (probes; no benches) |
-| Diagnostics report | IMPLEMENTED + TESTED |
+| Diagnostics report + doctor CLI | IMPLEMENTED + TESTED |
+| Host CLI / config file / JSONL audit log | IMPLEMENTED + TESTED |
 | Idle scheduler with gaming throttle | IMPLEMENTED + TESTED |
 | Gaming / VRChat / OBS adapters | IMPLEMENTED + TESTED (simulated process list) |
 | Confined filesystem tools | IMPLEMENTED + TESTED |
 | MCP bridge | IMPLEMENTED + TESTED as disabled optional status; not a runtime dependency |
-| GitHub Actions CI / Dependabot | IMPLEMENTED + TESTED (workflow files; first Actions run is GitHub-side) |
+| GitHub Actions CI / CodeQL / Dependabot / secret scanning / push protection | IMPLEMENTED + TESTED (workflow files and GitHub settings) |
 | Model benchmarks on target PC | DOCUMENTED BUT NOT IMPLEMENTED — machine was off |

@@ -49,3 +49,19 @@ export function stateFile(dirs: VesperDirs): string {
 export function firstBootReportFile(dirs: VesperDirs): string {
   return join(dirs.logs, "first-boot.txt");
 }
+
+export function configFile(dirs: VesperDirs): string {
+  return join(dirs.config, "vesper.json");
+}
+
+export function auditLogFile(dirs: VesperDirs): string {
+  return join(dirs.logs, "audit.jsonl");
+}
+
+export function lastErrorFile(dirs: VesperDirs): string {
+  return join(dirs.logs, "last-error.json");
+}
+
+export function transcriptFile(dirs: VesperDirs): string {
+  return join(dirs.logs, "transcript.jsonl");
+}

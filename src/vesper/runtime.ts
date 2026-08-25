@@ -35,6 +35,8 @@ import type {
   ChatMessage,
   DiagnosticReport,
   FirstBootReport,
+  JsonObject,
+  JsonValue,
   PendingConfirmation,
 } from "./types.ts";
 
@@ -123,6 +125,7 @@ export class VesperRuntime {
   async start() {
     if (this.started) return this.capability;
     this.log.info("lifecycle", "Vesper starting", { instanceId: this.instanceId });
+    await this.restoreConfirmations();
     await this.seedMemories();
     this.started = true;
     await this.background.start();
@@ -165,6 +168,7 @@ export class VesperRuntime {
     this.started = false;
     this.memory.clearSession();
     this.scheduler.stop();
+    await this.persistConfirmations();
     await this.background.stop();
     this.log.info("lifecycle", "Vesper stopped");
   }
@@ -180,10 +184,13 @@ export class VesperRuntime {
   async chat(text: string, options?: { confirmId?: string; approve?: boolean }): Promise<AgentTurn> {
     if (!this.started) await this.start();
     try {
-      return await this.agent.handle(text, options);
+      const turn = await this.agent.handle(text, options);
+      await this.persistConfirmations();
+      return turn;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log.error("error", "Agent turn failed", { error: message });
+      await this.recordLastError(message, text);
       return {
         id: createId("turn"),
         userText: text,
@@ -304,6 +311,57 @@ export class VesperRuntime {
 
   setOptimizerAvailable(value: boolean) {
     this.optimizer.setAvailable?.(value);
+  }
+
+  async lastError(): Promise<{ at: string; message: string; userText?: string } | null> {
+    const raw = await this.storage.get("runtime.lastError");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const rec = raw as JsonObject;
+    if (typeof rec.message !== "string" || typeof rec.at !== "string") return null;
+    return {
+      at: rec.at,
+      message: rec.message,
+      userText: typeof rec.userText === "string" ? rec.userText : undefined,
+    };
+  }
+
+  private async restoreConfirmations() {
+    const raw = await this.storage.get("runtime.confirmations");
+    if (!Array.isArray(raw)) return;
+    for (const item of raw) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const rec = item as JsonObject;
+      if (typeof rec.id !== "string" || typeof rec.toolName !== "string") continue;
+      this.confirmations.set(rec.id, {
+        id: rec.id,
+        toolName: rec.toolName,
+        args: rec.args && typeof rec.args === "object" && !Array.isArray(rec.args) ? (rec.args as JsonObject) : {},
+        reason: typeof rec.reason === "string" ? rec.reason : "confirmation required",
+        createdAt: typeof rec.createdAt === "string" ? rec.createdAt : new Date().toISOString(),
+        workspaceId: typeof rec.workspaceId === "string" ? rec.workspaceId : "general",
+      });
+    }
+    if (this.confirmations.size > 0) {
+      this.log.info("permission", "Restored pending confirmations", { count: this.confirmations.size });
+    }
+  }
+
+  private async persistConfirmations() {
+    const list = [...this.confirmations.values()] as unknown as JsonValue;
+    await this.storage.set("runtime.confirmations", list);
+  }
+
+  private async recordLastError(message: string, userText: string) {
+    const payload: JsonObject = {
+      at: new Date().toISOString(),
+      message,
+      userText,
+    };
+    try {
+      await this.storage.set("runtime.lastError", payload);
+    } catch {
+      // Persistence is best-effort during crash recovery.
+    }
   }
 
   private async seedMemories() {

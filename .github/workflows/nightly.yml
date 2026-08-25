@@ -1,0 +1,71 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  maintenance:
+    name: maintenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+
+      - name: Security checks
+        run: npm run security
+
+      - name: Hygiene
+        run: npm run hygiene
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Maintenance report
+        run: |
+          {
+            echo "# Vesper nightly maintenance"
+            echo
+            echo "- generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "- commit: ${GITHUB_SHA}"
+            echo "- node: $(node -v)"
+            echo
+            echo "## TODO / FIXME markers"
+            echo
+            grep -RIn --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist \
+              -E 'TODO|FIXME' src docs scripts .github || echo "(none)"
+            echo
+            echo "## npm outdated (informational)"
+            echo
+            npm outdated || true
+          } > nightly-report.md
+          cat nightly-report.md
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-report
+          path: nightly-report.md
+          if-no-files-found: ignore

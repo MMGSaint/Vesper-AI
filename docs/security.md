@@ -2,6 +2,8 @@
 
 IMPLEMENTED + TESTED unless noted.
 
+This repository is public. See `SECURITY.md` and `docs/GITHUB_SECURITY.md`.
+
 ## Permission gate
 
 Every tool invocation is evaluated by `evaluatePermission`. Levels: read, safe, confirm, never. Overrides may only restrict further. Confirmation does not promote `never` tools.
@@ -16,7 +18,7 @@ Every tool invocation is evaluated by `evaluatePermission`. Levels: read, safe, 
 
 ## Secrets
 
-Audit logs redact keys matching password/token/api-key patterns and values matching `sk-`, `ghp_`, `xai-`, and Bearer tokens.
+Audit logs redact keys matching password/token/api-key patterns and values matching `sk-`, `ghp_`, `xai-`, and Bearer tokens. Production hosts append redacted JSONL to `logs/audit.jsonl`. `npm run hygiene` fails CI if high-confidence secret material is committed.
 
 ## Optimizer
 

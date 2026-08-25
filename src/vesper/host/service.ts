@@ -1,14 +1,29 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { createRuntime, type RuntimeOptions, type VesperRuntime } from "../runtime.ts";
 import { FileStorage } from "../storage.ts";
-import { firstBootReportFile, healthFile, resolveVesperDirs, stateFile } from "../paths.ts";
+import { createLogger } from "../logging.ts";
+import { createJsonlSink } from "../audit-file.ts";
+import { loadHostConfig, writeConfigIfMissing } from "../config-file.ts";
+import {
+  auditLogFile,
+  configFile,
+  firstBootReportFile,
+  healthFile,
+  lastErrorFile,
+  resolveVesperDirs,
+  stateFile,
+} from "../paths.ts";
+import { runDoctor, formatDoctor, type DoctorReport } from "../doctor.ts";
 import type { VesperDirs } from "../types.ts";
+import { VESPER_VERSION } from "../version.ts";
 
 export interface ProductionHost {
   runtime: VesperRuntime;
   dirs: VesperDirs;
-  writeHealth(): Promise<void>;
+  configSource: "file" | "default";
+  writeHealth(): Promise<string>;
+  writeLastError(): Promise<void>;
+  doctor(): Promise<DoctorReport>;
   shutdown(): Promise<void>;
 }
 
@@ -21,36 +36,78 @@ export async function createProductionHost(options?: {
   await mkdir(dirs.data, { recursive: true });
   await mkdir(dirs.logs, { recursive: true });
   await mkdir(dirs.config, { recursive: true });
+
+  const loaded = await loadHostConfig(configFile(dirs));
+  await writeConfigIfMissing(configFile(dirs), loaded.config);
+  const log =
+    options?.runtime?.logger ??
+    createLogger({
+      sink: createJsonlSink(auditLogFile(dirs)),
+    });
+  if (!loaded.ok) {
+    log.warn("lifecycle", "Host config invalid; using defaults", {
+      errors: loaded.errors.join("; "),
+    });
+  }
   const storage = options?.runtime?.storage ?? new FileStorage(stateFile(dirs));
   const runtime = await createRuntime({
     ...options?.runtime,
+    config: options?.runtime?.config ?? loaded.config,
     storage,
+    logger: log,
   });
   await runtime.start();
   const host: ProductionHost = {
     runtime,
     dirs,
+    configSource: loaded.source,
     async writeHealth() {
       const diagnostics = await runtime.diagnostics();
       const payload = {
         at: new Date().toISOString(),
+        version: VESPER_VERSION,
         instanceId: runtime.instanceId,
         started: runtime.started,
         health: runtime.background.health(),
         models: runtime.models.status(),
         optimizer: diagnostics.optimizer.available,
+        pendingConfirmations: runtime.confirmations.size,
       };
-      await writeFile(healthFile(dirs), JSON.stringify(payload, null, 2), "utf8");
+      const path = healthFile(dirs);
+      await writeFile(path, JSON.stringify(payload, null, 2), "utf8");
       if (runtime.firstBootReport) {
         await writeFile(firstBootReportFile(dirs), runtime.firstBootReport.reportText, "utf8");
       }
+      return path;
+    },
+    async writeLastError() {
+      const error = await runtime.lastError();
+      if (!error) return;
+      await writeFile(lastErrorFile(dirs), JSON.stringify(error, null, 2), "utf8");
+    },
+    async doctor() {
+      const error = await runtime.lastError();
+      return runDoctor({
+        dirs,
+        config: runtime.config,
+        configOk: loaded.ok,
+        configErrors: loaded.errors,
+        storageReadable: true,
+        lastError: error?.message ?? null,
+      });
     },
     async shutdown() {
       await runtime.stop();
+      await host.writeLastError();
       await writeFile(
-        join(dirs.data, "health.json"),
+        healthFile(dirs),
         JSON.stringify(
-          { at: new Date().toISOString(), started: false, health: runtime.background.health() },
+          {
+            at: new Date().toISOString(),
+            version: VESPER_VERSION,
+            started: false,
+            health: runtime.background.health(),
+          },
           null,
           2,
         ),
@@ -61,3 +118,5 @@ export async function createProductionHost(options?: {
   await host.writeHealth();
   return host;
 }
+
+export { formatDoctor };

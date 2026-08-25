@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a Vesper defect. Do not include secrets, logs with tokens, or private paths.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do **not** paste API keys, GitHub tokens, optimizer credentials, or memory dumps.
+        Security issues belong in a private advisory, not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Observed behavior vs expected behavior.
+    validations:
+      required: true
+  - type: dropdown
+    id: class
+    attributes:
+      label: Feature classification
+      options:
+        - IMPLEMENTED + TESTED
+        - IMPLEMENTED + HARDWARE DEPENDENT
+        - MOCKED / SIMULATED
+        - DOCUMENTED BUT NOT IMPLEMENTED
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Commands and sanitized logs only.
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host (optional)
+      description: OS and whether this was the target Windows PC. Do not include personal paths.

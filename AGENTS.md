@@ -2,6 +2,8 @@
 
 Vesper is a **local-first personal AI assistant** for a Windows PC. This file is the operating contract for development agents working in this repository.
 
+Any future agent should be able to work from this file without prior chat history.
+
 ## Identity
 
 - **Vesper** = personal assistant (this repository)
@@ -10,9 +12,11 @@ Vesper is a **local-first personal AI assistant** for a Windows PC. This file is
 
 Vesper coordinates. Specialists stay specialists.
 
-## Repository boundaries
+## Repository
 
-This is the dedicated Vesper repository. Keep it independently maintainable.
+Public source of truth: https://github.com/MMGSaint/Vesper-AI
+
+The old name `Vesper-personal-assistant-` redirects here. Keep this tree independently maintainable.
 
 Do **not**:
 
@@ -21,6 +25,9 @@ Do **not**:
 - make cloud AI mandatory at runtime
 - index arbitrary filesystem content
 - claim physical AMD/Windows/audio validation that did not happen
+- commit secrets
+- disable GitHub push protection or CodeQL to make work easier
+- deploy anything
 
 Vesper may talk to Mortis later through APIs, adapters, curated files, or the Mortis workspace.
 
@@ -34,7 +41,7 @@ Permission levels: `read` | `safe` | `confirm` | `never`.
 
 The model cannot relax permissions. High-risk tools stay never-autonomous.
 
-Core lives in `src/vesper/`. The App Builder web console is an optional control surface. Production runtime is `src/vesper/host`.
+Core lives in `src/vesper/`. Production runtime is `src/vesper/host`.
 
 ## Local-first inference
 
@@ -60,7 +67,7 @@ The target PC is currently **off**. Use capability discovery. Do not hard-code V
 
 See `docs/AGENT_OWNERSHIP.md`.
 
-Independent agents must not edit the same subsystem simultaneously. Correctness beats parallelism.
+Independent agents must not edit the same subsystem simultaneously. Correctness beats parallelism. Shared types in `src/vesper/types.ts` and `src/vesper/config.ts` are orchestrator-owned.
 
 ## Development commands
 
@@ -68,7 +75,9 @@ Independent agents must not edit the same subsystem simultaneously. Correctness 
 npm test
 npm run typecheck
 npm run security
-node --experimental-strip-types src/vesper/host/main.ts
+npm run hygiene
+npm run build
+node --experimental-strip-types src/vesper/host/main.ts --doctor --skip-discovery
 ```
 
 Core tests do not require a local LLM.
@@ -80,13 +89,24 @@ Core tests do not require a local LLM.
 - Knowledge roots must stay inside `approvedRoots`.
 - Subprocess spawn is allowlisted by executable name. No shell strings.
 - MCP, if present, stays behind the permission gate and is never required.
+- This repo is public. Treat every commit as world-readable.
 
 ## Git rules
 
 - Do not weaken the existing test suite to make new work easier.
-- After meaningful subsystem changes: tests, typecheck, production/build check.
+- After meaningful subsystem changes: tests, typecheck, hygiene, production/build check.
 - Do not commit secrets.
 - Do not deploy to Mortis production.
+- Prefer conventional, descriptive commit messages.
+- `main` is protected against force-push and deletion. Repository admins may bypass so autonomous work remains possible. Do not use that bypass to land red CI.
+
+## Multi-agent rules
+
+1. Inspect before editing.
+2. Assign non-overlapping surfaces.
+3. Specialist tests first, then full `npm test`.
+4. The orchestrator integrates and pushes validated work.
+5. If two agents need the same file, serialize.
 
 ## Hardware assumptions
 
@@ -103,6 +123,8 @@ INSPECT → PLAN → IMPLEMENT → TEST → DIAGNOSE → FIX → RETEST → DOCU
 
 Stop only when remaining work is blocked by the physical PC or the unpublished optimizer API.
 
-## Completion criteria
+## Definition of done
 
 See `docs/DEFINITION_OF_DONE.md` and `docs/PROJECT_STATUS.md`.
+
+A task is not complete because code was written. Tests, typecheck, hygiene, docs, and CI must pass.

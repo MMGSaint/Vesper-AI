@@ -1,6 +1,6 @@
 # Vesper — agent instructions
 
-Vesper is a **local-first personal AI assistant** for a Windows PC. This file is the project memory for future development agents.
+Vesper is a **local-first personal AI assistant** for a Windows PC. Prefer `AGENTS.md` as the operating contract. This file is retained as project memory.
 
 ## Identity
 
@@ -12,11 +12,11 @@ Vesper coordinates. Specialists stay specialists.
 
 ## Repository boundary
 
-This is the dedicated Vesper repository. Keep it independently maintainable.
+Public source of truth: https://github.com/MMGSaint/Vesper-AI
+
+Keep this tree independently maintainable. Production runtime is `src/vesper/host`.
 
 Vesper may talk to Mortis later through APIs, adapters, curated files, or the Mortis workspace. It must not depend on hidden chat history from another project.
-
-The App Builder web console in this sandbox is an optional control surface. Production runtime is `src/vesper/host`.
 
 ## Architecture rules
 
@@ -31,7 +31,7 @@ MODEL → AGENT → PERMISSION SYSTEM → TOOL → RESULT → AGENT → MODEL
 - High-risk tools (`disk_wipe`, credential access, security bypass, dangerous hardware control) are **never autonomous**.
 - Tray/host controls cannot bypass that gate to run OS tools.
 
-Core lives in `src/vesper/` (framework-agnostic TypeScript). The web console in `src/routes` and `src/components/vesper` is a control surface.
+Core lives in `src/vesper/` (framework-agnostic TypeScript).
 
 ## Local-first
 
@@ -81,12 +81,12 @@ Workspace `mortis` exists. Knowledge source `mortis-approved` is opt-in and work
 ## Development commands
 
 ```bash
-npm test                 # includes src/vesper/**/*.test.ts
+npm test
 npm run typecheck
-npm run security         # standalone repo; in this workspace run the security tests directly
-npm run dev              # optional web console
-node --experimental-strip-types src/vesper/host/main.ts
-
+npm run security
+npm run hygiene
+npm run build
+node --experimental-strip-types src/vesper/host/main.ts --doctor --skip-discovery
 ```
 
 Core tests do not require a local LLM.
@@ -101,6 +101,7 @@ Windows packaging: `packaging/windows/install.ps1` (not executed in this Linux e
 - Windows tray, startup, and live AMD telemetry are hardware-dependent.
 - Idle behavior must stay event-driven and cheap — this PC also games, streams, and runs VR.
 - Do not blindly index the whole disk. Knowledge roots must stay inside `approvedRoots`.
+- This repository is public. Treat every commit as world-readable.
 
 ## Status classification required in reports
 

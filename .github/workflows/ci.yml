@@ -2,29 +2,45 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "agent/**"]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    name: test
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
+
       - name: Install
-        run: |
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+        run: npm ci
+
       - name: Typecheck
         run: npm run typecheck
+
       - name: Tests
         run: npm test
+
       - name: Security checks
         run: npm run security
+
+      - name: Repository hygiene
+        run: npm run hygiene
+
       - name: Production check
         run: npm run build

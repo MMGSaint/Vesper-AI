@@ -8,4 +8,14 @@ data/vesper
 coverage
 .env
 .env.*
+!.env.example
 *.corrupt
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+health.json
+audit.jsonl
+last-error.json
+.nightly-report.md
+nightly-report.md

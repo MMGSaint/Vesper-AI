@@ -19,6 +19,10 @@ export { describeInstallPlan, describeUninstallPlan, describeResetPlan } from ".
 export { createIdleScheduler } from "./scheduler.ts";
 export { createHashEmbeddings } from "./knowledge/embeddings.ts";
 export { chunkText } from "./knowledge/chunk.ts";
-export { resolveVesperDirs } from "./paths.ts";
+export { resolveVesperDirs, configFile, auditLogFile, lastErrorFile } from "./paths.ts";
 export { createProductionHost } from "./host/service.ts";
+export { parseCli } from "./cli.ts";
+export { loadHostConfig, writeConfigIfMissing } from "./config-file.ts";
+export { runDoctor, formatDoctor } from "./doctor.ts";
+export { VESPER_VERSION } from "./version.ts";
 export type * from "./types.ts";

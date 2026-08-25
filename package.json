@@ -1,6 +1,8 @@
 {
   "name": "vesper",
+  "version": "0.3.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Local-first personal AI assistant for Windows. Not Mortis. Not the PC optimizer.",
   "scripts": {
@@ -8,6 +10,8 @@
     "start": "node --experimental-strip-types src/vesper/host/main.ts",
     "typecheck": "tsc --noEmit",
     "security": "node --experimental-strip-types --test src/vesper/security.test.ts src/vesper/security-hostile.test.ts",
+    "hygiene": "node scripts/hygiene.mjs",
+    "doctor": "node --experimental-strip-types src/vesper/host/main.ts --doctor --skip-discovery",
     "build": "tsc --noEmit"
   },
   "engines": {

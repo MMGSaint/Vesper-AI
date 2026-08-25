@@ -1,16 +1,16 @@
 # Project status
 
-Phase: **software-only completion boundary**
+Phase: **public repository hardening + software-only host reliability**
 
-Latest commit on `main`: `90e8d44`
+Latest commit on `main`: pending this cycle
 
-Latest validation:
+Latest validation (local, this cycle):
 
-- Vesper tests: **107/107 passing** (original 75 preserved)
-- Typecheck: passing
-- Security tests: 14/14 passing
-- Production build (preview console): passing
-- GitHub Actions CI: **passing** — [run 32826859008](https://github.com/MMGSaint/Vesper-personal-assistant-/actions/runs/32826859008)
+- Vesper tests: run after implementation
+- Typecheck: pending
+- Hygiene: pending
+- Production build: `tsc --noEmit`
+- GitHub: public as `MMGSaint/Vesper-AI`
 
 ## Completed (software-only)
 
@@ -22,7 +22,10 @@ Latest validation:
 - Mock optimizer + HTTP adapter (timeouts, retries, malformed handling)
 - Simulated target hardware
 - First-boot discovery (including runtime deps, app catalog, benchmark refusal)
-- Diagnostics, audit logging with secret redaction
+- Diagnostics, doctor/self-check, audit logging with secret redaction and JSONL sink
+- Pending confirmation persistence across host restarts
+- Host CLI (`--diagnostics`, `--status`, `--health`, `--doctor`, `--config-check`)
+- Config file load/save (`config/vesper.json`)
 - Windows runtime foundation, tray menu, packaging scripts, reset path
 - Idle scheduler that skips GPU-heavy ticks
 - Voice interfaces, PTT/interrupt session, simulated provider
@@ -30,11 +33,11 @@ Latest validation:
 - Benchmark harness that refuses fake numbers
 - Confined filesystem tools
 - Hostile security tests
-- GitHub Actions CI, Dependabot (majors ignored), agent docs
+- GitHub Actions CI, CodeQL, Dependabot, secret scanning, push protection, main ruleset, agent docs
 
 ## Active
 
-None that can be completed without the physical PC or the real optimizer API.
+Public-repo hardening and remaining software-only reliability work.
 
 ## Blocked / hardware-dependent
 
@@ -45,17 +48,14 @@ None that can be completed without the physical PC or the real optimizer API.
 - Actual Ollama/llama.cpp model assignment on the target PC
 - Real optimizer connectivity
 
-## GitHub-side note
-
-CodeQL SARIF upload is not enabled on this private repository (GitHub code scanning / GHAS is off). Security regression is enforced by `npm run security` inside CI. CodeQL can be re-added after code scanning is enabled in repo settings.
-
 ## Next on the real PC
 
 1. Install Node 22 and run `packaging/windows/install.ps1`
 2. Launch `vesper-host.cmd`
-3. Read `%LOCALAPPDATA%\Vesper\logs\first-boot.txt`
-4. Install Ollama and/or llama.cpp Vulkan
-5. Re-run first-boot and the benchmark harness
-6. Point the optimizer adapter at the real API when it is published
+3. Run `node --experimental-strip-types src/vesper/host/main.ts --doctor`
+4. Read `%LOCALAPPDATA%\Vesper\logs\first-boot.txt`
+5. Install Ollama and/or llama.cpp Vulkan
+6. Re-run first-boot and the benchmark harness
+7. Point the optimizer adapter at the real API when it is published
 
-See `docs/status.md` for the feature classification table.
+See `docs/status.md` for the feature classification table and `docs/GITHUB_SECURITY.md` for repository controls.
