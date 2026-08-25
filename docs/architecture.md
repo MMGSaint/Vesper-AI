@@ -1,6 +1,6 @@
 # Vesper architecture
 
-Vesper is a local-first personal assistant with a TypeScript core and an optional web control surface.
+Vesper is a local-first personal assistant with a TypeScript core and a Windows host. A future Android companion talks through `vesper.client` v1. There is no web console in this repository.
 
 ## Layers
 
@@ -16,8 +16,9 @@ Vesper is a local-first personal assistant with a TypeScript core and an optiona
 10. **Idle scheduler** — event-driven, skips GPU-heavy ticks
 11. **Host** — `src/vesper/host` runs without a browser
 12. **Runtime** — composes the above, isolates subsystem failure
+13. **Client protocol** — in-process `vesper.client` v1 gateway for future companions; no raw network listener
 
-The web console talks to the runtime through server functions. On a Windows install the same runtime sits behind the host process.
+A Windows install runs the host process. Companion clients must use scoped sessions. Transport is not authorization. Remote OS tools stay unavailable.
 
 ## Honesty
 

@@ -1,18 +1,16 @@
 # Project status
 
-Phase: **public repository hardening complete; remaining work is hardware-dependent**
+Phase: **software-only target complete; remaining work is hardware-dependent or unpublished APIs**
 
-Latest commit on `main`: `cd99538`
+Latest implementation commit on `main`: `2ab8ec4`
 
 Latest validation:
 
-- Vesper tests: **118/118 passing**
-- Typecheck: passing
-- Hygiene: passing
-- Security tests: 14/14
-- Production build: `tsc --noEmit` passing
-- GitHub CI: **passing** — [run 32830140415](https://github.com/MMGSaint/Vesper-AI/actions/runs/32830140415)
-- CodeQL advanced: **passing** — [run 32830140453](https://github.com/MMGSaint/Vesper-AI/actions/runs/32830140453)
+- GitHub CI on `a37f2b9`: **passing** — [run 32831754097](https://github.com/MMGSaint/Vesper-AI/actions/runs/32831754097)
+- Client/host/security tests on this host: **20/20 passing** for the new surfaces
+- Prior full local suite after client+host work: **125/125 passing**
+- Typecheck / hygiene / `tsc --noEmit` passed on the implementation host
+- Last completed CodeQL success: [run 32830336076](https://github.com/MMGSaint/Vesper-AI/actions/runs/32830336076)
 - CodeQL open alerts: **0** (17 fixed)
 - Secret scanning alerts: **0**
 - Dependabot alerts: **0**
@@ -29,7 +27,7 @@ Latest validation:
 - First-boot discovery (including runtime deps, app catalog, benchmark refusal)
 - Diagnostics, doctor/self-check, audit logging with secret redaction and JSONL sink
 - Pending confirmation persistence across host restarts
-- Host CLI (`--diagnostics`, `--status`, `--health`, `--doctor`, `--config-check`, `--export-memory`)
+- Host CLI (`--diagnostics`, `--status`, `--health`, `--doctor`, `--config-check`, `--export-memory`, `--client-hello`)
 - Config file load/save (`config/vesper.json`)
 - Windows runtime foundation, tray menu, packaging scripts, reset path
 - Idle scheduler that skips GPU-heavy ticks
@@ -39,6 +37,8 @@ Latest validation:
 - Confined filesystem tools (single-handle reads)
 - Hostile security tests
 - GitHub Actions CI, CodeQL (`security-extended`), Dependabot, secret scanning, push protection, main ruleset, agent docs
+- Client protocol v1 for future Windows/Android companions (scoped sessions; no remote OS authority)
+- Host `--client-hello` and in-process gateway (no network listener)
 
 ## Active
 
@@ -52,6 +52,7 @@ None that can be completed without the physical PC or the real optimizer API.
 - Microphone/speaker validation
 - Actual Ollama/llama.cpp model assignment on the target PC
 - Real optimizer connectivity
+- Companion pairing / LAN TLS transport
 
 ## GitHub-side notes
 
@@ -69,5 +70,6 @@ None that can be completed without the physical PC or the real optimizer API.
 4. Install Ollama and/or llama.cpp Vulkan
 5. Re-run first-boot and the benchmark harness
 6. Point the optimizer adapter at the real API when it is published
+7. Pair a companion only after an authenticated, encrypted, scoped transport exists
 
 See `docs/status.md` for the feature classification table and `docs/GITHUB_SECURITY.md` for repository controls.

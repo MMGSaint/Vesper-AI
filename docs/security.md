@@ -24,6 +24,10 @@ Audit logs redact keys matching password/token/api-key patterns and values match
 
 HTTP adapter never treats malformed JSON or non-`accepted: true` as a successful optimization.
 
+## Client protocol
+
+Companion access is `vesper.client` v1 in-process. Sessions expire, scopes are allowlisted, tokens are omitted from `list()`, and remote OS / permission-relax powers are never granted. No network listener is bound. Transport, when added later, is not authorization.
+
 ## MCP
 
 Disabled by default. Not required. Any future MCP tool is `confirm` at minimum.

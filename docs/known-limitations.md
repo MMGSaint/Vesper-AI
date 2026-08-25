@@ -8,5 +8,6 @@
 - Lexical-hash embeddings are local and deterministic, not a neural embedding model.
 - The real PC optimizer API does not exist in this repo; only the adapter contract does.
 - Mortis remains a separate project. Only the approved Mortis knowledge source is in-scope.
+- Companion transport (pairing, LAN TLS) is not implemented. `vesper.client` v1 is in-process only.
 
 When the PC is on, run the host, read the first-boot report, and treat any hardware-dependent step that did not succeed as unfinished.

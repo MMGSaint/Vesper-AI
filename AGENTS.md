@@ -41,7 +41,7 @@ Permission levels: `read` | `safe` | `confirm` | `never`.
 
 The model cannot relax permissions. High-risk tools stay never-autonomous.
 
-Core lives in `src/vesper/`. Production runtime is `src/vesper/host`.
+Core lives in `src/vesper/`. Production runtime is `src/vesper/host`. Companion contract is `src/vesper/client/` (`vesper.client` v1). Do not add a raw network listener that exposes OS tools.
 
 ## Local-first inference
 
