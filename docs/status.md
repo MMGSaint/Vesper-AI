@@ -35,4 +35,6 @@ Use only: **IMPLEMENTED + TESTED**, **IMPLEMENTED + HARDWARE DEPENDENT**, **MOCK
 | Confined filesystem tools | IMPLEMENTED + TESTED |
 | MCP bridge | IMPLEMENTED + TESTED as disabled optional status; not a runtime dependency |
 | GitHub Actions CI / CodeQL / Dependabot / secret scanning / push protection | IMPLEMENTED + TESTED (workflow files and GitHub settings) |
+| Client protocol v1 (scopes, sessions, honest capability states, in-process gateway) | IMPLEMENTED + TESTED |
+| Client network transport / pairing / LAN TLS | DOCUMENTED BUT NOT IMPLEMENTED |
 | Model benchmarks on target PC | DOCUMENTED BUT NOT IMPLEMENTED — machine was off |

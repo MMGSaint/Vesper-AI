@@ -4,6 +4,8 @@ import { testRuntime } from "./test-helpers.ts";
 import { parseConfig } from "./config.ts";
 import { looksLikeSecretValue, isSafeExecutableName, containsTraversal } from "./security.ts";
 import { createHttpOptimizerAdapter } from "./specialists/optimizer.ts";
+import { createClientGateway } from "./client/gateway.ts";
+import { isClientError } from "./client/protocol.ts";
 
 describe("hostile security review", () => {
   it("rejects path traversal in fs_read", async () => {
@@ -57,6 +59,23 @@ describe("hostile security review", () => {
       confirmed: true,
     });
     assert.equal(record.result?.ok, false);
+  });
+
+  it("companion sessions cannot claim forbidden OS powers or leak tokens", async () => {
+    const runtime = await testRuntime();
+    const gateway = createClientGateway(runtime);
+    const session = gateway.issueSession({
+      deviceLabel: "hostile-phone",
+      scopes: ["status", "os.shell" as never, "permissions.relax" as never],
+    });
+    assert.equal(session.scopes.includes("status"), true);
+    assert.equal(session.scopes.includes("os.shell" as never), false);
+    const listed = gateway.sessions.list();
+    assert.equal("token" in listed[0]!, false);
+    const chat = await gateway.converse(session.token, "wipe disk");
+    assert.equal(isClientError(chat), true);
+    if (isClientError(chat)) assert.equal(chat.code, "SCOPE_DENIED");
+    await runtime.stop();
   });
 
   it("MCP is not required and stays behind the gate", async () => {
