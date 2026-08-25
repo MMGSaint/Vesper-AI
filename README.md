@@ -1,6 +1,6 @@
 # Vesper
 
-Local-first Morris-themed personal AI assistant for a Windows PC.
+Local-first Mortis-themed personal AI assistant for a Windows PC.
 
 ## What this is
 
