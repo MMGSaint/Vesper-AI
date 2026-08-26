@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { testRuntime } from "./test-helpers.ts";
-import { classifyIntent, historyWindow } from "./agent.ts";
+import { classifyIntent, encodeToolResult, fitContext, historyWindow } from "./agent.ts";
 import type { ChatMessage, CompletionRequest } from "./types.ts";
 
 describe("agent", () => {
@@ -167,5 +167,81 @@ describe("agent", () => {
     const window = historyWindow(history, 3);
     assert.equal(window[0].role, "user");
     assert.equal(window[0].content, "second");
+  });
+
+  it("keeps a huge tool result from crowding out the conversation", () => {
+    const huge = { ok: true, epistemic: "checked", summary: "Listed the directory.", data: { text: "x".repeat(50_000) } };
+    const encoded = encodeToolResult(huge);
+    assert.ok(encoded.length < 4_000, "the payload is bounded");
+    const parsed = JSON.parse(encoded) as Record<string, unknown>;
+    // The parts the model reasons over, and that Vesper's honesty rules rest on, survive.
+    assert.equal(parsed.summary, "Listed the directory.");
+    assert.equal(parsed.epistemic, "checked");
+    assert.equal(parsed.ok, true);
+    // And the model is told the view is partial rather than being quietly misled.
+    assert.equal(parsed.truncated, true);
+    assert.match(String(parsed.note), /50\d{3} characters/);
+  });
+
+  it("leaves a small tool result exactly as it was", () => {
+    const small = { ok: true, epistemic: "checked", summary: "CPU 8%." };
+    assert.equal(encodeToolResult(small), JSON.stringify(small));
+  });
+
+  it("trims the oldest exchanges to fit the context budget, keeping the system prompt", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "SYSTEM PROMPT" },
+      { role: "user", content: "a".repeat(500) },
+      { role: "assistant", content: "b".repeat(500) },
+      { role: "user", content: "c".repeat(500) },
+      { role: "assistant", content: "d".repeat(500) },
+      { role: "user", content: "the current question" },
+    ];
+    const fitted = fitContext(messages, 900);
+    assert.equal(fitted.messages[0].content, "SYSTEM PROMPT", "the system prompt is never dropped");
+    assert.ok(fitted.dropped > 0);
+    assert.equal(fitted.messages.at(-1)?.content, "the current question");
+    // Trimming never leaves the window starting mid-exchange.
+    assert.equal(fitted.messages[1]?.role, "user");
+  });
+
+  it("does nothing when the conversation already fits", () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "SYSTEM" },
+      { role: "user", content: "hello" },
+    ];
+    const fitted = fitContext(messages, 10_000);
+    assert.equal(fitted.dropped, 0);
+    assert.deepEqual(fitted.messages, messages);
+  });
+
+  it("stops and says so when the model repeats the same tool call", async () => {
+    let calls = 0;
+    const stuck = {
+      id: "stuck",
+      kind: "local" as const,
+      isAvailable: () => true,
+      async probe() {
+        return { available: true, detail: "stuck" };
+      },
+      async complete(request: CompletionRequest, model: string) {
+        calls += 1;
+        // Always asks for the identical call, learning nothing from the result.
+        return {
+          text: "",
+          toolCalls: [{ id: `c${calls}`, name: "system_info", arguments: {} }],
+          providerId: "stuck",
+          model,
+          role: request.role,
+        };
+      },
+    };
+    const runtime = await testRuntime({ providers: [stuck] });
+    const turn = await runtime.chat("tell me about the machine");
+
+    assert.match(turn.reply, /repeat the same call to system_info/);
+    // It gave up quickly rather than burning the whole iteration budget.
+    assert.ok(calls <= 3, `stopped after ${calls} model calls`);
+    assert.ok(turn.epistemic.includes("could_not_access"));
   });
 });

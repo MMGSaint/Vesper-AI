@@ -62,6 +62,75 @@ const HISTORY_WINDOW = 16;
 const HISTORY_LIMIT = 40;
 
 /**
+ * Context budget, in characters.
+ *
+ * Tool results were inlined whole: a file read, a process list, or a diagnostics dump
+ * went into the conversation at full size, several times per turn. On a local model
+ * with a modest context window that silently pushes out the system prompt and the
+ * user's actual question.
+ *
+ * Characters, not tokens, on purpose. Vesper cannot count a backend's tokens without
+ * asking it, and an estimate must never be presented as a measurement - this is a
+ * budget for trimming, and it is never reported as a token count.
+ */
+const MAX_TOOL_RESULT_CHARS = 3_000;
+const MAX_CONTEXT_CHARS = 24_000;
+
+/**
+ * Serialize a tool result for the model, keeping the parts that carry meaning.
+ *
+ * `summary` and `epistemic` are what the model reasons over and what Vesper's honesty
+ * rules depend on, so they survive intact; bulky `data` is trimmed, and the trimming is
+ * stated in the payload so the model knows the view is partial.
+ */
+export function encodeToolResult(value: unknown, limit = MAX_TOOL_RESULT_CHARS): string {
+  const encoded = JSON.stringify(value ?? {});
+  if (encoded.length <= limit) return encoded;
+
+  const record = (value ?? {}) as { summary?: unknown; epistemic?: unknown; ok?: unknown };
+  const core = {
+    ok: record.ok,
+    epistemic: record.epistemic,
+    summary: typeof record.summary === "string" ? record.summary : undefined,
+  };
+  const coreEncoded = JSON.stringify(core);
+  const room = Math.max(0, limit - coreEncoded.length - 80);
+  return JSON.stringify({
+    ...core,
+    truncated: true,
+    note: `Result was ${encoded.length} characters; showing the first ${room}. Ask for a narrower query if you need more.`,
+    dataPreview: room > 0 ? encoded.slice(0, room) : undefined,
+  });
+}
+
+/** Drop the oldest whole exchanges until the context fits the budget. */
+export function fitContext(
+  messages: ChatMessage[],
+  limit = MAX_CONTEXT_CHARS,
+): { messages: ChatMessage[]; dropped: number } {
+  const size = (list: ChatMessage[]) =>
+    list.reduce((total, message) => total + message.content.length + 32, 0);
+  if (size(messages) <= limit) return { messages, dropped: 0 };
+
+  // The system prompt is not optional; trimming starts after it.
+  const system = messages[0]?.role === "system" ? [messages[0]] : [];
+  let rest = messages.slice(system.length);
+  let dropped = 0;
+
+  while (rest.length > 1 && size([...system, ...rest]) > limit) {
+    // Remove one message, then re-align so the window still starts at a user turn.
+    rest = rest.slice(1);
+    dropped += 1;
+    const aligned = rest.findIndex((message) => message.role === "user");
+    if (aligned > 0) {
+      dropped += aligned;
+      rest = rest.slice(aligned);
+    }
+  }
+  return { messages: [...system, ...rest], dropped };
+}
+
+/**
  * Take the tail of the conversation without splitting an exchange.
  *
  * A window must never begin on a tool result, or on an assistant turn that only issues
@@ -214,6 +283,13 @@ export class Agent {
     ];
 
     const role = this.deps.models.resolveRole(userText, workspace.defaultModelRole);
+    const fitted = fitContext(messages);
+    if (fitted.dropped) {
+      this.deps.log.info("model", "Trimmed conversation context to fit the budget", {
+        dropped: fitted.dropped,
+      });
+    }
+    messages.splice(0, messages.length, ...fitted.messages);
     let completion = await this.deps.models.complete({
       messages,
       tools,
@@ -244,8 +320,21 @@ export class Agent {
     }
 
     let iterations = 0;
+    // A model that keeps asking for the same thing is stuck, not working. Detect it
+    // rather than burning the whole iteration budget on identical calls.
+    const attempted = new Set<string>();
+    let repeated: string | null = null;
     while (completion.toolCalls.length && iterations < this.deps.maxToolIterations) {
       iterations += 1;
+      const signature = completion.toolCalls
+        .map((call) => `${call.name}:${JSON.stringify(call.arguments ?? {})}`)
+        .sort()
+        .join("|");
+      if (attempted.has(signature)) {
+        repeated = completion.toolCalls.map((call) => call.name).join(", ");
+        break;
+      }
+      attempted.add(signature);
       if (options?.signal?.aborted) return this.cancelledTurn(userText, toolCalls, at, completion);
       const toolMessages: ChatMessage[] = [];
       for (const call of completion.toolCalls) {
@@ -266,7 +355,7 @@ export class Agent {
           role: "tool",
           name: call.name,
           toolCallId: call.id,
-          content: JSON.stringify(
+          content: encodeToolResult(
             record.result ?? { pending: true, reason: record.decision.reason },
           ),
         });
@@ -287,6 +376,8 @@ export class Agent {
       // that makes a real backend reject every later turn, silently degrading the
       // conversation to the offline stub.
       this.deps.history.push(...toolMessages);
+      const refitted = fitContext(messages);
+      if (refitted.dropped) messages.splice(0, messages.length, ...refitted.messages);
       completion = await this.deps.models.complete({
         messages,
         tools,
@@ -297,6 +388,32 @@ export class Agent {
       });
       if (completion.aborted) return this.cancelledTurn(userText, toolCalls, at, completion);
       if (completion.unavailable) break;
+    }
+
+    if (repeated) {
+      // Say what happened. Silently returning the last reply would hide a stuck model.
+      const reply = [
+        completion.text.trim(),
+        `I stopped because I was about to repeat the same call to ${repeated} without new information.`,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      this.deps.history.push({ role: "assistant", content: reply });
+      this.trimHistory();
+      return this.turn(userText, reply, ["could_not_access"], toolCalls, pending, at, undefined, completion);
+    }
+
+    if (iterations >= this.deps.maxToolIterations && completion.toolCalls.length) {
+      const reply = [
+        completion.text.trim(),
+        `I stopped after ${iterations} tool steps, which is the configured limit for one turn. The work may be incomplete - ask me to continue if it looks unfinished.`,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      this.deps.log.warn("model", "Tool iteration cap reached", { iterations });
+      this.deps.history.push({ role: "assistant", content: reply });
+      this.trimHistory();
+      return this.turn(userText, reply, ["could_not_access"], toolCalls, pending, at, undefined, completion);
     }
 
     if (pending.length) {
