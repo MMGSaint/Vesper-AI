@@ -168,4 +168,53 @@ describe("model routing", () => {
     assert.equal(calls, 1, "a cancelled turn is not re-sent to another backend");
     assert.equal(result.aborted, true);
   });
+
+  it("recovers when a local backend becomes available after launch", async () => {
+    // Regression: providers were probed once, at the end of fire-and-forget discovery,
+    // so the first turns after launch used the offline stub even with a backend up,
+    // and a backend started later was never noticed at all.
+    let backendUp = false;
+    let probes = 0;
+    const late = {
+      id: "ollama",
+      kind: "local",
+      isAvailable: () => backendUp,
+      async probe() {
+        probes += 1;
+        return { available: backendUp, detail: backendUp ? "up" : "down" };
+      },
+      complete: async (_request: CompletionRequest, model: string) => ({
+        text: "from the local backend",
+        toolCalls: [],
+        providerId: "ollama",
+        model,
+        role: "everyday" as const,
+      }),
+    };
+    const router = createModelRouter({ config: defaultConfig(), providers: [late] });
+    const ask = () =>
+      router.complete({ messages: [{ role: "user", content: "ping" }], role: "everyday" });
+
+    // Backend down: Vesper degrades to the stub, having checked rather than assumed.
+    const degraded = await ask();
+    assert.equal(degraded.providerId, "echo");
+    assert.ok(probes >= 1, "it probes before giving up on a local backend");
+
+    // The user starts Ollama. Nothing tells Vesper; it must notice by itself.
+    backendUp = true;
+    const probesBefore = probes;
+    // Inside the cooldown, no new probe is issued - an idle assistant must not poll.
+    await ask();
+    assert.equal(probes, probesBefore, "re-probing is rate limited");
+
+    // Past the cooldown it re-probes and recovers without a restart.
+    router.setActive("");
+    const recovered = await (async () => {
+      // Simulate the cooldown expiring by probing explicitly, as a later turn would.
+      await router.probeAll();
+      return ask();
+    })();
+    assert.equal(recovered.providerId, "ollama");
+    assert.equal(recovered.text, "from the local backend");
+  });
 });

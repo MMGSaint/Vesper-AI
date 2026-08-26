@@ -76,6 +76,28 @@ export function createModelRouter(input: {
   if (!providers.some((provider) => provider.id === "echo")) providers.push(echo);
 
   let activeId: string | undefined;
+  let lastProbeAt = 0;
+
+  /**
+   * Providers were probed once, at the end of fire-and-forget first-boot discovery, and
+   * never again - so the first messages after launch fell back to the offline stub even
+   * with a backend running, `--skip-discovery` meant no probe ever happened, and a
+   * backend started *after* Vesper was never noticed.
+   *
+   * Re-probing lazily, only when no local backend appears available, keeps an idle
+   * assistant free of background polling while still recovering on its own.
+   */
+  const REPROBE_AFTER_MS = 15_000;
+
+  async function reprobeIfStale(): Promise<void> {
+    if (Date.now() - lastProbeAt < REPROBE_AFTER_MS) return;
+    lastProbeAt = Date.now();
+    await Promise.all(
+      providers.map((provider) =>
+        provider.probe?.().catch(() => undefined),
+      ),
+    );
+  }
 
   async function pick(role: ModelRole): Promise<{ provider: AnyProvider; model: string }> {
     if (activeId) {
@@ -95,9 +117,23 @@ export function createModelRouter(input: {
       );
       if (match) return { provider: match, model: preferred.model };
     }
-    const local = providers.find(
+    let local = providers.find(
       (provider) => provider.kind === "local" && provider.isAvailable(),
     );
+    if (!local) {
+      // No local backend looks available. That may simply be stale information.
+      await reprobeIfStale();
+      const preferredNow = input.config.models.roles[role];
+      if (preferredNow) {
+        const match = providers.find(
+          (provider) => provider.id === preferredNow.provider && provider.isAvailable(),
+        );
+        if (match) return { provider: match, model: preferredNow.model };
+      }
+      local = providers.find(
+        (provider) => provider.kind === "local" && provider.isAvailable(),
+      );
+    }
     if (local) {
       return {
         provider: local,
@@ -147,7 +183,8 @@ export function createModelRouter(input: {
       };
     },
     async probeAll() {
-      await Promise.all(providers.map((provider) => provider.probe?.()));
+      lastProbeAt = Date.now();
+      await Promise.all(providers.map((provider) => provider.probe?.().catch(() => undefined)));
     },
     providers() {
       return providers.slice();
