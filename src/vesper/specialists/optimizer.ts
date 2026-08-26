@@ -417,25 +417,83 @@ export function createHttpOptimizerAdapter(
       return parsed;
     },
     async requestOptimization(input) {
+      // Anything that can change machine state leaves a trail: what was asked, with
+      // which parameters, and what actually came back - including the failures.
+      log?.info("optimizer", "Optimizer state change requested", {
+        action: "request_optimization",
+        mode: "live",
+        origin,
+        profile: input.profile ?? null,
+        reason: input.reason ?? null,
+      });
       const result = await call("/optimize", { method: "POST", body: JSON.stringify(input) });
-      if (!result.ok) return { accepted: false, summary: `I could not access the optimizer: ${result.error}` };
+      if (!result.ok) {
+        log?.warn("optimizer", "Optimizer state change failed", {
+          action: "request_optimization",
+          mode: "live",
+          origin,
+          error: result.error,
+        });
+        return { accepted: false, summary: `I could not access the optimizer: ${result.error}` };
+      }
       const parsed = parseAccepted(result.data);
       if (!parsed) {
-        log?.warn("optimizer", "Optimizer did not confirm optimization", {});
+        log?.warn("optimizer", "Optimizer did not confirm optimization", {
+          action: "request_optimization",
+          mode: "live",
+          origin,
+        });
         return { accepted: false, summary: "The optimizer did not confirm that an optimization happened." };
       }
       if (parsed.accepted !== true) {
+        log?.info("optimizer", "Optimizer declined the request", {
+          action: "request_optimization",
+          mode: "live",
+          origin,
+          summary: parsed.summary || null,
+        });
         return { accepted: false, summary: parsed.summary || "The optimizer declined the request." };
       }
+      log?.info("optimizer", "Optimizer confirmed an optimization", {
+        action: "request_optimization",
+        mode: "live",
+        origin,
+        profile: input.profile ?? null,
+        summary: parsed.summary || null,
+      });
       return parsed;
     },
     async requestRollback() {
+      log?.info("optimizer", "Optimizer state change requested", {
+        action: "request_rollback",
+        mode: "live",
+        origin,
+      });
       const result = await call("/rollback", { method: "POST" });
-      if (!result.ok) return { accepted: false, summary: `I could not access the optimizer: ${result.error}` };
+      if (!result.ok) {
+        log?.warn("optimizer", "Optimizer state change failed", {
+          action: "request_rollback",
+          mode: "live",
+          origin,
+          error: result.error,
+        });
+        return { accepted: false, summary: `I could not access the optimizer: ${result.error}` };
+      }
       const parsed = parseAccepted(result.data);
       if (!parsed || parsed.accepted !== true) {
+        log?.warn("optimizer", "Optimizer did not confirm rollback", {
+          action: "request_rollback",
+          mode: "live",
+          origin,
+        });
         return { accepted: false, summary: "The optimizer did not confirm that a rollback happened." };
       }
+      log?.info("optimizer", "Optimizer confirmed a rollback", {
+        action: "request_rollback",
+        mode: "live",
+        origin,
+        summary: parsed.summary || null,
+      });
       return parsed;
     },
     async getLastAction() {

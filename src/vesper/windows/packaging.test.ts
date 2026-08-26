@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
+import { configFile, resolveVesperDirs } from "../paths.ts";
 import { describeInstallPlan, describeResetPlan, describeUninstallPlan } from "./packaging.ts";
 import { createNativeTrayAdapter } from "./native-tray.ts";
 import { detectApprovedApps } from "./apps.ts";
@@ -63,5 +66,49 @@ describe("windows packaging and lifecycle", () => {
     const result = await life.shutdown("test");
     assert.equal(result.ok, false);
     assert.match(result.summary, /hook failed/);
+  });
+
+  it("the installer writes the config file the runtime actually reads", async () => {
+    // Regression: install.ps1 wrote config\vesper.config.json while paths.ts read
+    // config\vesper.json, so on a real install every setting the installer produced
+    // was silently ignored.
+    const script = await readFile(
+      join(process.cwd(), "packaging", "windows", "install.ps1"),
+      "utf8",
+    );
+    const match = /Join-Path \$root "config\\([^"]+)"/.exec(script);
+    assert.ok(match, "install.ps1 must set a config path under config\\");
+
+    const runtimeConfigName = basename(
+      configFile(
+        resolveVesperDirs({ production: true, env: { LOCALAPPDATA: "C:\\Users\\test\\AppData\\Local" } }),
+      ),
+    );
+    assert.equal(
+      match[1],
+      runtimeConfigName,
+      "installer and runtime must agree on the config filename",
+    );
+  });
+
+  it("the installer only creates directories the runtime resolves", async () => {
+    const script = await readFile(
+      join(process.cwd(), "packaging", "windows", "install.ps1"),
+      "utf8",
+    );
+    const dirs = /\$dirs = @\(([^)]+)\)/.exec(script);
+    assert.ok(dirs, "install.ps1 must declare the directories it creates");
+    const declared = [...dirs[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]);
+    const resolved = resolveVesperDirs({
+      production: true,
+      env: { LOCALAPPDATA: "C:\\Users\\test\\AppData\\Local" },
+    });
+    for (const name of ["config", "data", "logs", "models"]) {
+      assert.ok(declared.includes(name), `installer should create ${name}`);
+      assert.ok(
+        Object.values(resolved).some((value) => String(value).endsWith(name)),
+        `runtime should resolve a ${name} directory`,
+      );
+    }
   });
 });

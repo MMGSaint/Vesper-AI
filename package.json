@@ -12,7 +12,8 @@
     "security": "node --experimental-strip-types --test src/vesper/security.test.ts src/vesper/security-hostile.test.ts",
     "hygiene": "node scripts/hygiene.mjs",
     "doctor": "node --experimental-strip-types src/vesper/host/main.ts --doctor --skip-discovery",
-    "build": "tsc --noEmit"
+    "build": "tsc --noEmit",
+    "package": "node scripts/package.mjs"
   },
   "engines": {
     "node": ">=22"
