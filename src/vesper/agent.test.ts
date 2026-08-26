@@ -304,4 +304,31 @@ describe("agent", () => {
     const second = await runtime.chat("this one must still work");
     assert.match(second.reply, /recovered/);
   });
+
+  it("understands a memory category in conversation, as the console does", async () => {
+    // The console's /remember accepts "preference: ...". The chat path did not, so the
+    // same phrase stored a different category depending on which interface was used,
+    // and the reply read as though a category had been chosen when it had not.
+    const runtime = await testRuntime();
+    await runtime.chat("remember preference: I stream on Friday nights with OBS");
+    const hits = await runtime.memory.search("stream Friday nights", { limit: 3 });
+    const stored = hits.find((hit) => hit.value.includes("Friday nights"));
+    assert.ok(stored, "the memory is stored");
+    assert.equal(stored?.category, "preference");
+    assert.ok(!stored?.value.startsWith("preference:"), "the category tag is not kept in the value");
+  });
+
+  it("still stores an untagged sentence as a plain fact", async () => {
+    const runtime = await testRuntime();
+    await runtime.chat("remember that my main game is Squad");
+    const hits = await runtime.memory.search("main game Squad", { limit: 3 });
+    assert.ok(hits.some((hit) => hit.value.includes("Squad")));
+  });
+
+  it("does not treat an unknown prefix as a category", () => {
+    const intent = classifyIntent("remember bananas: they are yellow");
+    assert.equal(intent?.kind, "remember");
+    // "bananas" is not a category, so the old key/value split still applies.
+    assert.equal(intent?.slots.category, undefined);
+  });
 });

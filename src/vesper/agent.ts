@@ -11,6 +11,7 @@ import type { SimulatedHardware } from "./hardware/simulated.ts";
 import type { OptimizerAdapter } from "./specialists/optimizer.ts";
 import { VESPER_SYSTEM_PROMPT, composeStatusReply } from "./personality.ts";
 import { formatWorkloadContext, inspectWorkload } from "./specialists/context.ts";
+import { MEMORY_CATEGORIES } from "./types.ts";
 import type {
   AgentTurn,
   ChatMessage,
@@ -761,6 +762,22 @@ export function classifyIntent(text: string): DirectIntent | null {
   const remember = /^(remember(?: that)?|note that)\s+(.+)$/i.exec(trimmed);
   if (remember) {
     const payload = remember[2] ?? "";
+    // "remember preference: ..." names a category, exactly as the console's /remember
+    // does. Without this the two interfaces disagree and the reply reads as though a
+    // category were chosen when only a key was.
+    const tagged = /^([a-z]+):\s*(.+)$/i.exec(payload);
+    const category =
+      tagged && (MEMORY_CATEGORIES as readonly string[]).includes(tagged[1].toLowerCase())
+        ? tagged[1].toLowerCase()
+        : undefined;
+    if (category && tagged) {
+      const value = tagged[2].trim();
+      return {
+        kind: "remember",
+        confidence: 0.95,
+        slots: { key: value.slice(0, 48), value, category },
+      };
+    }
     const split = payload.split(/\s+is\s+|\s+as\s+|:\s+/i);
     const key = split.length > 1 ? split[0].trim() : payload.slice(0, 48).trim();
     const value = split.length > 1 ? split.slice(1).join(" ").trim() : payload;
