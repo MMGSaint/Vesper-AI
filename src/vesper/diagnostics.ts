@@ -18,6 +18,7 @@ export function buildDiagnostics(input: {
   optimizer: OptimizerStatus;
   windows: DiagnosticReport["windows"];
   voice: DiagnosticReport["voice"];
+  knowledge: DiagnosticReport["knowledge"];
   context: WorkloadContext;
   capability: CapabilityProfile | null;
   recentErrors: { at: string; message: string }[];
@@ -33,7 +34,11 @@ export function buildDiagnostics(input: {
       ? "implemented_hardware_dependent"
       : "mocked_simulated",
     windows: input.windows.simulated ? "mocked_simulated" : "implemented_hardware_dependent",
-    voice: input.voice.available ? "implemented_hardware_dependent" : "documented_not_implemented",
+    // The software half - turning an audio buffer into text and back - is implemented
+    // and tested against real subprocesses. Whether it runs on a given host depends on
+    // an installed backend and, ultimately, on audio devices nothing here has opened.
+    voice: "implemented_hardware_dependent",
+    knowledge: "implemented_tested",
     telemetry: input.capability?.telemetry ?? "mocked_simulated",
   };
 
@@ -51,6 +56,7 @@ export function buildDiagnostics(input: {
     optimizer: input.optimizer,
     windows: input.windows,
     voice: input.voice,
+    knowledge: input.knowledge,
     context: input.context,
     capability: input.capability,
     recentErrors: input.recentErrors,
@@ -74,6 +80,7 @@ export function formatDiagnostics(report: DiagnosticReport): string {
     `Windows: ${report.windows.simulated ? "simulated host" : report.windows.platform}. Tray ${
       report.windows.trayAvailable ? "interface present" : "unavailable"
     }.`,
+    `Knowledge: ${report.knowledge.sources} approved source(s). ${report.knowledge.detail}`,
     `Voice: ${report.voice.enabled ? `${report.voice.stt}/${report.voice.tts}` : "disabled"} (${
       report.voice.available ? "available" : "not capturing audio"
     }).`,
