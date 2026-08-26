@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testRuntime } from "./test-helpers.ts";
@@ -8,7 +8,8 @@ import { readApproved, writeApproved } from "./tools/filesystem.ts";
 import { KnowledgeIndex } from "./knowledge/rag.ts";
 import { evaluatePermission } from "./permissions.ts";
 import type { PermissionLevel } from "./types.ts";
-import { parseConfig } from "./config.ts";
+import { defaultConfig, parseConfig } from "./config.ts";
+import { writeConfigIfMissing } from "./config-file.ts";
 import { looksLikeSecretValue, isSafeExecutableName, containsTraversal } from "./security.ts";
 import { createHttpOptimizerAdapter } from "./specialists/optimizer.ts";
 import { createClientGateway } from "./client/gateway.ts";
@@ -184,5 +185,43 @@ describe("hostile security review", () => {
     assert.equal(decision.allowed, false);
     assert.equal(decision.requiresConfirmation, false);
     assert.match(decision.reason, /unrecognised permission level/i);
+  });
+
+  it("never leaks an OBS password into logs, diagnostics, or the config file", async () => {
+    const secret = "obs-websocket-password-do-not-leak";
+    const runtime = await testRuntime({
+      config: { obs: { enabled: false, url: "ws://127.0.0.1:4455", password: secret, timeoutMs: 100 } },
+    });
+
+    // Force traffic through the paths that could carry it.
+    await runtime.chat("what's happening?");
+    const record = await runtime.tools.invoke({
+      name: "obs_status",
+      args: {},
+      workspaceId: "general",
+    });
+    const report = await runtime.diagnostics();
+
+    const surfaces = [
+      JSON.stringify(runtime.log.entries()),
+      report.reportText,
+      JSON.stringify(report),
+      JSON.stringify(record),
+    ];
+    for (const surface of surfaces) {
+      assert.ok(!surface.includes(secret), "the OBS password must never be surfaced");
+    }
+    await runtime.stop();
+  });
+
+  it("does not write the OBS password into the starter config file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "vesper-obs-cfg-"));
+    const path = join(dir, "vesper.json");
+    const config = defaultConfig({
+      obs: { enabled: true, url: "ws://127.0.0.1:4455", password: "leaky", timeoutMs: 100 },
+    });
+    await writeConfigIfMissing(path, config);
+    const written = await readFile(path, "utf8");
+    assert.ok(!written.includes("leaky"), "the starter config must not persist a secret");
   });
 });
