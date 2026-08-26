@@ -244,4 +244,64 @@ describe("agent", () => {
     assert.ok(calls <= 3, `stopped after ${calls} model calls`);
     assert.ok(turn.epistemic.includes("could_not_access"));
   });
+
+  it("serializes concurrent turns so history is never spliced together", async () => {
+    // The console, a scheduled task, and a companion session share one conversation.
+    // A turn mutates it in several steps, so interleaving two turns reproduces the
+    // dangling-tool-call corruption that history integrity exists to prevent.
+    const seen: ChatMessage[][] = [];
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    const slow = {
+      id: "slow",
+      kind: "local" as const,
+      isAvailable: () => true,
+      async probe() {
+        return { available: true, detail: "slow" };
+      },
+      async complete(request: CompletionRequest, model: string) {
+        inFlight += 1;
+        maxConcurrent = Math.max(maxConcurrent, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        seen.push(request.messages);
+        inFlight -= 1;
+        return { text: "ok", toolCalls: [], providerId: "slow", model, role: request.role };
+      },
+    };
+
+    const runtime = await testRuntime({ providers: [slow] });
+    await Promise.all([
+      runtime.chat("first question"),
+      runtime.chat("second question"),
+      runtime.chat("third question"),
+    ]);
+
+    assert.equal(maxConcurrent, 1, "only one turn touches the conversation at a time");
+    // Each later turn sees the previous exchange complete, never half of it.
+    const last = seen.at(-1)!;
+    const userTurns = last.filter((message) => message.role === "user").length;
+    assert.ok(userTurns >= 2, "earlier turns are present and whole");
+  });
+
+  it("a failed turn does not wedge the queue", async () => {
+    let calls = 0;
+    const flaky = {
+      id: "flaky",
+      kind: "local" as const,
+      isAvailable: () => true,
+      async probe() {
+        return { available: true, detail: "flaky" };
+      },
+      async complete(request: CompletionRequest, model: string) {
+        calls += 1;
+        if (calls === 1) throw new Error("backend exploded");
+        return { text: "recovered", toolCalls: [], providerId: "flaky", model, role: request.role };
+      },
+    };
+    const runtime = await testRuntime({ providers: [flaky] });
+    const first = await runtime.chat("this one fails");
+    assert.ok(first.reply.length > 0, "the failure is reported, not thrown at the user");
+    const second = await runtime.chat("this one must still work");
+    assert.match(second.reply, /recovered/);
+  });
 });

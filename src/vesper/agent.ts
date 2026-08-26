@@ -157,8 +157,35 @@ const READY_APPS: Record<string, string[]> = {
 
 export class Agent {
   private readonly deps: AgentDeps;
+  /**
+   * Turns are serialized. The console, a scheduled task, and a companion session all
+   * share one conversation, and a turn mutates it in several steps: user message, tool
+   * calls, tool results, reply. Interleaving two turns splices those sequences into
+   * each other and reproduces exactly the dangling-tool-call corruption that history
+   * integrity is meant to prevent.
+   */
+  private queue: Promise<unknown> = Promise.resolve();
+
   constructor(deps: AgentDeps) {
     this.deps = deps;
+  }
+
+  handle(
+    userText: string,
+    options?: {
+      confirmId?: string;
+      approve?: boolean;
+      signal?: AbortSignal;
+      onDelta?: (delta: string) => void;
+    },
+  ): Promise<AgentTurn> {
+    const run = this.queue.then(
+      () => this.handleExclusive(userText, options),
+      () => this.handleExclusive(userText, options),
+    );
+    // The queue must survive a failed turn, so it chains on settlement, not success.
+    this.queue = run.catch(() => undefined);
+    return run;
   }
 
   /**
@@ -178,7 +205,7 @@ export class Agent {
     return this.turn(userText, reply, ["could_not_access"], toolCalls, [], at, undefined, completion);
   }
 
-  async handle(
+  private async handleExclusive(
     userText: string,
     options?: {
       confirmId?: string;
