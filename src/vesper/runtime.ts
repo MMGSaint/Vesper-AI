@@ -487,6 +487,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
         stt: config.voice.stt,
         tts: config.voice.tts,
         pushToTalk: config.voice.pushToTalk,
+        sttModel: config.voice.sttModel,
+        ttsModel: config.voice.ttsModel,
+        sttLanguage: config.voice.sttLanguage,
+        sttArgs: config.voice.sttArgs,
+        ttsArgs: config.voice.ttsArgs,
       })
     : createDisabledVoice();
   const voiceSession = createVoiceSession(voice);

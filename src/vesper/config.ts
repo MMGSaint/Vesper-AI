@@ -164,8 +164,25 @@ export const vesperConfigSchema = z.object({
       stt: z.string().default("faster-whisper"),
       tts: z.string().default("piper"),
       pushToTalk: z.boolean().default(false),
+      /** Whisper model name or CTranslate2 model directory. */
+      sttModel: z.string().default("base"),
+      /** Piper voice, normally a path to a .onnx file. */
+      ttsModel: z.string().default("en_US-lessac-medium"),
+      sttLanguage: z.string().optional(),
+      /** Extra arguments appended verbatim, for a local build with a different CLI. */
+      sttArgs: z.array(z.string()).default([]),
+      ttsArgs: z.array(z.string()).default([]),
     })
-    .default({ enabled: false, stt: "faster-whisper", tts: "piper", pushToTalk: false }),
+    .default({
+      enabled: false,
+      stt: "faster-whisper",
+      tts: "piper",
+      pushToTalk: false,
+      sttModel: "base",
+      ttsModel: "en_US-lessac-medium",
+      sttArgs: [],
+      ttsArgs: [],
+    }),
   notifications: z
     .object({
       enabled: z.boolean().default(true),

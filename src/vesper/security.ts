@@ -20,15 +20,44 @@ export function isPathInside(root: string, candidate: string): boolean {
   return !rel.startsWith("..") && !isAbsolute(rel);
 }
 
+/**
+ * Directories that are never a legitimate approved root, at any depth. These belong to
+ * the operating system, not the user.
+ */
+const SYSTEM_DIRECTORIES =
+  /^(?:[a-zA-Z]:)?\/(etc|proc|sys|dev|boot|root|windows|winnt|program files( \(x86\))?|programdata|\$recycle\.bin)(\/|$)/i;
+
+/** `System32` is dangerous wherever it appears, not only directly under a drive root. */
+const SYSTEM32 = /(^|\/)system32(\/|$)/i;
+
+/**
+ * Containers holding every user's profile, and a whole profile itself. Approving one of
+ * these means approving somebody's entire home directory, which is too broad - but
+ * anything *inside* a profile is exactly where a user's notes and projects live and
+ * must remain approvable.
+ *
+ *   C:/Users          -> refused (every profile)
+ *   C:/Users/sam      -> refused (a whole profile)
+ *   C:/Users/sam/notes-> allowed
+ */
+const PROFILE_CONTAINER = /^(?:[a-zA-Z]:)?\/(home|users)(?:\/[^/]+)?$/i;
+
 export function isDangerousRoot(root: string): boolean {
   const trimmed = root.trim();
   if (!trimmed) return true;
   if (containsTraversal(trimmed)) return true;
-  const unix = trimmed.replace(/\\/g, "/");
-  if (unix === "/" || unix === ".") return true;
-  if (/^[a-zA-Z]:[\\/]?$/.test(trimmed)) return true;
-  if (/^\/(etc|windows|system32|home|users|root)(\/|$)/i.test(unix)) return true;
-  if (/^[a-zA-Z]:\/(windows|users|program files)/i.test(unix)) return true;
+
+  // Normalise separators and drop trailing slashes so "C:\\Users\\" and "C:/Users"
+  // are judged identically.
+  const unix = trimmed.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (unix === "" || unix === "/" || unix === ".") return true;
+  // A bare drive: "C:", "C:\", "C:/".
+  if (/^[a-zA-Z]:$/.test(unix)) return true;
+
+  if (SYSTEM_DIRECTORIES.test(unix)) return true;
+  if (SYSTEM32.test(unix)) return true;
+  if (PROFILE_CONTAINER.test(unix)) return true;
+
   return false;
 }
 
