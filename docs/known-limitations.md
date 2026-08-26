@@ -23,11 +23,16 @@ all of this work. Nothing below has been observed on it.
 
 - **MCP client.** `integrations/mcp.ts` reports configuration status. It is not an MCP
   client, it speaks no JSON-RPC, and it contacts no server.
-- **OBS WebSocket.** OBS state is inferred from process presence, and reported as
-  inferred rather than observed.
 - **Companion transport.** `vesper.client` v1 is in-process only. There is no pairing,
   no listener, and no LAN TLS.
 - **Wake word.** Deliberately out of scope; push-to-talk is the activation model.
+
+## Partly done
+
+- **OBS.** Vesper speaks obs-websocket v5 and asks OBS directly, so recording and
+  streaming state is *observed*. It is off by default (`obs.enabled`) and has only ever
+  talked to a fake server; a live OBS session is unvalidated. When it is not connected,
+  Vesper falls back to process presence and says the state is not confirmed.
 
 ## Real, and worth knowing
 

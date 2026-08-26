@@ -9,6 +9,7 @@ import { explainPerformance, inspectWorkload } from "../specialists/context.ts";
 import { gpuConsumers, groundedConclusions } from "../specialists/gaming.ts";
 import type { ToolRegistry } from "./registry.ts";
 import { correlateAround, explainCorrelations } from "../correlate.ts";
+import type { ObsClient } from "../specialists/obs.ts";
 import type { DiagnosticReport, JsonObject, MemoryCategory, ToolSpec } from "../types.ts";
 import type { WindowsHost } from "../windows/host.ts";
 import type { WorkspaceManager } from "../workspaces.ts";
@@ -53,6 +54,7 @@ export function registerBuiltinTools(input: {
   workspaces: WorkspaceManager;
   events: EventBus;
   notifications: NotificationHub;
+  obs?: ObsClient;
   voice?: VoiceModule;
   voiceSession?: VoiceSession;
   background?: BackgroundRuntime;
@@ -72,6 +74,7 @@ export function registerBuiltinTools(input: {
     workspaces,
     events,
     notifications,
+    obs,
     voice,
     voiceSession,
     background,
@@ -689,6 +692,40 @@ export function registerBuiltinTools(input: {
       }
       await background.resume();
       return { ok: true, epistemic: "changed", summary: `Background state is ${background.state()}.` };
+    },
+  );
+
+  registry.register(
+    spec(
+      "obs_status",
+      "Ask OBS Studio directly whether it is recording or streaming.",
+      "read",
+      {},
+    ),
+    async () => {
+      if (!obs) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary: "OBS integration is not configured on this host.",
+        };
+      }
+      const status = obs.isConnected() ? await obs.status() : await obs.connect();
+      if (!status.observed) {
+        // Falling back to process presence is fine; calling it observed is not.
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary: `${status.detail} I can still see whether the OBS process is running, but that does not tell me if it is recording.`,
+          data: status as unknown as JsonObject,
+        };
+      }
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: status.detail,
+        data: status as unknown as JsonObject,
+      };
     },
   );
 

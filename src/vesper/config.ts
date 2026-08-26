@@ -146,6 +146,16 @@ export const vesperConfigSchema = z.object({
     )
     .default([]),
   approvedRoots: z.array(z.string()).default([]),
+  obs: z
+    .object({
+      /** Off by default: connecting to OBS is the user's choice, not an assumption. */
+      enabled: z.boolean().default(false),
+      url: z.string().default("ws://127.0.0.1:4455"),
+      /** obs-websocket password. Never logged, never exported. */
+      password: z.string().optional(),
+      timeoutMs: z.number().default(3000),
+    })
+    .default({ enabled: false, url: "ws://127.0.0.1:4455", timeoutMs: 3000 }),
   embeddings: z
     .object({
       /**
@@ -326,6 +336,7 @@ const DEFAULT_CONFIG_INPUT: Record<string, unknown> = {
   workspaces: DEFAULT_WORKSPACES,
   approvedApps: DEFAULT_APPS,
   approvedRoots: ["notes", "docs", "knowledge"],
+  obs: { enabled: false, url: "ws://127.0.0.1:4455", timeoutMs: 3000 },
   embeddings: { model: "nomic-embed-text", provider: "ollama", enabled: true },
   knowledgeSources: [
     {

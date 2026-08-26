@@ -33,6 +33,7 @@ import { Agent } from "./agent.ts";
 import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
 import { buildDiagnostics } from "./diagnostics.ts";
 import { createId } from "./id.ts";
+import { createObsClient, type ObsClient } from "./specialists/obs.ts";
 import { describeStartupRegistration } from "./windows/startup.ts";
 import type {
   AgentTurn,
@@ -66,6 +67,7 @@ export class VesperRuntime {
   readonly notifications: NotificationHub;
   readonly hardware: SimulatedHardware;
   readonly optimizer: OptimizerAdapter;
+  readonly obs: ObsClient;
   readonly tools: ToolRegistry;
   readonly models: ModelRouter;
   readonly agent: Agent;
@@ -93,6 +95,7 @@ export class VesperRuntime {
       notifications: NotificationHub;
       hardware: SimulatedHardware;
       optimizer: OptimizerAdapter;
+      obs: ObsClient;
       tools: ToolRegistry;
       models: ModelRouter;
       agent: Agent;
@@ -115,6 +118,7 @@ export class VesperRuntime {
     this.notifications = parts.notifications;
     this.hardware = parts.hardware;
     this.optimizer = parts.optimizer;
+    this.obs = parts.obs;
     this.tools = parts.tools;
     this.models = parts.models;
     this.agent = parts.agent;
@@ -146,6 +150,15 @@ export class VesperRuntime {
       title: "Vesper is awake",
       severity: "info",
     });
+    if (this.config.obs.enabled) {
+      // Fire and forget: OBS being down must never delay or fail startup.
+      void this.obs.connect().then((status) => {
+        this.log.info("event", "OBS connection attempt finished", {
+          connected: status.connected,
+          observed: status.observed,
+        });
+      });
+    }
     if (!this.skipDiscovery) {
       void this.discoverInBackground();
     }
@@ -178,6 +191,7 @@ export class VesperRuntime {
     this.memory.clearSession();
     this.scheduler.stop();
     await this.persistConfirmations();
+    this.obs.disconnect();
     await this.events.flush();
     await this.background.stop();
     this.log.info("lifecycle", "Vesper stopped");
@@ -479,6 +493,22 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     ],
     { approvedRoots: config.approvedRoots, embeddings: knowledgeEmbeddings },
   );
+  // OBS is asked directly when enabled, so recording state becomes observed rather than
+  // inferred from process presence. Its state changes are emitted as events, which is
+  // what lets `explain_change` say "OBS started recording 40s before".
+  const obs = createObsClient({
+    url: config.obs.url,
+    password: config.obs.password,
+    timeoutMs: config.obs.timeoutMs,
+    onStateChange: (change) => {
+      events.emit({
+        type: "obs.state",
+        title: change.detail,
+        severity: "info",
+        data: { kind: change.kind, active: change.active },
+      });
+    },
+  });
   const workspaces = new WorkspaceManager(config);
   // The event log is persisted so correlation still works after a restart or crash,
   // which is exactly when 'what happened just before this?' matters most.
@@ -559,6 +589,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   const runtimeRef: { current: VesperRuntime | null } = { current: null };
   registerBuiltinTools({
     registry: tools,
+    obs,
     config,
     hardware,
     windows,
@@ -604,6 +635,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     notifications,
     hardware,
     optimizer,
+    obs,
     tools,
     models,
     agent,

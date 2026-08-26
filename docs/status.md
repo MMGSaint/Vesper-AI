@@ -76,7 +76,7 @@ development host. It never means anything ran on the target Windows PC.
 | Optimizer cooperation (bound explanation, OBS/VRChat context) | IMPLEMENTED + TESTED against simulated context |
 | Event log persistence and time correlation | IMPLEMENTED + TESTED |
 | Gaming / VRChat / OBS adapters | IMPLEMENTED + TESTED against a simulated process list |
-| OBS WebSocket integration | DOCUMENTED BUT NOT IMPLEMENTED |
+| OBS WebSocket integration (obs-websocket v5, observed recording/streaming state) | IMPLEMENTED + TESTED against a fake OBS server; a live OBS session is HARDWARE DEPENDENT |
 | MCP client | DOCUMENTED BUT NOT IMPLEMENTED — `integrations/mcp.ts` reports status only; it is not an MCP client and no server is contacted |
 
 ## Voice
