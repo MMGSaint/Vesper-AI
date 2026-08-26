@@ -14,6 +14,7 @@ import { formatWorkloadContext, inspectWorkload } from "./specialists/context.ts
 import type {
   AgentTurn,
   ChatMessage,
+  CompletionResult,
   EpistemicTag,
   JsonObject,
   MemoryCategory,
@@ -69,7 +70,34 @@ export class Agent {
     this.deps = deps;
   }
 
-  async handle(userText: string, options?: { confirmId?: string; approve?: boolean }): Promise<AgentTurn> {
+  /**
+   * A cancelled turn is recorded honestly: whatever text arrived is kept, the tools
+   * that already ran are reported, and nothing claims to have finished.
+   */
+  private cancelledTurn(
+    userText: string,
+    toolCalls: ToolCallRecord[],
+    at: string,
+    completion: CompletionResult,
+  ): AgentTurn {
+    const partial = completion.text.trim();
+    const reply = partial
+      ? `${partial}\n\n[Stopped at your request. That reply is incomplete.]`
+      : "Stopped at your request. Nothing was completed.";
+    return this.turn(userText, reply, ["could_not_access"], toolCalls, [], at, undefined, completion);
+  }
+
+  async handle(
+    userText: string,
+    options?: {
+      confirmId?: string;
+      approve?: boolean;
+      /** Cancels the turn: the in-flight model call is aborted and no tool runs after it. */
+      signal?: AbortSignal;
+      /** Receives assistant text as it is generated, when the backend can stream. */
+      onDelta?: (delta: string) => void;
+    },
+  ): Promise<AgentTurn> {
     const at = nowIso();
     const workspace = this.deps.workspaces.current();
     const epistemic: EpistemicTag[] = [];
@@ -169,7 +197,11 @@ export class Agent {
       tools,
       role,
       maxTokens: 900,
+      signal: options?.signal,
+      onDelta: options?.onDelta,
     });
+
+    if (completion.aborted) return this.cancelledTurn(userText, toolCalls, at, completion);
 
     if (completion.unavailable) {
       this.deps.log.warn("model", "Model unavailable; using grounded fallback", {
@@ -192,6 +224,7 @@ export class Agent {
     let iterations = 0;
     while (completion.toolCalls.length && iterations < this.deps.maxToolIterations) {
       iterations += 1;
+      if (options?.signal?.aborted) return this.cancelledTurn(userText, toolCalls, at, completion);
       const toolMessages: ChatMessage[] = [];
       for (const call of completion.toolCalls) {
         const record = await this.deps.tools.invoke({
@@ -227,7 +260,15 @@ export class Agent {
         toolCalls: completion.toolCalls,
       });
       messages.push(...toolMessages);
-      completion = await this.deps.models.complete({ messages, tools, role, maxTokens: 900 });
+      completion = await this.deps.models.complete({
+        messages,
+        tools,
+        role,
+        maxTokens: 900,
+        signal: options?.signal,
+        onDelta: options?.onDelta,
+      });
+      if (completion.aborted) return this.cancelledTurn(userText, toolCalls, at, completion);
       if (completion.unavailable) break;
     }
 

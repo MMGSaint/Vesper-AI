@@ -2,6 +2,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { createProductionHost, formatDoctor } from "./service.ts";
 import { CLI_HELP, parseCli } from "../cli.ts";
+import { runConsole } from "./console.ts";
 import { VESPER_NAME, VESPER_VERSION } from "../version.ts";
 import { loadHostConfig } from "../config-file.ts";
 import { configFile, resolveVesperDirs } from "../paths.ts";
@@ -48,7 +49,8 @@ async function main() {
     await host.shutdown();
     process.exit(code);
   };
-  process.on("SIGINT", () => void shutdown(0));
+  const sigintShutdown = () => void shutdown(0);
+  process.on("SIGINT", sigintShutdown);
   process.on("SIGTERM", () => void shutdown(0));
 
   if (command.kind === "diagnostics") {
@@ -112,45 +114,50 @@ async function main() {
     return;
   }
 
-  console.log(`Vesper host ${VESPER_VERSION} started (${runtime.instanceId}). Type a message, /diagnostics, /status, /doctor, /pause, /resume, or /exit.`);
-
   if (!input.isTTY) {
+    // Daemon mode: no console, no prompt. The host stays up for background work and
+    // shuts down on a signal.
+    console.log(
+      `Vesper host ${VESPER_VERSION} started (${runtime.instanceId}) in background mode. No terminal attached.`,
+    );
     return;
   }
 
   const rl = createInterface({ input, output });
+  let sigintHandler: (() => boolean) | null = null;
+  const onSigint = () => {
+    // Ctrl-C cancels the reply in progress; it only stops Vesper when nothing is running.
+    if (sigintHandler?.()) return;
+    void shutdown(0);
+  };
+  process.off("SIGINT", sigintShutdown);
+  process.on("SIGINT", onSigint);
+
   try {
-    for (;;) {
-      const line = (await rl.question("vesper> ")).trim();
-      if (!line) continue;
-      if (line === "/exit") break;
-      if (line === "/pause") {
-        await runtime.pause();
-        console.log("paused");
-        continue;
-      }
-      if (line === "/resume") {
-        await runtime.resume();
-        console.log("resumed");
-        continue;
-      }
-      if (line === "/diagnostics") {
-        const report = await runtime.diagnostics();
-        console.log(report.reportText);
-        continue;
-      }
-      if (line === "/status") {
-        console.log(`${runtime.background.state()} workspace=${runtime.workspaces.current().id} confirms=${runtime.confirmations.size}`);
-        continue;
-      }
-      if (line === "/doctor") {
-        console.log(formatDoctor(await host.doctor()));
-        continue;
-      }
-      const turn = await runtime.chat(line);
-      console.log(turn.reply);
-    }
+    await runConsole({
+      io: {
+        readLine: async (prompt: string) => {
+          try {
+            return await rl.question(prompt);
+          } catch {
+            // The interface closed (Ctrl-D, or shutdown while waiting for input).
+            return null;
+          }
+        },
+        write: (text: string) => output.write(text),
+        writeLine: (text: string) => output.write(`${text}\n`),
+      },
+      runtime,
+      doctor: async () => formatDoctor(await host.doctor()),
+      onInterrupt: (handler) => {
+        sigintHandler = handler;
+        return () => {
+          sigintHandler = null;
+        };
+      },
+    });
   } finally {
+    process.off("SIGINT", onSigint);
     rl.close();
     await host.shutdown();
   }

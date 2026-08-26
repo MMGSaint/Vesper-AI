@@ -186,7 +186,17 @@ export class VesperRuntime {
     await this.background.resume();
   }
 
-  async chat(text: string, options?: { confirmId?: string; approve?: boolean }): Promise<AgentTurn> {
+  async chat(
+    text: string,
+    options?: {
+      confirmId?: string;
+      approve?: boolean;
+      /** Cancels this turn without stopping the host. */
+      signal?: AbortSignal;
+      /** Receives reply text as it is generated, when the backend can stream. */
+      onDelta?: (delta: string) => void;
+    },
+  ): Promise<AgentTurn> {
     if (!this.started) await this.start();
     try {
       const turn = await this.agent.handle(text, options);
