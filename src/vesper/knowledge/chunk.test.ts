@@ -1,8 +1,20 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { chunkText } from "./chunk.ts";
-import { createHashEmbeddings, cosineSimilarity } from "./embeddings.ts";
+import { createHashEmbeddings, cosineSimilarity, type EmbeddingProvider } from "./embeddings.ts";
 import { KnowledgeIndex } from "./rag.ts";
+
+/** Pins the dense half of hybrid scoring so ranking is not left to hash collisions. */
+function fixedEmbeddings(queryVector: number[]): EmbeddingProvider {
+  return {
+    id: "test-fixed",
+    available: () => true,
+    embedSync: () => queryVector,
+    async embed(texts: string[]) {
+      return texts.map((text) => (text.includes("MARKER") ? [1, 0] : [0, 1]));
+    },
+  };
+}
 
 describe("knowledge chunking and local embeddings", () => {
   it("chunks long text with overlap", () => {
@@ -51,6 +63,40 @@ describe("knowledge chunking and local embeddings", () => {
     assert.equal(
       mortis.some((hit) => hit.sourceId === "mortis-approved"),
       false,
+    );
+  });
+
+  it("keeps a dense-only neighbour but ranks the lexical match first", async () => {
+    const index = new KnowledgeIndex(
+      [{ id: "docs", name: "docs", roots: [], enabled: true }],
+      [
+        { sourceId: "docs", path: "a.md", title: "A", text: "hotspot telemetry notes" },
+        { sourceId: "docs", path: "b.md", title: "B", text: "unrelated MARKER prose" },
+      ],
+      { embeddings: fixedEmbeddings([1, 0]) },
+    );
+    await index.reindex();
+    const hits = index.search("hotspot");
+    assert.equal(hits.length, 2, "the dense-only neighbour is still recalled");
+    assert.equal(hits[0]?.title, "A");
+    assert.ok(hits[0]!.score > hits[1]!.score);
+    // Hybrid scores stay bounded, so a long document cannot swamp the dense signal.
+    assert.ok(hits.every((hit) => hit.score <= 1.15));
+  });
+
+  it("drops a document that neither matches lexically nor agrees densely", async () => {
+    const index = new KnowledgeIndex(
+      [{ id: "docs", name: "docs", roots: [], enabled: true }],
+      [
+        { sourceId: "docs", path: "a.md", title: "A", text: "hotspot telemetry MARKER" },
+        { sourceId: "docs", path: "b.md", title: "B", text: "unrelated prose" },
+      ],
+      { embeddings: fixedEmbeddings([1, 0]) },
+    );
+    await index.reindex();
+    assert.deepEqual(
+      index.search("hotspot").map((hit) => hit.title),
+      ["A"],
     );
   });
 });

@@ -25,7 +25,7 @@ describe("optimizer adapter", () => {
   });
 
   it("does not treat malformed HTTP as a confirmed optimization", async () => {
-    const adapter = createHttpOptimizerAdapter("http://optimizer.test", {
+    const adapter = createHttpOptimizerAdapter("http://127.0.0.1:9", {
       timeoutMs: 50,
       retries: 0,
       fetchImpl: (async (input) => {
@@ -48,7 +48,7 @@ describe("optimizer adapter", () => {
 
   it("retries GET status and never throws on timeout", async () => {
     let calls = 0;
-    const adapter = createHttpOptimizerAdapter("http://optimizer.test", {
+    const adapter = createHttpOptimizerAdapter("http://127.0.0.1:9", {
       timeoutMs: 30,
       retries: 1,
       fetchImpl: (async (_input, init) => {

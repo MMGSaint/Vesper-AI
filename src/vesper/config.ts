@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ModelRole, PermissionLevel } from "./types.ts";
+import { checkCloudEndpoint, checkLocalEndpoint } from "./net.ts";
 
 const permissionLevel = z.enum(["read", "safe", "confirm", "never"]);
 const modelRole = z.enum(["fast", "everyday", "reasoning", "coding", "large"]);
@@ -57,6 +58,13 @@ export const vesperConfigSchema = z.object({
   models: z
     .object({
       allowOptionalCloud: z.boolean().default(false),
+      /**
+       * Explicit opt-in for pointing a *local* provider at a non-private host - an
+       * inference box reached over a VPN, say. Off by default: without this an endpoint
+       * declared local must stay on this machine or this LAN, so `allowOptionalCloud:
+       * false` cannot be quietly defeated by rewriting a URL.
+       */
+      allowRemoteEndpoints: z.boolean().default(false),
       roles: z.record(z.string(), modelTargetSchema).default({
         fast: { provider: "ollama", model: "qwen2.5:3b" },
         everyday: { provider: "ollama", model: "qwen2.5:14b" },
@@ -77,8 +85,26 @@ export const vesperConfigSchema = z.object({
           xai: "https://api.x.ai/v1",
         }),
     })
+    .superRefine((models, ctx) => {
+      // `ollama` and `llamacpp` are declared local by the router; an endpoint is the only
+      // thing that decides where their traffic - and any prompt in it - actually goes.
+      for (const name of ["ollama", "llamacpp"] as const) {
+        const check = checkLocalEndpoint(models.endpoints[name], {
+          allowRemote: models.allowRemoteEndpoints,
+          label: `models.endpoints.${name}`,
+        });
+        if (!check.ok) {
+          ctx.addIssue({ code: "custom", path: ["endpoints", name], message: check.reason });
+        }
+      }
+      const cloud = checkCloudEndpoint(models.endpoints.xai, "models.endpoints.xai");
+      if (!cloud.ok) {
+        ctx.addIssue({ code: "custom", path: ["endpoints", "xai"], message: cloud.reason });
+      }
+    })
     .default({
       allowOptionalCloud: false,
+      allowRemoteEndpoints: false,
       roles: {
         fast: { provider: "ollama", model: "qwen2.5:3b" },
         everyday: { provider: "ollama", model: "qwen2.5:14b" },
@@ -156,8 +182,21 @@ export const vesperConfigSchema = z.object({
       endpoint: z.string().nullable().default(null),
       timeoutMs: z.number().default(2500),
       retries: z.number().default(1),
+      /** Explicit opt-in for an optimizer that is not on this machine or this LAN. */
+      allowRemoteEndpoint: z.boolean().default(false),
     })
-    .default({ mode: "mock", endpoint: null, timeoutMs: 2500, retries: 1 }),
+    .superRefine((optimizer, ctx) => {
+      // Validated whenever an endpoint is set, not only in live mode: a stored endpoint
+      // becomes live the moment someone flips `mode`, and it should never have been
+      // accepted in the first place.
+      if (optimizer.endpoint === null) return;
+      const check = checkLocalEndpoint(optimizer.endpoint, {
+        allowRemote: optimizer.allowRemoteEndpoint,
+        label: "optimizer.endpoint",
+      });
+      if (!check.ok) ctx.addIssue({ code: "custom", path: ["endpoint"], message: check.reason });
+    })
+    .default({ mode: "mock", endpoint: null, timeoutMs: 2500, retries: 1, allowRemoteEndpoint: false }),
   voice: z
     .object({
       enabled: z.boolean().default(false),
@@ -276,43 +315,234 @@ export const DEFAULT_APPS = [
   { id: "chrome", name: "Google Chrome", executable: "chrome.exe", aliases: ["chrome", "browser"] },
 ];
 
+/**
+ * The built-in config as raw input, kept separate from `defaultConfig()` so recovery can
+ * restore a single section. Several sections have a thin schema default (`workspaces:
+ * []`) that is deliberately not the real default, so "drop the key and let zod fill it
+ * in" is not good enough on its own.
+ */
+const DEFAULT_CONFIG_INPUT: Record<string, unknown> = {
+  identity: { name: "Vesper", userName: "User" },
+  workspaces: DEFAULT_WORKSPACES,
+  approvedApps: DEFAULT_APPS,
+  approvedRoots: ["notes", "docs", "knowledge"],
+  embeddings: { model: "nomic-embed-text", provider: "ollama", enabled: true },
+  knowledgeSources: [
+    {
+      id: "vesper-docs",
+      name: "Vesper documentation",
+      roots: ["docs"],
+      enabled: true,
+    },
+    {
+      id: "mortis-approved",
+      name: "Approved Mortis notes (local, curated)",
+      roots: ["knowledge/mortis"],
+      workspaceIds: ["mortis"],
+      enabled: true,
+    },
+  ],
+};
+
 export function defaultConfig(overrides?: Record<string, unknown>): VesperConfig {
-  return vesperConfigSchema.parse({
-    identity: { name: "Vesper", userName: "User" },
-    workspaces: DEFAULT_WORKSPACES,
-    approvedApps: DEFAULT_APPS,
-    approvedRoots: ["notes", "docs", "knowledge"],
-    embeddings: { model: "nomic-embed-text", provider: "ollama", enabled: true },
-    knowledgeSources: [
-      {
-        id: "vesper-docs",
-        name: "Vesper documentation",
-        roots: ["docs"],
-        enabled: true,
-      },
-      {
-        id: "mortis-approved",
-        name: "Approved Mortis notes (local, curated)",
-        roots: ["knowledge/mortis"],
-        workspaceIds: ["mortis"],
-        enabled: true,
-      },
-    ],
-    ...overrides,
-  });
+  return vesperConfigSchema.parse({ ...DEFAULT_CONFIG_INPUT, ...overrides });
 }
 
-export function parseConfig(input: unknown): {
+/** Sections that decide what Vesper is allowed to do, or where it is allowed to talk. */
+const SECURITY_SECTIONS = [
+  "permissions",
+  "approvedRoots",
+  "approvedApps",
+  "knowledgeSources",
+  "models",
+  "optimizer",
+  "dataDir",
+];
+
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+/** Enough rounds for a genuinely messy file; a config with more errors than this is broken. */
+const MAX_RECOVERY_ROUNDS = 24;
+
+type ConfigPath = (string | number)[];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSecurityPath(path: string): boolean {
+  return SECURITY_SECTIONS.some((section) => path === section || path.startsWith(`${section}.`));
+}
+
+/**
+ * Remove exactly one setting that failed validation.
+ *
+ * A whole top-level section is put back to its built-in value (once - a second failure on
+ * the same section means the built-in value is not the problem, so the key is dropped and
+ * the schema default applies); anything deeper is deleted; an invalid array element is
+ * spliced out without disturbing its valid siblings.
+ */
+function removeExact(
+  root: Record<string, unknown>,
+  path: ConfigPath,
+  restored: Set<string>,
+): boolean {
+  if (path.length === 0) return false;
+
+  let parent: unknown = root;
+  for (const segment of path.slice(0, -1)) {
+    if (Array.isArray(parent) && typeof segment === "number") parent = parent[segment];
+    else if (isRecord(parent) && !UNSAFE_KEYS.has(String(segment))) parent = parent[String(segment)];
+    else return false;
+  }
+
+  const last = path[path.length - 1];
+  if (last === undefined) return false;
+
+  if (Array.isArray(parent)) {
+    const index = typeof last === "number" ? last : Number(last);
+    if (!Number.isInteger(index) || index < 0 || index >= parent.length) return false;
+    parent.splice(index, 1);
+    return true;
+  }
+  if (!isRecord(parent)) return false;
+
+  const key = String(last);
+  if (
+    path.length === 1 &&
+    !UNSAFE_KEYS.has(key) &&
+    key in DEFAULT_CONFIG_INPUT &&
+    !restored.has(key)
+  ) {
+    restored.add(key);
+    parent[key] = structuredClone(DEFAULT_CONFIG_INPUT[key]);
+    return true;
+  }
+  if (!Object.hasOwn(parent, key)) return false;
+  // Never *assign* through a prototype key; deleting the own property is always safe.
+  Reflect.deleteProperty(parent, key);
+  return true;
+}
+
+/**
+ * A "required field is missing" issue names a key that is not there to delete, so the
+ * smallest thing that can actually be rejected is its container: the array element or
+ * section that is incomplete.
+ */
+function removeEnclosing(
+  root: Record<string, unknown>,
+  path: ConfigPath,
+  restored: Set<string>,
+): string | null {
+  for (let end = path.length - 1; end > 0; end -= 1) {
+    const target = path.slice(0, end);
+    if (removeExact(root, target, restored)) return target.join(".");
+  }
+  return null;
+}
+
+/** Deepest path first, and highest array index first, so a splice cannot shift a later target. */
+function comparePathsDescending(a: ConfigPath, b: ConfigPath): number {
+  const length = Math.max(a.length, b.length);
+  for (let i = 0; i < length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (left === undefined) return 1;
+    if (right === undefined) return -1;
+    if (left === right) continue;
+    if (typeof left === "number" && typeof right === "number") return right - left;
+    return String(left) < String(right) ? 1 : -1;
+  }
+  return 0;
+}
+
+export interface ParsedConfig {
   config: VesperConfig;
   ok: boolean;
   errors: string[];
-} {
-  const result = vesperConfigSchema.safeParse(input);
-  if (result.success) return { config: result.data, ok: true, errors: [] };
-  return {
+  /** Settings that failed validation and were reset to their built-in value. */
+  rejected: string[];
+  /** True when a rejected setting governs permissions, roots, or where Vesper connects. */
+  securityRelevant: boolean;
+}
+
+/**
+ * Parse a config, keeping every setting that validates and refusing every setting that
+ * does not.
+ *
+ * The previous behaviour was to throw the entire config away on the first error and
+ * return the built-in defaults. One typo in `voice.ttsModel` therefore reverted the
+ * user's `permissions`, `approvedRoots`, and optimizer settings without saying which
+ * ones - a silent downgrade that looked identical to a clean boot.
+ *
+ * Now each failing setting is dropped individually and named in `rejected`. Nothing that
+ * could not be validated is kept: a rejected setting falls back to the built-in value,
+ * never to the user's unvalidated one. If the file is too broken to recover, the whole
+ * thing is refused and reported rather than partially applied.
+ */
+export function parseConfig(input: unknown): ParsedConfig {
+  const errors: string[] = [];
+  const rejected: string[] = [];
+
+  const unrecoverable = (): ParsedConfig => ({
     config: defaultConfig(),
     ok: false,
-    errors: result.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
+    errors: errors.length ? [...new Set(errors)] : ["config could not be parsed"],
+    rejected: ["<entire config>"],
+    securityRelevant: true,
+  });
+
+  let candidate: unknown;
+  try {
+    // Recovery edits its input, so it must never touch the caller's object.
+    candidate = structuredClone(input);
+  } catch {
+    return unrecoverable();
+  }
+
+  const restored = new Set<string>();
+  let result = vesperConfigSchema.safeParse(candidate);
+  for (let round = 0; !result.success && round < MAX_RECOVERY_ROUNDS; round += 1) {
+    if (!isRecord(candidate)) break;
+    const paths: ConfigPath[] = [];
+    for (const issue of result.error.issues) {
+      const path = issue.path.filter(
+        (segment): segment is string | number =>
+          typeof segment === "string" || typeof segment === "number",
+      );
+      errors.push(`${path.join(".") || "<root>"}: ${issue.message}`);
+      if (path.length > 0) paths.push(path);
+    }
+    paths.sort(comparePathsDescending);
+    let changed = false;
+    for (const path of paths) {
+      if (!removeExact(candidate, path, restored)) continue;
+      rejected.push(path.join("."));
+      changed = true;
+    }
+    if (!changed) {
+      // Only one escalation per round: removing a container invalidates the sibling
+      // paths this round already collected, so re-parse before touching anything else.
+      for (const path of paths) {
+        const removed = removeEnclosing(candidate, path, restored);
+        if (!removed) continue;
+        rejected.push(removed);
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) break;
+    result = vesperConfigSchema.safeParse(candidate);
+  }
+
+  if (!result.success) return unrecoverable();
+  const uniqueRejected = [...new Set(rejected)];
+  return {
+    config: result.data,
+    ok: uniqueRejected.length === 0,
+    errors: [...new Set(errors)],
+    rejected: uniqueRejected,
+    securityRelevant: uniqueRejected.some(isSecurityPath),
   };
 }
 

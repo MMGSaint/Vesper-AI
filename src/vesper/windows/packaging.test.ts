@@ -31,7 +31,10 @@ describe("windows packaging and lifecycle", () => {
       paused: false,
       startOnLogin: false,
     });
-    assert.match(attached.summary, /hardware-dependent|not applied/i);
+    // The wording may change; what must not is that it never claims an icon exists.
+    assert.equal(attached.ok, false);
+    assert.match(attached.summary, /only runs on Windows|no icon was created|not applied/i);
+    assert.equal(tray.applied, false);
   });
 
   it("detects approved apps from a process list", () => {

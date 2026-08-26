@@ -13,8 +13,16 @@ import {
   createHashEmbeddings,
   type EmbeddingProvider,
 } from "./embeddings.ts";
+import { excludesDirectory, includesFile, normalizeRelPath } from "./glob.ts";
+import { bm25, buildLexicalIndex, tokenize, type LexicalIndex } from "./lexical.ts";
 
 const TEXT_EXT = new Set([".md", ".txt", ".json", ".ts", ".js", ".cs", ".yml", ".yaml"]);
+
+const LEXICAL_WEIGHT = 0.65;
+const DENSE_WEIGHT = 0.35;
+const PHRASE_BONUS = 0.15;
+/** A document with no lexical overlap needs real dense agreement to be worth showing. */
+const DENSE_ONLY_FLOOR = 0.15;
 
 export interface KnowledgeDocument {
   sourceId: string;
@@ -24,31 +32,40 @@ export interface KnowledgeDocument {
   offset?: number;
 }
 
-function tokenize(text: string): string[] {
-  return text
-    .toLowerCase()
-    .split(/[^a-z0-9]+/i)
-    .filter((token) => token.length > 1);
+export interface ReindexStats {
+  documents: number;
+  filesSeen: number;
+  filesRead: number;
+  filesReused: number;
+  filesDropped: number;
+  /** False when nothing changed and the existing dense vectors were kept. */
+  embedded: boolean;
 }
 
-function bm25ish(query: string, text: string): number {
-  const qTokens = tokenize(query);
-  if (qTokens.length === 0) return 0;
-  const tTokens = tokenize(text);
-  if (tTokens.length === 0) return 0;
-  const tf = new Map<string, number>();
-  for (const token of tTokens) tf.set(token, (tf.get(token) ?? 0) + 1);
-  let score = 0;
-  for (const token of qTokens) {
-    const freq = tf.get(token) ?? 0;
-    if (freq === 0) continue;
-    score += (freq * 2.2) / (freq + 1.5);
-  }
-  if (text.toLowerCase().includes(query.toLowerCase())) score += 2;
-  return score;
+interface WalkedFile {
+  path: string;
+  mtimeMs: number;
+  size: number;
 }
 
-async function walk(root: string, acc: string[], approvedRoots: string[]): Promise<void> {
+interface CachedFile {
+  mtimeMs: number;
+  size: number;
+  docs: KnowledgeDocument[];
+}
+
+interface WalkFilter {
+  base: string;
+  include?: string[];
+  exclude?: string[];
+}
+
+async function walk(
+  root: string,
+  acc: WalkedFile[],
+  approvedRoots: string[],
+  filter: WalkFilter,
+): Promise<void> {
   if (containsTraversal(root) || isDangerousRoot(root)) return;
   const resolvedRoot = resolve(root);
   if (approvedRoots.length && !approvedRoots.some((item) => isPathInside(item, resolvedRoot))) {
@@ -72,14 +89,17 @@ async function walk(root: string, acc: string[], approvedRoots: string[]): Promi
       if (!real.ok) continue;
     }
 
+    const rel = normalizeRelPath(relative(filter.base, full) || entry.name);
     if (entry.isDirectory()) {
       if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "bin") continue;
-      await walk(full, acc, approvedRoots.length ? approvedRoots : [resolvedRoot]);
+      if (excludesDirectory(rel, filter.exclude)) continue;
+      await walk(full, acc, approvedRoots.length ? approvedRoots : [resolvedRoot], filter);
     } else if (TEXT_EXT.has(extname(entry.name).toLowerCase())) {
+      if (!includesFile(rel, filter)) continue;
       // One unreadable or racing entry must not abandon the whole index.
       try {
         const info = await stat(full);
-        if (info.size <= 256_000) acc.push(full);
+        if (info.size <= 256_000) acc.push({ path: full, mtimeMs: info.mtimeMs, size: info.size });
       } catch {
         continue;
       }
@@ -90,13 +110,18 @@ async function walk(root: string, acc: string[], approvedRoots: string[]): Promi
 export class KnowledgeIndex {
   private documents: KnowledgeDocument[] = [];
   private sources: KnowledgeSource[];
-  private readonly seed: KnowledgeDocument[];
+  private seed: KnowledgeDocument[];
   private readonly approvedRoots: string[];
   readonly embeddings: EmbeddingProvider;
   private vectors: number[][] | null = null;
   /** Which provider produced `vectors`, so diagnostics can name the embedding space. */
   private vectorProviderId: string | null = null;
   private lastError: string | null = null;
+  private lexical: LexicalIndex | null = null;
+  /** mtime+size per indexed file, so an unchanged tree is not re-read on every reindex. */
+  private readonly fileCache = new Map<string, CachedFile>();
+  private documentSignature = "";
+  private lastStats: ReindexStats | null = null;
 
   constructor(
     sources: KnowledgeSource[],
@@ -116,6 +141,10 @@ export class KnowledgeIndex {
 
   lastIndexError(): string | null {
     return this.lastError;
+  }
+
+  lastIndexStats(): ReindexStats | null {
+    return this.lastStats ? { ...this.lastStats } : null;
   }
 
   registerSource(source: KnowledgeSource): { ok: boolean; summary: string } {
@@ -143,13 +172,18 @@ export class KnowledgeIndex {
       return { ok: false, summary: `No knowledge source '${id}'.` };
     }
     this.sources = next;
-    this.documents = [
-      ...this.seed.filter((doc) => this.sources.some((source) => source.id === doc.sourceId)),
-      ...this.documents.filter(
-        (doc) => this.sources.some((source) => source.id === doc.sourceId) && !this.seed.includes(doc),
-      ),
-    ];
+    const known = new Set(this.sources.map((source) => source.id));
+    // Re-adding `seed` here duplicated every seeded document that reindex had already
+    // chunked into `documents`; the surviving documents are already the right set.
+    this.seed = this.seed.filter((doc) => known.has(doc.sourceId));
+    this.documents = this.documents.filter((doc) => known.has(doc.sourceId));
+    for (const key of [...this.fileCache.keys()]) {
+      if (key.startsWith(`${id} `)) this.fileCache.delete(key);
+    }
     this.vectors = null;
+    this.vectorProviderId = null;
+    this.documentSignature = "";
+    this.invalidate();
     return { ok: true, summary: `Removed knowledge source '${id}'.` };
   }
 
@@ -172,43 +206,94 @@ export class KnowledgeIndex {
       }
     }
     this.lastError = null;
+    const seen = new Set<string>();
+    let filesRead = 0;
+    let filesReused = 0;
     for (const source of this.sources.filter((item) => item.enabled)) {
       for (const root of source.roots) {
-        const files: string[] = [];
-        await walk(root, files, this.approvedRoots);
+        const files: WalkedFile[] = [];
+        await walk(root, files, this.approvedRoots, {
+          base: resolve(root),
+          include: source.include,
+          exclude: source.exclude,
+        });
+        // Directory order is not guaranteed stable and document order has to be, because
+        // dense vectors are addressed by document index.
+        files.sort((a, b) => a.path.localeCompare(b.path));
         for (const file of files) {
+          const cacheKey = cacheKeyFor(source.id, root, file.path);
+          seen.add(cacheKey);
+          const cached = this.fileCache.get(cacheKey);
+          if (cached && cached.mtimeMs === file.mtimeMs && cached.size === file.size) {
+            filesReused += 1;
+            docs.push(...cached.docs);
+            continue;
+          }
           try {
-            const text = await readFile(file, "utf8");
-            const rel = relative(root, file) || file;
-            const title = file.split(/[\\/]/).at(-1) ?? file;
-            const chunks = chunkText(text);
-            for (const chunk of chunks) {
-              docs.push({
-                sourceId: source.id,
-                path: rel,
-                title,
-                text: chunk.text,
-                offset: chunk.offset,
-              });
-            }
+            const text = await readFile(file.path, "utf8");
+            const rel = relative(root, file.path) || file.path;
+            const title = file.path.split(/[\\/]/).at(-1) ?? file.path;
+            const built = chunkText(text).map((chunk) => ({
+              sourceId: source.id,
+              path: rel,
+              title,
+              text: chunk.text,
+              offset: chunk.offset,
+            }));
+            this.fileCache.set(cacheKey, { mtimeMs: file.mtimeMs, size: file.size, docs: built });
+            docs.push(...built);
+            filesRead += 1;
           } catch (error) {
             this.lastError = error instanceof Error ? error.message : String(error);
+            this.fileCache.delete(cacheKey);
           }
         }
       }
     }
-    this.documents = docs;
-    this.vectors = null;
-    if (this.embeddings.available() && docs.length) {
-      try {
-        this.vectors = await this.embeddings.embed(docs.map((doc) => `${doc.title}\n${doc.text}`));
-        this.vectorProviderId = this.vectors ? this.embeddings.id : null;
-      } catch (error) {
-        this.lastError = error instanceof Error ? error.message : String(error);
-        this.vectors = null;
-        this.vectorProviderId = null;
+    let filesDropped = 0;
+    for (const key of [...this.fileCache.keys()]) {
+      if (!seen.has(key)) {
+        this.fileCache.delete(key);
+        filesDropped += 1;
       }
     }
+
+    const signature = signatureOf(docs);
+    const unchanged =
+      signature === this.documentSignature &&
+      this.vectors !== null &&
+      this.vectors.length === docs.length &&
+      this.vectorProviderId === this.embeddings.id;
+    this.documents = docs;
+    if (signature !== this.documentSignature) {
+      this.documentSignature = signature;
+      this.invalidate();
+    }
+
+    let embedded = false;
+    if (!unchanged) {
+      this.vectors = null;
+      this.vectorProviderId = null;
+      if (this.embeddings.available() && docs.length) {
+        try {
+          this.vectors = await this.embeddings.embed(docs.map((doc) => `${doc.title}\n${doc.text}`));
+          this.vectorProviderId = this.vectors ? this.embeddings.id : null;
+          embedded = this.vectors !== null;
+        } catch (error) {
+          this.lastError = error instanceof Error ? error.message : String(error);
+          this.vectors = null;
+          this.vectorProviderId = null;
+        }
+      }
+    }
+    this.lastStats = {
+      documents: docs.length,
+      filesSeen: seen.size,
+      filesRead,
+      filesReused,
+      filesDropped,
+      embedded,
+    };
     return docs.length;
   }
 
@@ -254,6 +339,19 @@ export class KnowledgeIndex {
     };
   }
 
+  private invalidate() {
+    this.lexical = null;
+  }
+
+  private lexicalIndex(): LexicalIndex {
+    // IDF is measured over the whole indexed corpus rather than the workspace-filtered
+    // subset, so a term does not change weight depending on who is asking.
+    if (!this.lexical) {
+      this.lexical = buildLexicalIndex(this.documents.map((doc) => `${doc.title}\n${doc.text}`));
+    }
+    return this.lexical;
+  }
+
   private rank(
     query: string,
     queryVec: number[] | undefined,
@@ -268,39 +366,86 @@ export class KnowledgeIndex {
         })
         .map((source) => source.id),
     );
+    const lexicalIndex = this.lexicalIndex();
+    const queryTokens = tokenize(query);
+    const phrase = query.trim().toLowerCase();
     const scored = this.documents
       .map((doc, index) => ({ doc, index }))
       .filter((row) => allowedSources.has(row.doc.sourceId))
       .map((row) => {
-        const lexical = bm25ish(query, `${row.doc.title}\n${row.doc.text}`);
+        const lexical = queryTokens.length ? bm25(queryTokens, lexicalIndex, row.index) : 0;
         const docVec = this.vectors?.[row.index];
         const dense = queryVec && docVec ? cosineSimilarity(queryVec, docVec) : 0;
-        const idx = row.doc.text.toLowerCase().indexOf(query.toLowerCase());
+        const idx = phrase ? row.doc.text.toLowerCase().indexOf(phrase) : -1;
         const snippet =
           idx >= 0
-            ? row.doc.text.slice(Math.max(0, idx - 80), idx + query.length + 120).trim()
+            ? row.doc.text.slice(Math.max(0, idx - 80), idx + phrase.length + 120).trim()
             : row.doc.text.slice(0, 180).trim();
         return {
+          doc: row.doc,
+          snippet,
+          phraseHit: idx >= 0,
+          lexical,
+          dense: Math.max(0, dense),
+        };
+      });
+
+    // BM25 is unbounded and its absolute scale depends on corpus size and document
+    // length, while cosine similarity is already bounded. Mixing them against a fixed
+    // constant would weight the two signals differently on every corpus, so the lexical
+    // side is normalised against the best match for *this* query.
+    const bestLexical = scored.reduce((max, row) => Math.max(max, row.lexical), 0);
+
+    const ranked = scored
+      .map((row) => ({
+        ...row,
+        score:
+          (bestLexical > 0 ? row.lexical / bestLexical : 0) * LEXICAL_WEIGHT +
+          row.dense * DENSE_WEIGHT +
+          (row.phraseHit ? PHRASE_BONUS : 0),
+      }))
+      .filter((row) => row.lexical > 0 || row.dense >= DENSE_ONLY_FLOOR)
+      .sort((a, b) => b.score - a.score);
+
+    return ranked.slice(0, options?.limit ?? 8).map(
+      (row) =>
+        ({
           sourceId: row.doc.sourceId,
           path: row.doc.path,
           title: row.doc.title,
-          snippet,
-          score: lexical + dense * 2,
+          snippet: row.snippet,
+          score: row.score,
           provenance: {
             sourceId: row.doc.sourceId,
             path: row.doc.path,
             offset: row.doc.offset ?? 0,
           },
-        } satisfies KnowledgeHit;
-      })
-      .filter((hit) => hit.score > 0)
-      .sort((a, b) => b.score - a.score);
-    return scored.slice(0, options?.limit ?? 8);
+        }) satisfies KnowledgeHit,
+    );
   }
 
   addSeed(doc: KnowledgeDocument) {
     this.documents.push(doc);
     this.seed.push(doc);
     this.vectors = null;
+    this.vectorProviderId = null;
+    this.documentSignature = "";
+    this.invalidate();
   }
+}
+
+function cacheKeyFor(sourceId: string, root: string, path: string): string {
+  return `${sourceId} ${root} ${path}`;
+}
+
+function signatureOf(docs: KnowledgeDocument[]): string {
+  let hash = 2166136261;
+  for (const doc of docs) {
+    const line = `${doc.sourceId}|${doc.path}|${doc.offset ?? 0}|${doc.text.length}|${doc.title}`;
+    for (let i = 0; i < line.length; i += 1) {
+      hash ^= line.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+  }
+  return `${docs.length}:${(hash >>> 0).toString(36)}`;
 }

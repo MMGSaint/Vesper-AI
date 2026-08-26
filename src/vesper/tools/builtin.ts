@@ -438,6 +438,66 @@ export function registerBuiltinTools(input: {
   );
 
   registry.register(
+    spec(
+      "optimizer_report",
+      "Gather everything the PC optimizer currently reports: telemetry, active profile, performance state, its last action and result, and adapter health.",
+      "read",
+      {},
+    ),
+    async () => {
+      // One call rather than six tools: the model needs the whole picture to say
+      // something useful, and a wide tool surface makes a local model worse at picking.
+      // Each field is settled independently so one unimplemented endpoint cannot blank
+      // the rest of the report.
+      const [health, telemetry, profile, performanceState, lastAction, lastResult] =
+        await Promise.all([
+          optimizer.getHealth().catch(() => null),
+          optimizer.getTelemetry().catch(() => null),
+          optimizer.getCurrentProfile().catch(() => null),
+          optimizer.getPerformanceState().catch(() => null),
+          optimizer.getLastAction().catch(() => null),
+          optimizer.getOptimizationResult().catch(() => null),
+        ]);
+
+      if (!telemetry?.available) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary:
+            "The optimizer did not return telemetry, so I have nothing authoritative about the machine from it. I am not guessing values.",
+          data: { health, profile, performanceState } as unknown as JsonObject,
+        };
+      }
+
+      const context = inspectWorkload(hardware, { optimizerActive: true });
+      const explanation = explainPerformance({ bound: telemetry.bound, context });
+      const parts = [
+        `The optimizer reports the machine is ${telemetry.bound}-bound.`,
+        explanation,
+        profile ? `Active profile: ${profile}.` : "The optimizer did not name an active profile.",
+        performanceState ? `Performance state: ${performanceState}.` : null,
+        lastAction ? `Its last action was ${lastAction}${lastResult ? ` (${lastResult})` : ""}.` : "It reports no previous action.",
+        ...telemetry.notes,
+      ].filter(Boolean);
+
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: parts.join(" "),
+        data: {
+          telemetry,
+          profile,
+          performanceState,
+          lastAction,
+          lastResult,
+          health,
+          context,
+        } as unknown as JsonObject,
+      };
+    },
+  );
+
+  registry.register(
     spec("optimizer_analyze", "Request analysis from the optimizer adapter.", "read", {}),
     async () => {
       const analysis = await optimizer.analyze();

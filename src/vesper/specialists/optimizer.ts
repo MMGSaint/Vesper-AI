@@ -1,5 +1,7 @@
 import type { SimulatedHardware } from "../hardware/simulated.ts";
 import { isolateFailure, sleep } from "../recover.ts";
+import { isRedirect, linkAbort, NO_REDIRECT } from "../models/http.ts";
+import { checkLocalEndpoint } from "../net.ts";
 import type { Logger } from "../logging.ts";
 import type {
   HardwareSnapshot,
@@ -26,7 +28,7 @@ export interface OptimizerAdapter {
   setAvailable?(value: boolean): void;
 }
 
-export function createMockOptimizer(hardware: SimulatedHardware): OptimizerAdapter {
+export function createMockOptimizer(hardware: SimulatedHardware, log?: Logger): OptimizerAdapter {
   let profile = "balanced";
   let lastAction: string | null = null;
   let lastResult: string | null = null;
@@ -107,21 +109,57 @@ export function createMockOptimizer(hardware: SimulatedHardware): OptimizerAdapt
       };
     },
     async requestOptimization(input) {
-      if (!available) return { accepted: false, summary: "I could not access the optimizer." };
+      log?.info("optimizer", "Optimizer state change requested", {
+        action: "request_optimization",
+        mode: "mock",
+        profile: input.profile ?? null,
+        reason: input.reason ?? null,
+      });
+      if (!available) {
+        log?.warn("optimizer", "Optimizer state change failed", {
+          action: "request_optimization",
+          mode: "mock",
+          error: "Optimizer adapter is unavailable.",
+        });
+        return { accepted: false, summary: "I could not access the optimizer." };
+      }
       const next = input.profile ?? (hardware.getScenario() === "idle" ? "efficiency" : "performance");
       profile = next;
       lastAction = `request_optimization:${next}`;
       lastResult = `mock-applied:${next}`;
+      log?.info("optimizer", "Mock optimizer recorded a simulated profile change", {
+        action: "request_optimization",
+        mode: "mock",
+        profile: next,
+        machineStateChanged: false,
+      });
       return {
         accepted: true,
         summary: `I requested a mock optimization to profile '${next}'. The real optimizer was not contacted.`,
       };
     },
     async requestRollback() {
-      if (!available) return { accepted: false, summary: "I could not access the optimizer." };
+      log?.info("optimizer", "Optimizer state change requested", {
+        action: "request_rollback",
+        mode: "mock",
+      });
+      if (!available) {
+        log?.warn("optimizer", "Optimizer state change failed", {
+          action: "request_rollback",
+          mode: "mock",
+          error: "Optimizer adapter is unavailable.",
+        });
+        return { accepted: false, summary: "I could not access the optimizer." };
+      }
       profile = "balanced";
       lastAction = "request_rollback";
       lastResult = "mock-rolled-back:balanced";
+      log?.info("optimizer", "Mock optimizer recorded a simulated rollback", {
+        action: "request_rollback",
+        mode: "mock",
+        profile: "balanced",
+        machineStateChanged: false,
+      });
       return {
         accepted: true,
         summary: "I requested a mock rollback to 'balanced'. The real optimizer was not contacted.",
@@ -154,6 +192,11 @@ export interface HttpOptimizerOptions {
   retries?: number;
   fetchImpl?: typeof fetch;
   log?: Logger;
+  /**
+   * Explicit opt-in for an optimizer endpoint that is neither loopback nor private.
+   * Off by default, and it can never unlock a link-local or metadata address.
+   */
+  allowRemoteEndpoint?: boolean;
 }
 
 const unavailableStatus = (detail: string): OptimizerStatus => ({
@@ -176,6 +219,59 @@ const emptyHardware = (): HardwareSnapshot => ({
   capturedAt: new Date().toISOString(),
 });
 
+/**
+ * An adapter for an endpoint Vesper refused to talk to.
+ *
+ * Returning this rather than throwing keeps the refusal on the same path as every other
+ * optimizer failure: the assistant degrades and says why, instead of the host dying at
+ * construction because a config file named a bad host.
+ */
+function createRefusedOptimizer(reason: string, log?: Logger): OptimizerAdapter {
+  const refuse = (action: string, data: JsonObject = {}) => {
+    log?.error("optimizer", "Refused an optimizer request: endpoint is not allowed", {
+      action,
+      reason,
+      ...data,
+    });
+    return { accepted: false, summary: `I did not contact the optimizer: ${reason}` };
+  };
+  return {
+    async getStatus() {
+      return unavailableStatus(reason);
+    },
+    async getTelemetry() {
+      return { available: false, hardware: emptyHardware(), bound: "unknown", notes: [reason] };
+    },
+    async getCurrentProfile() {
+      return null;
+    },
+    async getPerformanceState() {
+      return null;
+    },
+    async analyze() {
+      return { bound: "unknown", notes: [reason], summary: "I could not access the optimizer." };
+    },
+    async requestOptimization(input) {
+      return refuse("request_optimization", {
+        profile: input.profile ?? null,
+        reason: input.reason ?? null,
+      });
+    },
+    async requestRollback() {
+      return refuse("request_rollback");
+    },
+    async getLastAction() {
+      return null;
+    },
+    async getOptimizationResult() {
+      return null;
+    },
+    async getHealth() {
+      return { reachable: false, latencyMs: null, lastError: reason, mode: "unavailable" };
+    },
+  };
+}
+
 export function createHttpOptimizerAdapter(
   endpoint: string,
   options: HttpOptimizerOptions = {},
@@ -184,21 +280,53 @@ export function createHttpOptimizerAdapter(
   const retries = Math.max(0, options.retries ?? 1);
   const fetchImpl = options.fetchImpl ?? fetch;
   const log = options.log;
+
+  // The endpoint is config, and config is attacker-influenced input. An optimizer that is
+  // not on this machine (or, opted in, this LAN) is not this user's optimizer, and a
+  // link-local address is an SSRF target rather than a service. Checked once, here, so no
+  // request is ever issued to a host that failed the check.
+  const endpointCheck = checkLocalEndpoint(endpoint, {
+    allowRemote: options.allowRemoteEndpoint,
+    label: "optimizer.endpoint",
+  });
+  if (!endpointCheck.ok) {
+    log?.error("optimizer", "Refused optimizer endpoint", {
+      reason: endpointCheck.reason,
+      scope: endpointCheck.scope,
+      host: endpointCheck.host,
+    });
+    return createRefusedOptimizer(endpointCheck.reason, log);
+  }
+  const origin = new URL(endpoint).origin;
+
   let lastError: string | null = null;
   let lastLatency: number | null = null;
 
   async function call(path: string, init?: RequestInit): Promise<{ ok: true; data: unknown } | { ok: false; error: string }> {
     const url = `${endpoint.replace(/\/$/, "")}${path}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Cheap invariant: the request must still be aimed at the host that passed validation.
+    if (new URL(url).origin !== origin) {
+      lastError = "Optimizer request would leave the validated endpoint.";
+      log?.error("optimizer", lastError, { path });
+      return { ok: false, error: lastError };
+    }
+    const abort = linkAbort(undefined, timeoutMs);
     const started = Date.now();
     try {
       const res = await fetchImpl(url, {
         ...init,
-        signal: controller.signal,
+        // A local optimizer has no reason to redirect. Following one would re-issue the
+        // request - body included - against a host that never passed the check above.
+        ...NO_REDIRECT,
+        signal: abort.signal,
         headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
       });
       lastLatency = Date.now() - started;
+      if (isRedirect(res.status)) {
+        lastError = `Optimizer tried to redirect (HTTP ${res.status}); refused.`;
+        log?.warn("optimizer", lastError, { path, location: res.headers.get("location") ?? null });
+        return { ok: false, error: lastError };
+      }
       if (!res.ok) {
         lastError = `Optimizer HTTP ${res.status}`;
         return { ok: false, error: lastError };
@@ -215,10 +343,14 @@ export function createHttpOptimizerAdapter(
       return { ok: true, data };
     } catch (error) {
       lastLatency = Date.now() - started;
-      lastError = error instanceof Error ? error.message : String(error);
+      lastError = abort.timedOut()
+        ? `Optimizer did not answer within ${timeoutMs}ms.`
+        : error instanceof Error
+          ? error.message
+          : String(error);
       return { ok: false, error: lastError };
     } finally {
-      clearTimeout(timer);
+      abort.release();
     }
   }
 
