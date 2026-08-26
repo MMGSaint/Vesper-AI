@@ -35,13 +35,12 @@ shipped, with a regression test named after what broke.
 
 ## Validation (this session, on a Linux development host)
 
-- Tests: **285 passing**
-- Security tests: **23 passing** (was 15)
+- Tests: **314 passing** (baseline at session start: 125)
+- Security tests: **25 passing** (was 15)
 - Typecheck (`tsc --noEmit`, test files included): passing
 - Hygiene: passing
 - Production check (`npm run build`): passing
-- CI on `bc1da9b`: **passing on ubuntu-latest and windows-latest** —
-  [run 32977097723](https://github.com/MMGSaint/Vesper-AI/actions/runs/32977097723)
+- CI: **passing on ubuntu-latest and windows-latest** on every commit of this branch
 - CodeQL: passing on `main`; open alerts 0
 - Secret scanning alerts: 0 · Dependabot alerts: 0
 
@@ -113,11 +112,15 @@ Nothing below has been observed. See `docs/known-limitations.md`.
 
 Stated plainly rather than classified as complete:
 
-- **MCP client.** `integrations/mcp.ts` reports status only. A real stdio JSON-RPC
-  client would let external specialists register tools through the permission gate.
-- **OBS WebSocket.** OBS state is inferred from process presence and reported as
-  inferred.
-- **Companion transport.** `vesper.client` v1 is in-process only.
+- **Companion transport.** `vesper.client` v1 is in-process only: no pairing, no
+  listener, no LAN TLS. This is deliberately **not** built autonomously. Opening an
+  inbound network listener on a personal machine is an outward-facing security decision
+  that belongs to the owner, not to an agent working unattended. The scoped protocol and
+  the in-process gateway are ready for it.
+
+Completed since that list was first written: the **MCP client** (real stdio JSON-RPC,
+namespaced and permission-gated) and **OBS WebSocket** (observed recording and streaming
+state, feeding the event log so correlation can use it).
 
 ## Next on the real PC
 
@@ -130,3 +133,9 @@ Stated plainly rather than classified as complete:
 
 When hardware becomes available, **validate every hardware-dependent item rather than
 simulating success**.
+
+## Where this leaves the branch
+
+All of this work is on `agent/continuation`. `main` is behind by 21 commits: PR #6 took
+the first commit, and no pull request exists for the rest. Merging is left to the
+repository owner rather than done unattended.
