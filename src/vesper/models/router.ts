@@ -1,6 +1,7 @@
 import type { VesperConfig } from "../config.ts";
-import type { CompletionRequest, CompletionResult, ModelRole } from "../types.ts";
+import type { CompletionRequest, CompletionResult, DiscoveredModel, ModelRole } from "../types.ts";
 import { createEchoProvider } from "./echo.ts";
+import { createOllamaProvider } from "./ollama.ts";
 import { createOpenAiCompatProvider, type OpenAiCompatProvider } from "./openai-compat.ts";
 
 export interface ModelRouter {
@@ -32,6 +33,13 @@ export type AnyProvider = {
   isAvailable: () => boolean;
   complete: (request: CompletionRequest, model: string) => Promise<CompletionResult>;
   probe?: () => Promise<{ available: boolean; detail: string }>;
+  /** Backends that can enumerate what is installed locally. */
+  listModels?: () => Promise<DiscoveredModel[]>;
+  /** Backends that expose a per-model context window. */
+  contextLength?: (model: string) => Promise<number | null>;
+  /** Backends that can generate embeddings without a second service. */
+  embed?: (texts: string[], model: string) => Promise<number[][] | null>;
+  defaultModel?: string;
 };
 
 export function createModelRouter(input: {
@@ -40,11 +48,13 @@ export function createModelRouter(input: {
   xaiKey?: string;
 }): ModelRouter {
   const echo = createEchoProvider();
-  const ollama = createOpenAiCompatProvider({
+  // Ollama is reached through its native API, not the OpenAI-compat shim: the shim
+  // hides installed-model metadata, resident VRAM, and the token counters Vesper needs
+  // to report throughput as a measurement rather than an estimate.
+  const ollama = createOllamaProvider({
     id: "ollama",
     baseUrl: input.config.models.endpoints.ollama,
     defaultModel: input.config.models.roles.everyday?.model ?? "qwen2.5:14b",
-    kind: "local",
   });
   const llamacpp = createOpenAiCompatProvider({
     id: "llamacpp",
@@ -112,6 +122,15 @@ export function createModelRouter(input: {
     return { provider: echo, model: "echo" };
   }
 
+  /** Resolve the model name a given provider should be asked for at this role. */
+  function modelFor(provider: AnyProvider, role: ModelRole): string {
+    const configured = input.config.models.roles[role];
+    if (configured && configured.provider === provider.id) return configured.model;
+    if (provider.id === "xai-optional") return "grok-4.5";
+    if (provider.id === "echo") return "echo";
+    return provider.defaultModel ?? configured?.model ?? "default";
+  }
+
   return {
     resolveRole,
     setActive(id: string) {
@@ -136,12 +155,15 @@ export function createModelRouter(input: {
     async complete(request: CompletionRequest): Promise<CompletionResult> {
       const selected = await pick(request.role);
       const result = await selected.provider.complete(request, selected.model);
-      if (result.unavailable) {
+      // A caller-cancelled turn is not a backend outage: never retry it elsewhere.
+      if (result.unavailable && !result.aborted && !request.signal?.aborted) {
         const fallback = providers.find(
           (provider) => provider.id !== selected.provider.id && provider.isAvailable(),
         );
         if (fallback) {
-          const retry = await fallback.complete(request, selected.model);
+          // Model names are provider-specific. Asking a different backend for the
+          // failed backend's model name would just fail a second time.
+          const retry = await fallback.complete(request, modelFor(fallback, request.role));
           return { ...retry, error: result.error };
         }
       }
