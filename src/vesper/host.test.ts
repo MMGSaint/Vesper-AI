@@ -42,4 +42,40 @@ describe("production host", () => {
     assert.equal(parseCli(["--doctor", "--skip-discovery"]).kind, "doctor");
     assert.equal(parseCli(["--version"]).kind, "version");
   });
+
+  it("boots a second time with its workspaces, apps, and knowledge intact", async () => {
+    // Regression: the starter config file is a subset of the full config, and parsing
+    // it standalone let schema defaults such as `workspaces: []` win. A real install
+    // therefore came up with no workspaces, no approved applications, and no knowledge
+    // sources on every boot after the first.
+    const root = join(tmpdir(), `vesper-host-reboot-${Date.now()}`);
+    await mkdir(root, { recursive: true });
+    const dirs = {
+      root,
+      config: join(root, "config"),
+      data: join(root, "data"),
+      logs: join(root, "logs"),
+      models: join(root, "models"),
+    };
+
+    const first = await createProductionHost({ dirs, runtime: { skipDiscovery: true } });
+    const before = {
+      workspaces: first.runtime.config.workspaces.length,
+      apps: first.runtime.config.approvedApps.length,
+      knowledge: first.runtime.config.knowledgeSources.length,
+    };
+    await first.shutdown();
+    assert.ok(before.workspaces > 0, "the first boot has workspaces");
+
+    // Second boot now reads the config file written by the first.
+    const second = await createProductionHost({ dirs, runtime: { skipDiscovery: true } });
+    assert.equal(second.runtime.config.workspaces.length, before.workspaces);
+    assert.equal(second.runtime.config.approvedApps.length, before.apps);
+    assert.equal(second.runtime.config.knowledgeSources.length, before.knowledge);
+    assert.ok(
+      second.runtime.workspaces.switchTo("gaming"),
+      "workspace switching still works after a restart",
+    );
+    await second.shutdown();
+  });
 });
