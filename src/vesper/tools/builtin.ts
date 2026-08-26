@@ -8,6 +8,7 @@ import type { OptimizerAdapter } from "../specialists/optimizer.ts";
 import { explainPerformance, inspectWorkload } from "../specialists/context.ts";
 import { gpuConsumers, groundedConclusions } from "../specialists/gaming.ts";
 import type { ToolRegistry } from "./registry.ts";
+import { correlateAround, explainCorrelations } from "../correlate.ts";
 import type { DiagnosticReport, JsonObject, MemoryCategory, ToolSpec } from "../types.ts";
 import type { WindowsHost } from "../windows/host.ts";
 import type { WorkspaceManager } from "../workspaces.ts";
@@ -628,6 +629,75 @@ export function registerBuiltinTools(input: {
       }
       await background.resume();
       return { ok: true, epistemic: "changed", summary: `Background state is ${background.state()}.` };
+    },
+  );
+
+  registry.register(
+    spec(
+      "events_recent",
+      "List recent events Vesper observed on this host.",
+      "read",
+      {
+        type: { type: "string", description: "Optional event type filter, e.g. obs.state" },
+        limit: { type: "number", description: "How many events to return (default 20)" },
+      },
+    ),
+    async (args) => {
+      const limit = Math.min(Math.max(Number(args.limit ?? 20) || 20, 1), 100);
+      const type = typeof args.type === "string" && args.type ? args.type : undefined;
+      const list = events.recent({ type, limit });
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: list.length
+          ? `${list.length} recent event(s): ${list.map((event) => event.title).join("; ")}`
+          : "No events have been recorded yet on this host.",
+        data: { events: list } as unknown as JsonObject,
+      };
+    },
+  );
+
+  registry.register(
+    spec(
+      "explain_change",
+      "Explain what Vesper observed around a moment of interest, such as a performance change reported by the optimizer.",
+      "read",
+      {
+        at: { type: "string", description: "ISO timestamp of the moment. Defaults to now." },
+        title: { type: "string", description: "What happened, for the explanation" },
+        beforeSeconds: { type: "number", description: "How far back to look (default 120)" },
+        afterSeconds: { type: "number", description: "How far forward to look (default 30)" },
+      },
+    ),
+    async (args) => {
+      const at = typeof args.at === "string" && args.at ? args.at : new Date().toISOString();
+      if (Number.isNaN(Date.parse(at))) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary: `'${at}' is not a timestamp I can read.`,
+        };
+      }
+      const title = typeof args.title === "string" && args.title ? args.title : "that moment";
+      const correlations = correlateAround(events.all(), at, {
+        beforeMs: Math.min(Math.max(Number(args.beforeSeconds ?? 120) || 120, 1), 3600) * 1000,
+        afterMs: Math.min(Math.max(Number(args.afterSeconds ?? 30) || 30, 0), 3600) * 1000,
+      });
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: explainCorrelations(title, correlations),
+        data: {
+          anchor: at,
+          correlations: correlations.map((item) => ({
+            type: item.event.type,
+            title: item.event.title,
+            at: item.event.at,
+            offsetMs: item.offsetMs,
+            relation: item.relation,
+          })),
+        } as unknown as JsonObject,
+      };
     },
   );
 

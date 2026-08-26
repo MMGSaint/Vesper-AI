@@ -130,6 +130,10 @@ export class VesperRuntime {
   async start() {
     if (this.started) return this.capability;
     this.log.info("lifecycle", "Vesper starting", { instanceId: this.instanceId });
+    const restoredEvents = await this.events.hydrate();
+    if (restoredEvents) {
+      this.log.info("lifecycle", "Restored the event log", { events: restoredEvents });
+    }
     await this.restoreConfirmations();
     await this.seedMemories();
     this.started = true;
@@ -174,6 +178,7 @@ export class VesperRuntime {
     this.memory.clearSession();
     this.scheduler.stop();
     await this.persistConfirmations();
+    await this.events.flush();
     await this.background.stop();
     this.log.info("lifecycle", "Vesper stopped");
   }
@@ -463,7 +468,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     { approvedRoots: config.approvedRoots, embeddings: knowledgeEmbeddings },
   );
   const workspaces = new WorkspaceManager(config);
-  const events = new EventBus(log);
+  // The event log is persisted so correlation still works after a restart or crash,
+  // which is exactly when 'what happened just before this?' matters most.
+  const events = new EventBus(log, 500, storage);
   const notifications = new NotificationHub(
     config.notifications.enabled,
     config.notifications.cooldownMs,
