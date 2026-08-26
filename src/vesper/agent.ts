@@ -57,6 +57,28 @@ interface DirectIntent {
   slots: Record<string, string>;
 }
 
+/** Messages of context sent to the model, and the cap kept in memory. */
+const HISTORY_WINDOW = 16;
+const HISTORY_LIMIT = 40;
+
+/**
+ * Take the tail of the conversation without splitting an exchange.
+ *
+ * A window must never begin on a tool result, or on an assistant turn that only issues
+ * tool calls: both are meaningless without the message they answer, and a backend
+ * rejects the request outright. The window therefore starts at the first user turn
+ * inside it.
+ */
+export function historyWindow(history: ChatMessage[], max: number): ChatMessage[] {
+  const start = Math.max(0, history.length - max);
+  let index = start;
+  while (index < history.length && history[index].role !== "user") index += 1;
+  // Every turn pushes the user message before calling the model, so a user turn is
+  // always present. If one somehow is not, send no history rather than a broken slice.
+  if (index >= history.length) return [];
+  return history.slice(index);
+}
+
 const READY_APPS: Record<string, string[]> = {
   vrchat: ["steam", "discord", "vrchat"],
   gaming: ["steam", "discord"],
@@ -188,7 +210,7 @@ export class Agent {
     this.deps.history.push({ role: "user", content: userText });
     const messages: ChatMessage[] = [
       { role: "system", content: system },
-      ...this.deps.history.slice(-16),
+      ...historyWindow(this.deps.history, HISTORY_WINDOW),
     ];
 
     const role = this.deps.models.resolveRole(userText, workspace.defaultModelRole);
@@ -260,6 +282,11 @@ export class Agent {
         toolCalls: completion.toolCalls,
       });
       messages.push(...toolMessages);
+      // The results belong in history as well. Without them, history keeps an
+      // assistant message whose tool calls are never answered - a protocol violation
+      // that makes a real backend reject every later turn, silently degrading the
+      // conversation to the offline stub.
+      this.deps.history.push(...toolMessages);
       completion = await this.deps.models.complete({
         messages,
         tools,
@@ -551,8 +578,9 @@ export class Agent {
   }
 
   private trimHistory() {
-    if (this.deps.history.length > 40) {
-      this.deps.history.splice(0, this.deps.history.length - 40);
+    if (this.deps.history.length > HISTORY_LIMIT) {
+      const kept = historyWindow(this.deps.history, HISTORY_LIMIT);
+      this.deps.history.splice(0, this.deps.history.length, ...kept);
     }
   }
 

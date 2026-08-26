@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { testRuntime } from "./test-helpers.ts";
-import { classifyIntent } from "./agent.ts";
+import { classifyIntent, historyWindow } from "./agent.ts";
+import type { ChatMessage, CompletionRequest } from "./types.ts";
 
 describe("agent", () => {
   it("classifies remember, status, workspace, optimize, and ready intents", () => {
@@ -94,5 +95,77 @@ describe("agent", () => {
     const turn = await runtime.chat("please launch discord for me");
     assert.ok(turn.toolCalls.some((call) => call.toolName === "app_launch" && call.result?.ok));
     assert.match(turn.reply, /Discord|changed/i);
+  });
+
+  it("keeps tool results in history so later turns stay valid", async () => {
+    // Regression: the assistant's tool-call message was recorded but its results were
+    // not, leaving history with tool calls that are never answered. A real backend
+    // rejects that, so every conversation degraded to the offline stub after the first
+    // tool use.
+    const seen: ChatMessage[][] = [];
+    let call = 0;
+    const recorder = {
+      id: "recorder",
+      kind: "local" as const,
+      isAvailable: () => true,
+      async probe() {
+        return { available: true, detail: "recorder" };
+      },
+      async complete(request: CompletionRequest, model: string) {
+        seen.push(request.messages);
+        call += 1;
+        if (call === 1) {
+          return {
+            text: "",
+            toolCalls: [{ id: "c1", name: "system_info", arguments: {} }],
+            providerId: "recorder",
+            model,
+            role: request.role,
+          };
+        }
+        return { text: "done", toolCalls: [], providerId: "recorder", model, role: request.role };
+      },
+    };
+
+    const runtime = await testRuntime({ providers: [recorder] });
+    await runtime.chat("check the system please");
+    await runtime.chat("and now something else");
+
+    const final = seen[seen.length - 1];
+    for (let i = 0; i < final.length; i += 1) {
+      const message = final[i];
+      if (message.role === "assistant" && message.toolCalls?.length) {
+        assert.equal(
+          final[i + 1]?.role,
+          "tool",
+          "an assistant tool call must be followed by its result",
+        );
+      }
+      if (message.role === "tool") {
+        const previous = final[i - 1];
+        assert.ok(
+          previous && (previous.role === "assistant" || previous.role === "tool"),
+          "a tool result must follow the call it answers",
+        );
+      }
+    }
+    assert.ok(
+      final.some((message) => message.role === "tool"),
+      "the tool result is actually present",
+    );
+  });
+
+  it("never starts the context window mid-exchange", () => {
+    const history: ChatMessage[] = [
+      { role: "user", content: "first" },
+      { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "t", arguments: {} }] },
+      { role: "tool", name: "t", toolCallId: "c1", content: "{}" },
+      { role: "assistant", content: "answer" },
+      { role: "user", content: "second" },
+    ];
+    // A naive tail would begin on the tool result and orphan it.
+    const window = historyWindow(history, 3);
+    assert.equal(window[0].role, "user");
+    assert.equal(window[0].content, "second");
   });
 });
