@@ -6,6 +6,11 @@ import { ToolRegistry } from "./tools/registry.ts";
 import { registerBuiltinTools } from "./tools/builtin.ts";
 import { MemoryStore } from "./memory/store.ts";
 import { KnowledgeIndex } from "./knowledge/rag.ts";
+import {
+  createFallbackEmbeddings,
+  createHashEmbeddings,
+  createProviderEmbeddings,
+} from "./knowledge/embeddings.ts";
 import { WorkspaceManager } from "./workspaces.ts";
 import { EventBus } from "./events.ts";
 import { NotificationHub } from "./notifications.ts";
@@ -411,6 +416,24 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   }
   const storage = options.storage ?? new MemoryStorage();
   const memory = new MemoryStore(storage);
+  // The knowledge index is constructed before the model router, so the embedding
+  // backend is resolved lazily through this reference rather than by reordering
+  // startup. Retrieval degrades to lexical scoring whenever it stays unset.
+  const embeddingBackend: {
+    current: { isAvailable: () => boolean; embed?: (texts: string[], model: string) => Promise<number[][] | null> } | null;
+  } = { current: null };
+  const knowledgeEmbeddings = config.embeddings.enabled
+    ? createFallbackEmbeddings(
+        createProviderEmbeddings({
+          id: `${config.embeddings.provider}-embed`,
+          model: config.embeddings.model,
+          isAvailable: () =>
+            Boolean(embeddingBackend.current?.isAvailable() && embeddingBackend.current?.embed),
+          embed: async (texts, model) =>
+            (await embeddingBackend.current?.embed?.(texts, model)) ?? null,
+        }),
+      )
+    : createHashEmbeddings();
   const knowledge = new KnowledgeIndex(
     config.knowledgeSources,
     [
@@ -427,7 +450,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
         text: "Mortis remains an independent codebase. Vesper may use approved notes only when the Mortis workspace is active.",
       },
     ],
-    { approvedRoots: config.approvedRoots },
+    { approvedRoots: config.approvedRoots, embeddings: knowledgeEmbeddings },
   );
   const workspaces = new WorkspaceManager(config);
   const events = new EventBus(log);
@@ -493,6 +516,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     providers: options.providers,
     xaiKey: options.xaiKey,
   });
+  // Now that providers exist, point knowledge embeddings at the configured backend.
+  embeddingBackend.current =
+    models.providers().find((provider) => provider.id === config.embeddings.provider) ?? null;
   const benchmark = createBenchmarkHarness({ providers: models.providers() });
   const history: ChatMessage[] = [];
 

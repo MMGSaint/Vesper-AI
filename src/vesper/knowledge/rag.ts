@@ -75,6 +75,8 @@ export class KnowledgeIndex {
   private readonly approvedRoots: string[];
   readonly embeddings: EmbeddingProvider;
   private vectors: number[][] | null = null;
+  /** Which provider produced `vectors`, so diagnostics can name the embedding space. */
+  private vectorProviderId: string | null = null;
   private lastError: string | null = null;
 
   constructor(
@@ -181,15 +183,63 @@ export class KnowledgeIndex {
     if (this.embeddings.available() && docs.length) {
       try {
         this.vectors = await this.embeddings.embed(docs.map((doc) => `${doc.title}\n${doc.text}`));
+        this.vectorProviderId = this.vectors ? this.embeddings.id : null;
       } catch (error) {
         this.lastError = error instanceof Error ? error.message : String(error);
         this.vectors = null;
+        this.vectorProviderId = null;
       }
     }
     return docs.length;
   }
 
+  /**
+   * Synchronous retrieval. Only a lexical embedder can contribute a dense score here;
+   * a model-backed embedder needs I/O, so callers that can await should prefer
+   * `searchAsync` to get the better ranking.
+   */
   search(query: string, options?: { workspaceId?: string; limit?: number }): KnowledgeHit[] {
+    return this.rank(query, this.embeddings.embedSync?.(query), options);
+  }
+
+  /**
+   * Retrieval with a model-backed query embedding when one is available. Falls back to
+   * the synchronous path if the embedder cannot answer, so retrieval never fails shut.
+   */
+  async searchAsync(
+    query: string,
+    options?: { workspaceId?: string; limit?: number },
+  ): Promise<KnowledgeHit[]> {
+    if (this.embeddings.embedSync || !this.embeddings.available() || !this.vectors) {
+      return this.search(query, options);
+    }
+    try {
+      const vectors = await this.embeddings.embed([query]);
+      return this.rank(query, vectors?.[0], options);
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+      return this.rank(query, undefined, options);
+    }
+  }
+
+  /** Embedding-space state, for diagnostics and honest status reporting. */
+  embeddingStatus(): { providerId: string; indexedWith: string | null; detail: string } {
+    return {
+      providerId: this.embeddings.id,
+      indexedWith: this.vectorProviderId,
+      detail:
+        this.embeddings.detail?.() ??
+        (this.vectorProviderId
+          ? `Index embedded with ${this.vectorProviderId}.`
+          : "No dense vectors; retrieval is lexical only."),
+    };
+  }
+
+  private rank(
+    query: string,
+    queryVec: number[] | undefined,
+    options?: { workspaceId?: string; limit?: number },
+  ): KnowledgeHit[] {
     const allowedSources = new Set(
       this.sources
         .filter((source) => {
@@ -199,7 +249,6 @@ export class KnowledgeIndex {
         })
         .map((source) => source.id),
     );
-    const queryVec = this.embeddings.embedSync?.(query);
     const scored = this.documents
       .map((doc, index) => ({ doc, index }))
       .filter((row) => allowedSources.has(row.doc.sourceId))

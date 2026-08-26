@@ -125,7 +125,12 @@ export class Agent {
     }
 
     const memories = await this.deps.memory.search(userText, { workspaceId: workspace.id, limit: 6 });
-    const knowledge = this.deps.knowledge.search(userText, { workspaceId: workspace.id, limit: 4 });
+    // Awaitable retrieval so a model-backed embedder can actually influence ranking;
+    // it falls back to lexical scoring when no embedding backend is reachable.
+    const knowledge = await this.deps.knowledge.searchAsync(userText, {
+      workspaceId: workspace.id,
+      limit: 4,
+    });
     const snapshot = this.deps.hardware.snapshot();
     const optimizer = await this.deps.optimizer.getStatus().catch(() => null);
 

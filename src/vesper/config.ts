@@ -120,6 +120,17 @@ export const vesperConfigSchema = z.object({
     )
     .default([]),
   approvedRoots: z.array(z.string()).default([]),
+  embeddings: z
+    .object({
+      /**
+       * Local embedding model used for knowledge retrieval. When the backend is not
+       * running, retrieval degrades to lexical scoring rather than failing.
+       */
+      model: z.string().default("nomic-embed-text"),
+      provider: z.string().default("ollama"),
+      enabled: z.boolean().default(true),
+    })
+    .default({ model: "nomic-embed-text", provider: "ollama", enabled: true }),
   permissions: z
     .object({
       toolOverrides: z.record(z.string(), permissionLevel).default({}),
@@ -254,6 +265,7 @@ export function defaultConfig(overrides?: Record<string, unknown>): VesperConfig
     workspaces: DEFAULT_WORKSPACES,
     approvedApps: DEFAULT_APPS,
     approvedRoots: ["notes", "docs", "knowledge"],
+    embeddings: { model: "nomic-embed-text", provider: "ollama", enabled: true },
     knowledgeSources: [
       {
         id: "vesper-docs",
