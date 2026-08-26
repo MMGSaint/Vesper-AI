@@ -141,8 +141,17 @@ state, feeding the event log so correlation can use it).
 When hardware becomes available, **validate every hardware-dependent item rather than
 simulating success**.
 
-## Where this leaves the branch
+## Integration
 
-All of this work is on `agent/continuation`. `main` is behind by 21 commits: PR #6 took
-the first commit, and no pull request exists for the rest. Merging is left to the
-repository owner rather than done unattended.
+All of this work is **merged into `main`** as of `f1b08e7`.
+
+PR #6 had taken only the first commit of this line of work; PR #7 integrated the
+remaining 23. `agent/continuation` was a strict descendant of `main` — merge-base *was*
+`main`, with no commits on `main` that the branch lacked — so it merged with no rebase,
+squash, or cherry-pick, and every commit kept its original SHA. The merged tree is
+byte-identical to the branch tip that CI had already validated.
+
+Verified on the merge commit itself: 314 tests, 25 security tests, typecheck, hygiene,
+and build all clean, with CI green on ubuntu-latest and windows-latest and CodeQL
+(`security-extended`) green. The head branch was auto-deleted on merge; nothing is lost,
+since every commit is reachable from `main`.
