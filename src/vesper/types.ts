@@ -271,6 +271,15 @@ export interface DiscoveredModel {
   name: string;
   roleHint?: ModelRole;
   available: boolean;
+  /**
+   * Optional metadata reported by the backend. Every field stays `null` when the
+   * backend did not report it - Vesper does not guess a model's size or context.
+   */
+  family?: string | null;
+  parameterSizeB?: number | null;
+  quantization?: string | null;
+  sizeGB?: number | null;
+  contextLength?: number | null;
 }
 
 export interface ModelProviderInfo {
@@ -285,6 +294,38 @@ export interface CompletionRequest {
   role: ModelRole;
   temperature?: number;
   maxTokens?: number;
+  /** Caller-owned cancellation. Providers must abort in-flight work when this fires. */
+  signal?: AbortSignal;
+  /**
+   * When supplied, providers that can stream call this with each text delta as it
+   * arrives. Providers that cannot stream call it exactly once with the full text so
+   * callers can use one code path. Never called after the completion resolves.
+   */
+  onDelta?: (delta: string) => void;
+}
+
+/**
+ * Token counts as *reported by the provider*. Vesper never estimates tokens from
+ * character counts and never presents an estimate as a measurement: a field that the
+ * backend did not report stays `null`.
+ */
+export interface TokenUsage {
+  promptTokens: number | null;
+  completionTokens: number | null;
+  /** Provider-reported generation time, when the backend exposes it. */
+  evalDurationMs: number | null;
+  /** Provider-reported model load time, when the backend exposes it. */
+  loadDurationMs: number | null;
+}
+
+export interface CompletionTiming {
+  /**
+   * Time to first token. Only set when the response was genuinely streamed and a first
+   * delta was observed. `null` for non-streamed responses, where TTFT is unmeasurable.
+   */
+  ttftMs: number | null;
+  /** Wall-clock time for the whole completion, measured locally. */
+  totalMs: number;
 }
 
 export interface CompletionResult {
@@ -295,6 +336,23 @@ export interface CompletionResult {
   role: ModelRole;
   unavailable?: boolean;
   error?: string;
+  /** True only when the transport actually delivered incremental deltas. */
+  streamed?: boolean;
+  /** Present only when the provider reported counters. */
+  usage?: TokenUsage;
+  timing?: CompletionTiming;
+  finishReason?: string;
+  /** True when the completion stopped because the caller's signal aborted. */
+  aborted?: boolean;
+}
+
+export function emptyUsage(): TokenUsage {
+  return {
+    promptTokens: null,
+    completionTokens: null,
+    evalDurationMs: null,
+    loadDurationMs: null,
+  };
 }
 
 export interface ToolCallRecord {
