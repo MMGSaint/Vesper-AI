@@ -78,12 +78,27 @@ export function evaluatePermission(input: {
     };
   }
 
+  // Default deny. Only levels Vesper explicitly knows to be autonomous are allowed, so
+  // an unrecognised, future, or corrupted level is refused rather than permitted. The
+  // permission layer must never fail open.
+  if (level === "read" || level === "safe") {
+    return {
+      allowed: true,
+      level,
+      requiresConfirmation: false,
+      toolName: input.tool.name,
+      reason: `Allowed at permission level '${level}'.`,
+    };
+  }
+
   return {
-    allowed: true,
+    allowed: false,
     level,
     requiresConfirmation: false,
     toolName: input.tool.name,
-    reason: `Allowed at permission level '${level}'.`,
+    reason: `Tool '${input.tool.name}' has an unrecognised permission level '${String(
+      level,
+    )}'. Refusing rather than assuming it is safe.`,
   };
 }
 

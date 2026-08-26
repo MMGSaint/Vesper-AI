@@ -1,7 +1,12 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
 import type { KnowledgeHit, KnowledgeSource } from "../types.ts";
-import { containsTraversal, isDangerousRoot, isPathInside } from "../security.ts";
+import {
+  containsTraversal,
+  isDangerousRoot,
+  isPathInside,
+  resolveRealWithinRoot,
+} from "../security.ts";
 import { chunkText } from "./chunk.ts";
 import {
   cosineSimilarity,
@@ -58,12 +63,26 @@ async function walk(root: string, acc: string[], approvedRoots: string[]): Promi
   for (const entry of entries) {
     const full = join(resolvedRoot, entry.name);
     if (!isPathInside(resolvedRoot, full)) continue;
+
+    // A symlink can point anywhere. `readdir` reports the link itself, so a link named
+    // `notes.md` would otherwise be indexed by extension and read through to its real
+    // target outside the approved tree.
+    if (entry.isSymbolicLink()) {
+      const real = await resolveRealWithinRoot(resolvedRoot, full);
+      if (!real.ok) continue;
+    }
+
     if (entry.isDirectory()) {
       if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "bin") continue;
       await walk(full, acc, approvedRoots.length ? approvedRoots : [resolvedRoot]);
     } else if (TEXT_EXT.has(extname(entry.name).toLowerCase())) {
-      const info = await stat(full);
-      if (info.size <= 256_000) acc.push(full);
+      // One unreadable or racing entry must not abandon the whole index.
+      try {
+        const info = await stat(full);
+        if (info.size <= 256_000) acc.push(full);
+      } catch {
+        continue;
+      }
     }
   }
 }
