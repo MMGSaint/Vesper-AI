@@ -41,8 +41,15 @@ shipped, with a regression test named after what broke.
 - Hygiene: passing
 - Production check (`npm run build`): passing
 - CI: **passing on ubuntu-latest and windows-latest** on every commit of this branch
-- CodeQL: passing on `main`; open alerts 0
+- CodeQL (`security-extended`): **completed successfully on this branch's HEAD** —
+  [run 32980070409](https://github.com/MMGSaint/Vesper-AI/actions/runs/32980070409).
+  CodeQL is configured to run on `main` only, so it had never scanned this branch; it
+  was dispatched explicitly to cover the ~10,000 changed lines.
 - Secret scanning alerts: 0 · Dependabot alerts: 0
+
+The shipped artifact was installed from scratch and run: extracted, `npm ci` from the
+bundled lockfile, `--doctor` reporting OK, and a conversation that used tools and stored
+memory — all from the packaged tree rather than the working copy. On Linux, not Windows.
 
 Behaviour verified by running the product, not only by tests:
 
