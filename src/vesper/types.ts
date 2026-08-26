@@ -515,6 +515,13 @@ export interface DiagnosticReport {
     startOnLogin: boolean;
   };
   voice: { enabled: boolean; stt: string; tts: string; available: boolean };
+  knowledge: {
+    sources: number;
+    /** The embedding provider in use, and the one the index was actually built with. */
+    embeddingProvider: string;
+    indexedWith: string | null;
+    detail: string;
+  };
   context: WorkloadContext;
   capability: CapabilityProfile | null;
   recentErrors: { at: string; message: string }[];

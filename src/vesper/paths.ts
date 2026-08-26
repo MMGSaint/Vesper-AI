@@ -58,6 +58,14 @@ export function auditLogFile(dirs: VesperDirs): string {
   return join(dirs.logs, "audit.jsonl");
 }
 
+export function instanceLockFile(dirs: VesperDirs): string {
+  return join(dirs.data, "vesper.lock");
+}
+
+export function crashNoteFile(dirs: VesperDirs): string {
+  return join(dirs.logs, "last-crash.json");
+}
+
 export function lastErrorFile(dirs: VesperDirs): string {
   return join(dirs.logs, "last-error.json");
 }

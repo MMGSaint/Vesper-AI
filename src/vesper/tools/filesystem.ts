@@ -1,6 +1,11 @@
 import { readdir, writeFile, mkdir, open } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
-import { assertWithinRoot, containsTraversal, isDangerousRoot } from "../security.ts";
+import {
+  assertWithinRoot,
+  containsTraversal,
+  isDangerousRoot,
+  resolveRealWithinRoot,
+} from "../security.ts";
 import type { JsonObject, ToolExecutionResult } from "../types.ts";
 
 export function resolveApprovedPath(
@@ -29,11 +34,27 @@ export function resolveApprovedPath(
   return { ok: false, summary: "Path is outside approved roots." };
 }
 
+/**
+ * Resolve a requested path and confirm it stays inside an approved root *after*
+ * symlinks are followed. The lexical check alone is defeated by a link planted inside
+ * an approved directory.
+ */
+export async function resolveApprovedPathReal(
+  approvedRoots: string[],
+  requested: string,
+): Promise<{ ok: true; path: string; root: string } | { ok: false; summary: string }> {
+  const lexical = resolveApprovedPath(approvedRoots, requested);
+  if (!lexical.ok) return lexical;
+  const real = await resolveRealWithinRoot(lexical.root, lexical.path);
+  if (!real.ok) return { ok: false, summary: real.reason };
+  return { ok: true, path: real.path, root: real.root };
+}
+
 export async function listApproved(
   approvedRoots: string[],
   requested: string,
 ): Promise<ToolExecutionResult> {
-  const resolved = resolveApprovedPath(approvedRoots, requested || approvedRoots[0] || "");
+  const resolved = await resolveApprovedPathReal(approvedRoots, requested || approvedRoots[0] || "");
   if (!resolved.ok) {
     return { ok: false, epistemic: "could_not_access", summary: resolved.summary };
   }
@@ -59,7 +80,7 @@ export async function readApproved(
   approvedRoots: string[],
   requested: string,
 ): Promise<ToolExecutionResult> {
-  const resolved = resolveApprovedPath(approvedRoots, requested);
+  const resolved = await resolveApprovedPathReal(approvedRoots, requested);
   if (!resolved.ok) {
     return { ok: false, epistemic: "could_not_access", summary: resolved.summary };
   }
@@ -98,7 +119,7 @@ export async function writeApproved(
   content: string,
   dryRun?: boolean,
 ): Promise<ToolExecutionResult> {
-  const resolved = resolveApprovedPath(approvedRoots, requested);
+  const resolved = await resolveApprovedPathReal(approvedRoots, requested);
   if (!resolved.ok) {
     return { ok: false, epistemic: "could_not_access", summary: resolved.summary };
   }

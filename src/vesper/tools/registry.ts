@@ -2,6 +2,7 @@ import type { Logger } from "../logging.ts";
 import type { PermissionGate } from "../permissions.ts";
 import { PermissionDeniedError } from "../permissions.ts";
 import { createId, nowIso } from "../id.ts";
+import { validateToolArgs } from "./validate.ts";
 import type {
   JsonObject,
   PendingConfirmation,
@@ -81,7 +82,40 @@ export class ToolRegistry {
       return record;
     }
 
-    const decision = this.gate.evaluate(registered.spec, input.args, input.workspaceId);
+    // Validate before anything acts on the arguments. The schema is advertised to the
+    // model, so enforcing it here is what makes `required` and `enum` mean anything.
+    const validation = validateToolArgs(registered.spec.parameters, input.args);
+    if (!validation.ok) {
+      const reason = `Invalid arguments for '${input.name}': ${validation.errors.join(" ")}`;
+      this.log.warn("tool", "Rejected malformed tool arguments", {
+        tool: input.name,
+        errors: validation.errors.join("; "),
+      });
+      return {
+        id: createId("tool"),
+        toolName: input.name,
+        args: input.args,
+        at: nowIso(),
+        decision: {
+          allowed: false,
+          level: registered.spec.permission,
+          requiresConfirmation: false,
+          toolName: input.name,
+          reason,
+        },
+        result: { ok: false, summary: reason, epistemic: "could_not_access" },
+      };
+    }
+    if (validation.dropped.length) {
+      this.log.info("tool", "Dropped undeclared tool arguments", {
+        tool: input.name,
+        dropped: validation.dropped.join(", "),
+      });
+    }
+    // From here on the validated arguments are the ones that count.
+    const args = validation.args;
+
+    const decision = this.gate.evaluate(registered.spec, args, input.workspaceId);
 
     if (decision.level === "never") {
       this.log.warn("permission", decision.reason, { tool: input.name });
@@ -103,7 +137,7 @@ export class ToolRegistry {
       const pending: PendingConfirmation = {
         id: createId("confirm"),
         toolName: input.name,
-        args: input.args,
+        args,
         reason: decision.reason,
         createdAt: nowIso(),
         workspaceId: input.workspaceId,
@@ -136,7 +170,7 @@ export class ToolRegistry {
     }
 
     try {
-      const result = await registered.handler(input.args, {
+      const result = await registered.handler(args, {
         workspaceId: input.workspaceId,
         dryRun: input.dryRun,
       });

@@ -35,3 +35,40 @@ Disabled by default. Not required. Any future MCP tool is `confirm` at minimum.
 ## Hostile tests
 
 See `src/vesper/security.test.ts` and `src/vesper/security-hostile.test.ts`.
+
+## Path confinement resolves symlinks
+
+`assertWithinRoot` compares strings, and `path.resolve` is lexical, so a symlink planted
+inside an approved directory passed the check and was read through to its real target.
+`resolveRealWithinRoot` resolves both sides with `realpath` before comparing; for a path
+that does not exist yet, the nearest existing ancestor is resolved, so a link part-way
+along a parent chain cannot redirect a write either. `fs_read`, `fs_write`, `fs_list`,
+and the knowledge indexer all use it.
+
+## What counts as a dangerous root
+
+Refused at any depth: `/etc`, `/proc`, `/sys`, `/dev`, `/boot`, `/root`, `C:\Windows`,
+`C:\Program Files`, `C:\ProgramData`, and `System32` wherever it appears.
+
+Refused as a whole, but usable inside: `/`, a bare drive, `/home`, `/Users`, `C:\Users`,
+and a single user profile such as `C:\Users\sam`. Approving an entire profile is too
+broad; `C:\Users\sam\Documents\notes` is exactly where a user's notes live and must
+stay approvable. Refusing everything under `C:\Users` made the filesystem tools and
+knowledge indexing unusable on the only OS Vesper targets.
+
+## Network egress
+
+Model and optimizer transports refuse redirects, so request headers — including any API
+key — cannot be replayed to a host the user never approved. A provider declared "local"
+must point at a loopback or private address; the optimizer endpoint is validated the
+same way, with remote access requiring explicit opt-in. Cloud metadata and link-local
+addresses are refused.
+
+## Audit
+
+State-changing optimizer calls log the request with its parameters and the outcome
+separately — accepted, declined, or failed — so an action can be reconstructed and a
+failure is as visible as a success. Nothing logs a confirmation the optimizer did not
+give. An audit-log write failure degrades loudly and can never reach the process as an
+unhandled rejection.
+

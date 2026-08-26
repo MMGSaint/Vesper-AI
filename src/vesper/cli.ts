@@ -70,7 +70,7 @@ Usage:
   node --experimental-strip-types src/vesper/host/main.ts [command]
 
 Commands:
-  (none)            Start the interactive host (or daemon if stdin is not a TTY)
+  (none)            Start the interactive console (or background mode with no TTY)
   --help, -h        Show this help
   --version, -V     Print version
   --diagnostics     Print a diagnostics report and exit
@@ -83,6 +83,9 @@ Commands:
 
 Flags:
   --skip-discovery  Skip first-boot backend probes
+
+In the console, type /help for conversation, memory, workspace, and system
+commands. Ctrl-C stops the reply in progress; press it again to exit.
 
 Vesper is local-first. Cloud AI is optional and never required.
 `;

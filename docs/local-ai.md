@@ -15,11 +15,44 @@ ROCm is never assumed faster than Vulkan.
 
 | Provider | Default | Notes |
 | --- | --- | --- |
-| Ollama | `http://127.0.0.1:11434/v1` | OpenAI-compatible |
+| Ollama | `http://127.0.0.1:11434/v1` | Reached through its **native** API; a `/v1` suffix is stripped |
 | llama.cpp server | `http://127.0.0.1:8088/v1` | Not 8080 — reserved for the console |
 | Optional xAI | `https://api.x.ai/v1` | Preview/dev only |
 
-Discovery lists `/v1/models` with short timeouts. Completions abort after 60s so a hung backend cannot freeze the assistant.
+Discovery uses short timeouts. Completions abort on a timeout, and on a caller's
+cancellation, so neither a hung backend nor a long reply can freeze the assistant.
+
+## Why Ollama is native, not OpenAI-compatible
+
+The compat shim works, but it hides everything Vesper needs to make local-first
+decisions:
+
+| Endpoint | What it gives Vesper |
+| --- | --- |
+| `/api/tags` | installed models with parameter size and quantization |
+| `/api/show` | the real context length per model |
+| `/api/ps` | which models are resident, and how much VRAM they hold |
+| `/api/chat` | native tool calling, NDJSON streaming, and token counters |
+| `/api/embed` | local embeddings without running a second service |
+
+The token counters matter for honesty: they are the only way Vesper can report
+throughput as a measurement instead of an estimate. Ollama issues no tool-call ids, so
+stable local ones are synthesized.
+
+llama.cpp's server and anything else OpenAI-compatible are reached through
+`openai-compat.ts`, which streams over SSE and reassembles tool-call argument fragments
+by index.
+
+## Streaming and cancellation
+
+`CompletionRequest` carries an `AbortSignal` and an `onDelta` callback. Providers that
+can stream do; those that cannot call `onDelta` once with the full text, so callers have
+one code path. Cancelling is reported as `aborted`, never as a backend outage, and a
+cancelled turn is never retried against a different provider.
+
+Providers are re-probed lazily when no local backend appears available, rate limited so
+an idle assistant never polls. A backend started *after* Vesper — the normal order when
+Vesper launches at login — is picked up on the next turn without a restart.
 
 ## Benchmark harness
 

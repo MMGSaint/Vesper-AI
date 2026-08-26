@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "agent/**"]
+    branches: [main, "agent/**", "claude/**"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -16,9 +16,17 @@ concurrency:
 
 jobs:
   test:
-    name: test
-    runs-on: ubuntu-latest
+    # Vesper's runtime target is Windows, so the suite runs there too. This validates
+    # the Windows code paths (paths, process handling, startup registration) that a
+    # Linux-only job cannot exercise. It is not hardware validation: no AMD telemetry,
+    # no local model, and no audio device is involved.
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 

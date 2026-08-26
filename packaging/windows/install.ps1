@@ -9,7 +9,9 @@ foreach ($name in $dirs) {
   New-Item -ItemType Directory -Force -Path (Join-Path $root $name) | Out-Null
 }
 
-$configPath = Join-Path $root "config\vesper.config.json"
+# Must match paths.ts `configFile()`. A mismatch here means the runtime silently
+# ignores everything the installer wrote.
+$configPath = Join-Path $root "config\vesper.json"
 if (-not (Test-Path $configPath)) {
   @'
 {

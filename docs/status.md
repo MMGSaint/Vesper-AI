@@ -1,40 +1,65 @@
-# Feature status
+# Known limitations
 
-Use only: **IMPLEMENTED + TESTED**, **IMPLEMENTED + HARDWARE DEPENDENT**, **MOCKED / SIMULATED**, **DOCUMENTED BUT NOT IMPLEMENTED**.
+## Hardware, unchanged
 
-| Area | Classification |
-| --- | --- |
-| Config, logging, permissions, tool registry | IMPLEMENTED + TESTED |
-| Agent intents, confirmation, recovery | IMPLEMENTED + TESTED |
-| Confirmation persistence across restarts | IMPLEMENTED + TESTED |
-| Memory (remember/search/update/forget/summarize, session vs persistent, provenance, FileStorage, concurrency, export/import) | IMPLEMENTED + TESTED |
-| Workspaces | IMPLEMENTED + TESTED |
-| Knowledge search (keyword/BM25-lite + lexical-hash embeddings), chunking, provenance, source register/remove, path confinement | IMPLEMENTED + TESTED |
-| Neural/GPU embedding models | DOCUMENTED BUT NOT IMPLEMENTED (provider abstraction exists) |
-| Model router + echo/scripted providers | IMPLEMENTED + TESTED |
-| Backend discovery (Ollama, llama.cpp, Vulkan preference, ROCm opt-in) | IMPLEMENTED + TESTED (probes; no benches on this host) |
-| Ollama / llama.cpp OpenAI-compatible clients with timeouts | IMPLEMENTED + HARDWARE DEPENDENT |
-| Optional xAI provider | IMPLEMENTED + TESTED (preview-only, not required) |
-| Benchmark harness | IMPLEMENTED + TESTED (refuses fake numbers); live timings HARDWARE DEPENDENT |
-| Hardware simulator (9950X / 7900 XT / 96 GB) | MOCKED / SIMULATED |
-| Live CPU/RAM of current host | IMPLEMENTED + TESTED (no GPU/temps) |
-| AMD telemetry, clocks, power | DOCUMENTED BUT NOT IMPLEMENTED |
-| Optimizer adapter (mock) | MOCKED / SIMULATED |
-| Optimizer HTTP adapter (timeouts, retries, malformed handling) | IMPLEMENTED + TESTED (no real optimizer API) |
-| Optimizer cooperation (explain GPU/CPU bound, OBS/VRChat context) | IMPLEMENTED + TESTED (simulated context) |
-| Windows background runtime, tray menu, pause/resume, startup preference | IMPLEMENTED + TESTED (logic); tray/startup apply is HARDWARE DEPENDENT |
-| Windows toast notifications | MOCKED / SIMULATED on this host; HARDWARE DEPENDENT on Windows |
-| Windows process listing via tasklist | IMPLEMENTED + TESTED (parser); live spawn is HARDWARE DEPENDENT |
-| Installer / uninstaller / reset scripts | IMPLEMENTED + HARDWARE DEPENDENT (not executed on Windows here) |
-| Voice STT/TTS (faster-whisper / Piper / Kokoro) | DOCUMENTED BUT NOT IMPLEMENTED for live audio; interfaces + PTT session + simulated provider TESTED |
-| First-boot discovery + report | IMPLEMENTED + TESTED (probes; no benches) |
-| Diagnostics report + doctor CLI | IMPLEMENTED + TESTED |
-| Host CLI / config file / JSONL audit log | IMPLEMENTED + TESTED |
-| Idle scheduler with gaming throttle | IMPLEMENTED + TESTED |
-| Gaming / VRChat / OBS adapters | IMPLEMENTED + TESTED (simulated process list) |
-| Confined filesystem tools | IMPLEMENTED + TESTED |
-| MCP bridge | IMPLEMENTED + TESTED as disabled optional status; not a runtime dependency |
-| GitHub Actions CI / CodeQL / Dependabot / secret scanning / push protection | IMPLEMENTED + TESTED (workflow files and GitHub settings) |
-| Client protocol v1 (scopes, sessions, honest capability states, in-process gateway) | IMPLEMENTED + TESTED |
-| Client network transport / pairing / LAN TLS | DOCUMENTED BUT NOT IMPLEMENTED |
-| Model benchmarks on target PC | DOCUMENTED BUT NOT IMPLEMENTED — machine was off |
+The target Windows PC (Ryzen 9 9950X / RX 7900 XT 20 GB / 96 GB) was powered off for
+all of this work. Nothing below has been observed on it.
+
+- No live AMD telemetry, clocks, power, or temperatures.
+- No local-model throughput on the target PC. The benchmark harness reports throughput
+  only from provider-reported token counters and time-to-first-token only when a reply
+  genuinely streamed; it refuses to estimate either. **No number in this repository
+  came from that machine.**
+- No Windows command has been executed: `tasklist`, application launch and close, the
+  HKCU startup entry, and toast notifications are implemented and unit-tested against a
+  fake runner, never run.
+- The tray has never displayed an icon. The mechanism is chosen and the protocol is
+  implemented; `Shell_NotifyIcon` needs Windows.
+- Voice converts audio buffers to text and text to audio buffers, tested against a fake
+  binary. Vesper opens no microphone and no speaker.
+- The installer, uninstaller, and reset scripts have not been run on Windows.
+
+## Not implemented
+
+- **Companion transport.** `vesper.client` v1 is in-process only. There is no pairing,
+  no listener, and no LAN TLS.
+- **Wake word.** Deliberately out of scope; push-to-talk is the activation model.
+
+## Partly done
+
+- **MCP.** The client is real: newline-delimited JSON-RPC over a server's stdio, with
+  `initialize`, `tools/list`, and `tools/call`, tested against an actual server
+  subprocess. No server is configured by default, and launching one is a config
+  decision — never something the model can trigger. Discovered tools are namespaced
+  (`mcp_<server>_<tool>`) so a server can never shadow a built-in, and they default to
+  the confirm tier.
+
+- **OBS.** Vesper speaks obs-websocket v5 and asks OBS directly, so recording and
+  streaming state is *observed*. It is off by default (`obs.enabled`) and has only ever
+  talked to a fake server; a live OBS session is unvalidated. When it is not connected,
+  Vesper falls back to process presence and says the state is not confirmed.
+
+## Real, and worth knowing
+
+- **Retrieval without an embedding backend is lexical.** With a local embedding model
+  reachable, retrieval is hybrid. Without one it falls back to BM25 and says so in
+  diagnostics. Lexical retrieval cannot match a question that shares no words with the
+  stored text: "when do I usually go live?" will not find "I stream on Friday nights"
+  until a real embedding model is running.
+- **The context budget is measured in characters, not tokens.** Vesper cannot count a
+  backend's tokens without asking it, and will not present an estimate as a
+  measurement. The budget is used for trimming only.
+- **The optimizer is a mock.** Its contract is a placeholder until the real API is
+  published. Vesper never claims an optimization happened without an authoritative
+  `accepted: true` from the adapter.
+- **Correlation is timing, not causation.** `explain_change` reports what Vesper
+  observed near a moment and says explicitly that this does not prove one thing caused
+  another.
+- **A whole user profile cannot be an approved root.** `C:\Users\<name>` and
+  `/home/<name>` are refused as too broad; directories inside them are fine.
+
+## What to do when the PC is on
+
+Run the host, read the first-boot report, and treat every hardware-dependent item above
+as unfinished until it has actually succeeded on that machine. See
+`docs/first-boot.md`.

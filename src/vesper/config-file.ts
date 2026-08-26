@@ -2,6 +2,40 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { defaultConfig, parseConfig, type VesperConfig } from "./config.ts";
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Merge a config file over the built-in defaults.
+ *
+ * The on-disk file is deliberately a *subset* of the full config, so a key that is
+ * absent from it must mean "use the default", never "empty". Parsing the file on its
+ * own let schema defaults such as `workspaces: []` win over the real defaults, which
+ * silently left a real installation with no workspaces, no approved applications, and
+ * no knowledge sources.
+ *
+ * Objects merge recursively so a partially written section (for example `hardware`,
+ * which only stores mode and target) keeps the rest of its defaults. Arrays replace
+ * wholesale, so a user who deliberately writes `"approvedApps": []` gets an empty list.
+ */
+export function mergeOverDefaults(
+  base: Record<string, unknown>,
+  override: unknown,
+): Record<string, unknown> {
+  if (!isPlainObject(override)) return base;
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    // Never let a config file introduce prototype keys.
+    if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+    const current = out[key];
+    out[key] = isPlainObject(current) && isPlainObject(value)
+      ? mergeOverDefaults(current, value)
+      : value;
+  }
+  return out;
+}
+
 export interface LoadedHostConfig {
   config: VesperConfig;
   source: "file" | "default";
@@ -25,7 +59,9 @@ export async function loadHostConfig(configPath: string): Promise<LoadedHostConf
         path: configPath,
       };
     }
-    const parsed = parseConfig(parsedJson);
+    const parsed = parseConfig(
+      mergeOverDefaults(defaultConfig() as unknown as Record<string, unknown>, parsedJson),
+    );
     return {
       config: parsed.config,
       source: parsed.ok ? "file" : "default",

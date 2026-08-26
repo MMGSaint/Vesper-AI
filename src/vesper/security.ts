@@ -1,4 +1,5 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 const SHELL_META = /[|&;<>`$()\n\r]/;
 const SAFE_COMMAND = /^[A-Za-z0-9._-]+$/;
@@ -20,15 +21,44 @@ export function isPathInside(root: string, candidate: string): boolean {
   return !rel.startsWith("..") && !isAbsolute(rel);
 }
 
+/**
+ * Directories that are never a legitimate approved root, at any depth. These belong to
+ * the operating system, not the user.
+ */
+const SYSTEM_DIRECTORIES =
+  /^(?:[a-zA-Z]:)?\/(etc|proc|sys|dev|boot|root|windows|winnt|program files( \(x86\))?|programdata|\$recycle\.bin)(\/|$)/i;
+
+/** `System32` is dangerous wherever it appears, not only directly under a drive root. */
+const SYSTEM32 = /(^|\/)system32(\/|$)/i;
+
+/**
+ * Containers holding every user's profile, and a whole profile itself. Approving one of
+ * these means approving somebody's entire home directory, which is too broad - but
+ * anything *inside* a profile is exactly where a user's notes and projects live and
+ * must remain approvable.
+ *
+ *   C:/Users          -> refused (every profile)
+ *   C:/Users/sam      -> refused (a whole profile)
+ *   C:/Users/sam/notes-> allowed
+ */
+const PROFILE_CONTAINER = /^(?:[a-zA-Z]:)?\/(home|users)(?:\/[^/]+)?$/i;
+
 export function isDangerousRoot(root: string): boolean {
   const trimmed = root.trim();
   if (!trimmed) return true;
   if (containsTraversal(trimmed)) return true;
-  const unix = trimmed.replace(/\\/g, "/");
-  if (unix === "/" || unix === ".") return true;
-  if (/^[a-zA-Z]:[\\/]?$/.test(trimmed)) return true;
-  if (/^\/(etc|windows|system32|home|users|root)(\/|$)/i.test(unix)) return true;
-  if (/^[a-zA-Z]:\/(windows|users|program files)/i.test(unix)) return true;
+
+  // Normalise separators and drop trailing slashes so "C:\\Users\\" and "C:/Users"
+  // are judged identically.
+  const unix = trimmed.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (unix === "" || unix === "/" || unix === ".") return true;
+  // A bare drive: "C:", "C:\", "C:/".
+  if (/^[a-zA-Z]:$/.test(unix)) return true;
+
+  if (SYSTEM_DIRECTORIES.test(unix)) return true;
+  if (SYSTEM32.test(unix)) return true;
+  if (PROFILE_CONTAINER.test(unix)) return true;
+
   return false;
 }
 
@@ -81,4 +111,67 @@ export function parseTasklistCsv(csv: string): { pid: number; name: string; memo
     });
   }
   return rows;
+}
+
+/**
+ * Resolve a path and confirm it is *really* inside a root, following symlinks.
+ *
+ * `assertWithinRoot` compares strings, which a symlink defeats: a link inside an
+ * approved directory pointing at `/etc/shadow` passes a lexical check and is then read.
+ * This resolves both sides with `realpath` before comparing.
+ *
+ * For a path that does not exist yet (a pending write) the nearest existing ancestor is
+ * resolved instead, so a link somewhere along the parent chain cannot redirect the
+ * write either.
+ */
+export async function resolveRealWithinRoot(
+  root: string,
+  candidate: string,
+): Promise<{ ok: true; path: string; root: string } | { ok: false; reason: string }> {
+  let lexical: string;
+  try {
+    lexical = assertWithinRoot(root, candidate);
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+
+  const realRoot = await realpathOrSelf(resolve(root));
+  const realCandidate = await realpathDeepest(lexical);
+
+  if (!isPathInside(realRoot, realCandidate)) {
+    return {
+      ok: false,
+      reason: "Path resolves outside its approved root once symlinks are followed.",
+    };
+  }
+  // Hand back the real paths so the caller opens exactly what was checked, and so a
+  // root that is itself a symlink still produces correct relative paths.
+  return { ok: true, path: realCandidate, root: realRoot };
+}
+
+async function realpathOrSelf(target: string): Promise<string> {
+  try {
+    return await realpath(target);
+  } catch {
+    return target;
+  }
+}
+
+/** realpath the deepest existing ancestor, then re-attach the missing tail. */
+async function realpathDeepest(target: string): Promise<string> {
+  const absolute = resolve(target);
+  const tail: string[] = [];
+  let current = absolute;
+  for (;;) {
+    try {
+      const resolved = await realpath(current);
+      return tail.length ? resolve(resolved, ...tail.reverse()) : resolved;
+    } catch {
+      const parent = dirname(current);
+      // Reached the filesystem root without finding anything that exists.
+      if (parent === current) return absolute;
+      tail.push(basename(current));
+      current = parent;
+    }
+  }
 }

@@ -70,4 +70,56 @@ describe("security", () => {
     assert.equal(record.decision.level, "never");
     assert.equal(record.result?.ok, false);
   });
+
+  it("refuses system directories at any depth, on either platform", () => {
+    for (const root of [
+      "/",
+      ".",
+      "C:\\",
+      "C:",
+      "/etc",
+      "/etc/ssh",
+      "/proc/self",
+      "/root",
+      "C:\\Windows",
+      "C:\\Windows\\System32",
+      "C:\\Program Files",
+      "C:\\Program Files (x86)\\app",
+      "C:\\ProgramData",
+    ]) {
+      assert.equal(isDangerousRoot(root), true, `${root} must be refused`);
+    }
+  });
+
+  it("refuses a whole user profile but allows directories inside one", () => {
+    // Regression: every path under C:\Users was treated as dangerous, so on Windows no
+    // approved filesystem root and no knowledge source could live where a user's notes
+    // and projects actually are.
+    for (const container of [
+      "/home",
+      "/home/sam",
+      "/Users",
+      "/Users/sam",
+      "C:\\Users",
+      "C:\\Users\\sam",
+      "C:/Users/sam/",
+    ]) {
+      assert.equal(isDangerousRoot(container), true, `${container} is too broad to approve`);
+    }
+    for (const usable of [
+      "/home/sam/notes",
+      "C:\\Users\\sam\\Documents\\notes",
+      "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\vesper-fs-1",
+      "docs",
+      "/tmp/vesper",
+      "D:\\projects\\vesper",
+    ]) {
+      assert.equal(isDangerousRoot(usable), false, `${usable} must remain approvable`);
+    }
+  });
+
+  it("still refuses traversal inside an otherwise allowed path", () => {
+    assert.equal(isDangerousRoot("C:\\Users\\sam\\..\\other"), true);
+    assert.equal(isDangerousRoot("../secret"), true);
+  });
 });

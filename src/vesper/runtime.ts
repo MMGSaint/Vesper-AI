@@ -6,6 +6,11 @@ import { ToolRegistry } from "./tools/registry.ts";
 import { registerBuiltinTools } from "./tools/builtin.ts";
 import { MemoryStore } from "./memory/store.ts";
 import { KnowledgeIndex } from "./knowledge/rag.ts";
+import {
+  createFallbackEmbeddings,
+  createHashEmbeddings,
+  createProviderEmbeddings,
+} from "./knowledge/embeddings.ts";
 import { WorkspaceManager } from "./workspaces.ts";
 import { EventBus } from "./events.ts";
 import { NotificationHub } from "./notifications.ts";
@@ -28,6 +33,7 @@ import { Agent } from "./agent.ts";
 import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
 import { buildDiagnostics } from "./diagnostics.ts";
 import { createId } from "./id.ts";
+import { createObsClient, type ObsClient } from "./specialists/obs.ts";
 import { describeStartupRegistration } from "./windows/startup.ts";
 import type {
   AgentTurn,
@@ -61,6 +67,7 @@ export class VesperRuntime {
   readonly notifications: NotificationHub;
   readonly hardware: SimulatedHardware;
   readonly optimizer: OptimizerAdapter;
+  readonly obs: ObsClient;
   readonly tools: ToolRegistry;
   readonly models: ModelRouter;
   readonly agent: Agent;
@@ -88,6 +95,7 @@ export class VesperRuntime {
       notifications: NotificationHub;
       hardware: SimulatedHardware;
       optimizer: OptimizerAdapter;
+      obs: ObsClient;
       tools: ToolRegistry;
       models: ModelRouter;
       agent: Agent;
@@ -110,6 +118,7 @@ export class VesperRuntime {
     this.notifications = parts.notifications;
     this.hardware = parts.hardware;
     this.optimizer = parts.optimizer;
+    this.obs = parts.obs;
     this.tools = parts.tools;
     this.models = parts.models;
     this.agent = parts.agent;
@@ -125,6 +134,10 @@ export class VesperRuntime {
   async start() {
     if (this.started) return this.capability;
     this.log.info("lifecycle", "Vesper starting", { instanceId: this.instanceId });
+    const restoredEvents = await this.events.hydrate();
+    if (restoredEvents) {
+      this.log.info("lifecycle", "Restored the event log", { events: restoredEvents });
+    }
     await this.restoreConfirmations();
     await this.seedMemories();
     this.started = true;
@@ -137,6 +150,15 @@ export class VesperRuntime {
       title: "Vesper is awake",
       severity: "info",
     });
+    if (this.config.obs.enabled) {
+      // Fire and forget: OBS being down must never delay or fail startup.
+      void this.obs.connect().then((status) => {
+        this.log.info("event", "OBS connection attempt finished", {
+          connected: status.connected,
+          observed: status.observed,
+        });
+      });
+    }
     if (!this.skipDiscovery) {
       void this.discoverInBackground();
     }
@@ -169,6 +191,8 @@ export class VesperRuntime {
     this.memory.clearSession();
     this.scheduler.stop();
     await this.persistConfirmations();
+    this.obs.disconnect();
+    await this.events.flush();
     await this.background.stop();
     this.log.info("lifecycle", "Vesper stopped");
   }
@@ -181,7 +205,17 @@ export class VesperRuntime {
     await this.background.resume();
   }
 
-  async chat(text: string, options?: { confirmId?: string; approve?: boolean }): Promise<AgentTurn> {
+  async chat(
+    text: string,
+    options?: {
+      confirmId?: string;
+      approve?: boolean;
+      /** Cancels this turn without stopping the host. */
+      signal?: AbortSignal;
+      /** Receives reply text as it is generated, when the backend can stream. */
+      onDelta?: (delta: string) => void;
+    },
+  ): Promise<AgentTurn> {
     if (!this.started) await this.start();
     try {
       const turn = await this.agent.handle(text, options);
@@ -239,6 +273,12 @@ export class VesperRuntime {
         startOnLogin: this.background.startOnLogin(),
       },
       voice: this.voice.status(),
+      knowledge: {
+        sources: this.knowledge.listSources().length,
+        embeddingProvider: this.knowledge.embeddingStatus().providerId,
+        indexedWith: this.knowledge.embeddingStatus().indexedWith,
+        detail: this.knowledge.embeddingStatus().detail,
+      },
       context: inspectWorkload(this.hardware, { optimizerActive: optimizer.available }),
       capability: this.capability,
       recentErrors: errors,
@@ -276,6 +316,12 @@ export class VesperRuntime {
       health,
       tray: createTrayMenu(health),
       voice: this.voice.status(),
+      knowledge: {
+        sources: this.knowledge.listSources().length,
+        embeddingProvider: this.knowledge.embeddingStatus().providerId,
+        indexedWith: this.knowledge.embeddingStatus().indexedWith,
+        detail: this.knowledge.embeddingStatus().detail,
+      },
       context: inspectWorkload(this.hardware),
       startup,
       scheduler: this.scheduler.status(),
@@ -411,6 +457,24 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   }
   const storage = options.storage ?? new MemoryStorage();
   const memory = new MemoryStore(storage);
+  // The knowledge index is constructed before the model router, so the embedding
+  // backend is resolved lazily through this reference rather than by reordering
+  // startup. Retrieval degrades to lexical scoring whenever it stays unset.
+  const embeddingBackend: {
+    current: { isAvailable: () => boolean; embed?: (texts: string[], model: string) => Promise<number[][] | null> } | null;
+  } = { current: null };
+  const knowledgeEmbeddings = config.embeddings.enabled
+    ? createFallbackEmbeddings(
+        createProviderEmbeddings({
+          id: `${config.embeddings.provider}-embed`,
+          model: config.embeddings.model,
+          isAvailable: () =>
+            Boolean(embeddingBackend.current?.isAvailable() && embeddingBackend.current?.embed),
+          embed: async (texts, model) =>
+            (await embeddingBackend.current?.embed?.(texts, model)) ?? null,
+        }),
+      )
+    : createHashEmbeddings();
   const knowledge = new KnowledgeIndex(
     config.knowledgeSources,
     [
@@ -427,10 +491,28 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
         text: "Mortis remains an independent codebase. Vesper may use approved notes only when the Mortis workspace is active.",
       },
     ],
-    { approvedRoots: config.approvedRoots },
+    { approvedRoots: config.approvedRoots, embeddings: knowledgeEmbeddings },
   );
+  // OBS is asked directly when enabled, so recording state becomes observed rather than
+  // inferred from process presence. Its state changes are emitted as events, which is
+  // what lets `explain_change` say "OBS started recording 40s before".
+  const obs = createObsClient({
+    url: config.obs.url,
+    password: config.obs.password,
+    timeoutMs: config.obs.timeoutMs,
+    onStateChange: (change) => {
+      events.emit({
+        type: "obs.state",
+        title: change.detail,
+        severity: "info",
+        data: { kind: change.kind, active: change.active },
+      });
+    },
+  });
   const workspaces = new WorkspaceManager(config);
-  const events = new EventBus(log);
+  // The event log is persisted so correlation still works after a restart or crash,
+  // which is exactly when 'what happened just before this?' matters most.
+  const events = new EventBus(log, 500, storage);
   const notifications = new NotificationHub(
     config.notifications.enabled,
     config.notifications.cooldownMs,
@@ -454,6 +536,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
         stt: config.voice.stt,
         tts: config.voice.tts,
         pushToTalk: config.voice.pushToTalk,
+        sttModel: config.voice.sttModel,
+        ttsModel: config.voice.ttsModel,
+        sttLanguage: config.voice.sttLanguage,
+        sttArgs: config.voice.sttArgs,
+        ttsArgs: config.voice.ttsArgs,
       })
     : createDisabledVoice();
   const voiceSession = createVoiceSession(voice);
@@ -493,12 +580,16 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     providers: options.providers,
     xaiKey: options.xaiKey,
   });
+  // Now that providers exist, point knowledge embeddings at the configured backend.
+  embeddingBackend.current =
+    models.providers().find((provider) => provider.id === config.embeddings.provider) ?? null;
   const benchmark = createBenchmarkHarness({ providers: models.providers() });
   const history: ChatMessage[] = [];
 
   const runtimeRef: { current: VesperRuntime | null } = { current: null };
   registerBuiltinTools({
     registry: tools,
+    obs,
     config,
     hardware,
     windows,
@@ -544,6 +635,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     notifications,
     hardware,
     optimizer,
+    obs,
     tools,
     models,
     agent,

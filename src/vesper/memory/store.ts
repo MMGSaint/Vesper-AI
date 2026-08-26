@@ -1,32 +1,53 @@
 import { createId, nowIso } from "../id.ts";
 import type { StorageAdapter } from "../storage.ts";
-import { MEMORY_CATEGORIES, type JsonValue, type MemoryCategory, type MemoryEntry } from "../types.ts";
+import type { JsonValue, MemoryCategory, MemoryEntry } from "../types.ts";
+import { prepareQuery, scoreMemory } from "./retrieval.ts";
+import { coerceMemoryEntry } from "./sanitize.ts";
 
 const KEY = "memory.entries";
+const DEFAULT_MAX_PERSISTENT = 500;
+const MAX_NOTICES = 100;
 
-function asEntries(value: JsonValue | undefined): MemoryEntry[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item) => item && typeof item === "object") as unknown as MemoryEntry[];
+/** Memory scope. `global` entries are visible from every workspace. */
+export type MemoryScope = "workspace" | "global";
+
+export type MemoryNoticeKind = "skipped" | "repaired" | "pruned" | "pruned-stated";
+
+export interface MemoryNotice {
+  at: string;
+  kind: MemoryNoticeKind;
+  reason: string;
+  key?: string;
+  id?: string;
 }
 
-function score(entry: MemoryEntry, query: string): number {
-  const q = query.toLowerCase();
-  let s = 0;
-  if (entry.key.toLowerCase() === q) s += 8;
-  if (entry.key.toLowerCase().includes(q)) s += 4;
-  if (entry.value.toLowerCase().includes(q)) s += 3;
-  if (entry.tags?.some((tag) => tag.toLowerCase().includes(q))) s += 2;
-  if (entry.category.toLowerCase().includes(q)) s += 1;
-  return s;
+export interface MemoryStoreOptions {
+  /** Upper bound on persisted entries; pruning is always reported, never silent. */
+  maxPersistentEntries?: number;
+  onNotice?: (notice: MemoryNotice) => void;
+}
+
+export interface MemorySearchOptions {
+  category?: MemoryCategory;
+  workspaceId?: string;
+  limit?: number;
+  /** `all` reaches other workspaces too; the default keeps them out. */
+  scope?: "workspace" | "all";
 }
 
 export class MemoryStore {
   private readonly storage: StorageAdapter;
   private sessionEntries: MemoryEntry[] = [];
   private queue: Promise<unknown> = Promise.resolve();
+  private readonly maxPersistent: number;
+  private readonly onNotice?: (notice: MemoryNotice) => void;
+  private readonly noticeLog: MemoryNotice[] = [];
+  private readonly seenLoadIssues = new Set<string>();
 
-  constructor(storage: StorageAdapter) {
+  constructor(storage: StorageAdapter, options?: MemoryStoreOptions) {
     this.storage = storage;
+    this.maxPersistent = Math.max(1, options?.maxPersistentEntries ?? DEFAULT_MAX_PERSISTENT);
+    this.onNotice = options?.onNotice;
   }
 
   private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
@@ -38,12 +59,68 @@ export class MemoryStore {
     return next;
   }
 
-  private async loadPersistent(): Promise<MemoryEntry[]> {
-    return asEntries(await this.storage.get(KEY));
+  private note(notice: Omit<MemoryNotice, "at">) {
+    const full: MemoryNotice = { at: nowIso(), ...notice };
+    this.noticeLog.push(full);
+    if (this.noticeLog.length > MAX_NOTICES) this.noticeLog.splice(0, this.noticeLog.length - MAX_NOTICES);
+    this.onNotice?.(full);
   }
 
-  private async savePersistent(entries: MemoryEntry[]) {
-    await this.storage.set(KEY, entries as unknown as JsonValue);
+  /**
+   * Loading never throws. A record that cannot be repaired is dropped from this read
+   * and reported once, so a single corrupt entry costs one memory rather than every
+   * conversational turn that touches the store.
+   */
+  private async loadPersistent(): Promise<MemoryEntry[]> {
+    let raw: JsonValue | undefined;
+    try {
+      raw = await this.storage.get(KEY);
+    } catch (error) {
+      this.noteOnce("storage-read", {
+        kind: "skipped",
+        reason: `memory could not be read: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return [];
+    }
+    if (raw === undefined) return [];
+    if (!Array.isArray(raw)) {
+      this.noteOnce("not-an-array", {
+        kind: "skipped",
+        reason: `stored memory is ${raw === null ? "null" : typeof raw}, not a list; starting empty`,
+      });
+      return [];
+    }
+    const entries: MemoryEntry[] = [];
+    raw.forEach((item, index) => {
+      const result = coerceMemoryEntry(item, "storage");
+      if (!result.ok) {
+        this.noteOnce(`skip:${index}:${result.reason}`, {
+          kind: "skipped",
+          reason: `entry ${index} is unusable (${result.reason})`,
+        });
+        return;
+      }
+      if (result.repaired.length) {
+        this.noteOnce(`repair:${result.entry.key}:${result.repaired.join(",")}`, {
+          kind: "repaired",
+          reason: `filled in ${result.repaired.join(", ")}`,
+          key: result.entry.key,
+          id: result.entry.id,
+        });
+      }
+      entries.push(result.entry);
+    });
+    return entries;
+  }
+
+  private noteOnce(signature: string, notice: Omit<MemoryNotice, "at">) {
+    if (this.seenLoadIssues.has(signature)) return;
+    this.seenLoadIssues.add(signature);
+    this.note(notice);
+  }
+
+  private async savePersistent(entries: MemoryEntry[], keepId?: string) {
+    await this.storage.set(KEY, this.prune(entries, keepId) as unknown as JsonValue);
   }
 
   private merged(persistent: MemoryEntry[]): MemoryEntry[] {
@@ -55,6 +132,7 @@ export class MemoryStore {
     key: string;
     value: string;
     workspaceId?: string;
+    scope?: MemoryScope;
     source?: MemoryEntry["source"];
     tags?: string[];
     provenance?: MemoryEntry["provenance"];
@@ -62,19 +140,20 @@ export class MemoryStore {
     return this.runExclusive(async () => {
       const now = nowIso();
       const session = input.category === "session";
+      const workspaceId = input.scope === "global" ? undefined : input.workspaceId;
       const pool = session ? this.sessionEntries : await this.loadPersistent();
       const existing = pool.find(
         (entry) =>
           entry.key === input.key &&
           entry.category === input.category &&
-          (entry.workspaceId ?? "") === (input.workspaceId ?? ""),
+          (entry.workspaceId ?? "") === (workspaceId ?? ""),
       );
       if (existing) {
         existing.value = input.value;
         existing.updatedAt = now;
         if (input.tags) existing.tags = input.tags;
         if (input.provenance) existing.provenance = input.provenance;
-        if (!session) await this.savePersistent(pool);
+        if (!session) await this.savePersistent(pool, existing.id);
         return existing;
       }
       const entry: MemoryEntry = {
@@ -82,7 +161,7 @@ export class MemoryStore {
         category: input.category,
         key: input.key,
         value: input.value,
-        workspaceId: input.workspaceId,
+        workspaceId,
         createdAt: now,
         updatedAt: now,
         source: input.source ?? "user",
@@ -93,7 +172,7 @@ export class MemoryStore {
         },
       };
       pool.push(entry);
-      if (!session) await this.savePersistent(pool);
+      if (!session) await this.savePersistent(pool, entry.id);
       return entry;
     });
   }
@@ -107,24 +186,36 @@ export class MemoryStore {
     );
   }
 
-  async search(query: string, options?: { category?: MemoryCategory; workspaceId?: string; limit?: number }) {
+  async search(query: string, options?: MemorySearchOptions): Promise<MemoryEntry[]> {
     const entries = this.merged(await this.loadPersistent());
-    const filtered = entries.filter((entry) => {
+    const inScope = entries.filter((entry) => {
       if (options?.category && entry.category !== options.category) return false;
+      if (options?.scope === "all") return true;
       if (options?.workspaceId && entry.workspaceId && entry.workspaceId !== options.workspaceId) {
         return false;
       }
-      return score(entry, query) > 0 || query.trim() === "";
+      return true;
     });
-    const ranked =
-      query.trim() === ""
-        ? filtered.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-        : filtered
-            .map((entry) => ({ entry, s: score(entry, query) }))
-            .filter((row) => row.s > 0)
-            .sort((a, b) => b.s - a.s)
-            .map((row) => row.entry);
+    const prepared = prepareQuery(query, { workspaceId: options?.workspaceId });
+    const ranked = prepared
+      ? inScope
+          .map((entry) => ({ entry, score: scoreMemory(entry, prepared) }))
+          .filter((row) => row.score > 0)
+          .sort((a, b) => b.score - a.score || b.entry.updatedAt.localeCompare(a.entry.updatedAt))
+          .map((row) => row.entry)
+      : [...inScope].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return ranked.slice(0, options?.limit ?? 20);
+  }
+
+  /** Scores alongside the entries, for diagnostics and retrieval-quality tests. */
+  async searchScored(
+    query: string,
+    options?: MemorySearchOptions,
+  ): Promise<{ entry: MemoryEntry; score: number }[]> {
+    const prepared = prepareQuery(query, { workspaceId: options?.workspaceId });
+    if (!prepared) return [];
+    const hits = await this.search(query, options);
+    return hits.map((entry) => ({ entry, score: scoreMemory(entry, prepared) }));
   }
 
   async update(id: string, patch: Partial<Pick<MemoryEntry, "value" | "tags" | "category" | "key">>) {
@@ -138,7 +229,7 @@ export class MemoryStore {
       const entry = entries.find((item) => item.id === id);
       if (!entry) return undefined;
       applyPatch(entry, patch);
-      await this.savePersistent(entries);
+      await this.savePersistent(entries, entry.id);
       return entry;
     });
   }
@@ -183,6 +274,28 @@ export class MemoryStore {
     return { persistent: persistent.length, session: this.sessionEntries.length };
   }
 
+  /** Capacity and integrity state, so a degraded store is visible rather than assumed. */
+  async health(): Promise<{
+    persistent: number;
+    session: number;
+    capacity: number;
+    skipped: number;
+    pruned: number;
+  }> {
+    const stats = await this.stats();
+    return {
+      ...stats,
+      capacity: this.maxPersistent,
+      skipped: this.noticeLog.filter((notice) => notice.kind === "skipped").length,
+      pruned: this.noticeLog.filter((notice) => notice.kind === "pruned" || notice.kind === "pruned-stated")
+        .length,
+    };
+  }
+
+  notices(): MemoryNotice[] {
+    return this.noticeLog.map((notice) => ({ ...notice }));
+  }
+
   async exportPersistent(): Promise<MemoryEntry[]> {
     return (await this.loadPersistent()).map((entry) => structuredClone(entry));
   }
@@ -196,12 +309,13 @@ export class MemoryStore {
       const valid: MemoryEntry[] = [];
       let skipped = 0;
       for (const item of parsed) {
-        const entry = normalizeImported(item);
-        if (!entry) {
+        const result = coerceMemoryEntry(item, "import");
+        if (!result.ok) {
           skipped += 1;
+          this.note({ kind: "skipped", reason: `import rejected an entry (${result.reason})` });
           continue;
         }
-        valid.push(entry);
+        valid.push(result.entry);
       }
       if (mode === "replace") {
         await this.savePersistent(valid);
@@ -231,6 +345,49 @@ export class MemoryStore {
   clearSession() {
     this.sessionEntries = [];
   }
+
+  /**
+   * Keeps the persisted array bounded. Agent-inferred notes go first and a user-stated
+   * fact is only ever dropped when nothing else can be — and never without a notice,
+   * because losing something the user said is exactly the thing worth reporting.
+   */
+  private prune(entries: MemoryEntry[], keepId?: string): MemoryEntry[] {
+    if (entries.length <= this.maxPersistent) return entries;
+    const ordered = entries
+      .map((entry, index) => ({ entry, index }))
+      .sort(
+        (a, b) =>
+          evictionRank(a.entry) - evictionRank(b.entry) ||
+          Date.parse(a.entry.updatedAt) - Date.parse(b.entry.updatedAt) ||
+          a.index - b.index,
+      );
+    const doomed = new Set<string>();
+    for (const row of ordered) {
+      if (doomed.size >= entries.length - this.maxPersistent) break;
+      if (row.entry.id === keepId) continue;
+      doomed.add(row.entry.id);
+      const stated = evictionRank(row.entry) === PROTECTED_RANK;
+      this.note({
+        kind: stated ? "pruned-stated" : "pruned",
+        reason: stated
+          ? `dropped a user-stated memory at capacity ${this.maxPersistent}`
+          : `dropped the oldest ${row.entry.source}/${row.entry.provenance?.kind ?? "stated"} memory at capacity ${this.maxPersistent}`,
+        key: row.entry.key,
+        id: row.entry.id,
+      });
+    }
+    return entries.filter((entry) => !doomed.has(entry.id));
+  }
+}
+
+const PROTECTED_RANK = 3;
+
+function evictionRank(entry: MemoryEntry): number {
+  const kind = entry.provenance?.kind ?? "stated";
+  if (entry.source === "user" && kind === "stated") return PROTECTED_RANK;
+  if (entry.source === "user") return 2;
+  if (entry.source === "system" || entry.source === "seed") return 1;
+  return 0;
 }
 
 function applyPatch(
@@ -242,39 +399,4 @@ function applyPatch(
   if (patch.category !== undefined) entry.category = patch.category;
   if (patch.key !== undefined) entry.key = patch.key;
   entry.updatedAt = nowIso();
-}
-
-function normalizeImported(item: unknown): MemoryEntry | null {
-  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
-  const rec = item as Record<string, unknown>;
-  if (typeof rec.key !== "string" || rec.key.trim().length === 0) return null;
-  if (typeof rec.value !== "string") return null;
-  const category = MEMORY_CATEGORIES.includes(rec.category as MemoryCategory)
-    ? (rec.category as MemoryCategory)
-    : "fact";
-  const source =
-    rec.source === "agent" || rec.source === "seed" || rec.source === "system" || rec.source === "user"
-      ? rec.source
-      : "user";
-  let provenance: MemoryEntry["provenance"] = { origin: "import", kind: "stated" };
-  if (rec.provenance && typeof rec.provenance === "object" && !Array.isArray(rec.provenance)) {
-    const raw = rec.provenance as { origin?: unknown; kind?: unknown };
-    const kind = raw.kind === "stated" || raw.kind === "observed" || raw.kind === "inferred" ? raw.kind : "stated";
-    provenance = {
-      origin: typeof raw.origin === "string" ? raw.origin : "import",
-      kind,
-    };
-  }
-  return {
-    id: typeof rec.id === "string" ? rec.id : createId("mem"),
-    category,
-    key: rec.key,
-    value: rec.value,
-    workspaceId: typeof rec.workspaceId === "string" ? rec.workspaceId : undefined,
-    createdAt: typeof rec.createdAt === "string" ? rec.createdAt : nowIso(),
-    updatedAt: typeof rec.updatedAt === "string" ? rec.updatedAt : nowIso(),
-    source,
-    tags: Array.isArray(rec.tags) ? rec.tags.filter((tag): tag is string => typeof tag === "string") : undefined,
-    provenance,
-  };
 }

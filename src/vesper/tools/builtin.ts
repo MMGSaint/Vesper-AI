@@ -8,6 +8,8 @@ import type { OptimizerAdapter } from "../specialists/optimizer.ts";
 import { explainPerformance, inspectWorkload } from "../specialists/context.ts";
 import { gpuConsumers, groundedConclusions } from "../specialists/gaming.ts";
 import type { ToolRegistry } from "./registry.ts";
+import { correlateAround, explainCorrelations } from "../correlate.ts";
+import type { ObsClient } from "../specialists/obs.ts";
 import type { DiagnosticReport, JsonObject, MemoryCategory, ToolSpec } from "../types.ts";
 import type { WindowsHost } from "../windows/host.ts";
 import type { WorkspaceManager } from "../workspaces.ts";
@@ -52,6 +54,7 @@ export function registerBuiltinTools(input: {
   workspaces: WorkspaceManager;
   events: EventBus;
   notifications: NotificationHub;
+  obs?: ObsClient;
   voice?: VoiceModule;
   voiceSession?: VoiceSession;
   background?: BackgroundRuntime;
@@ -71,6 +74,7 @@ export function registerBuiltinTools(input: {
     workspaces,
     events,
     notifications,
+    obs,
     voice,
     voiceSession,
     background,
@@ -437,6 +441,66 @@ export function registerBuiltinTools(input: {
   );
 
   registry.register(
+    spec(
+      "optimizer_report",
+      "Gather everything the PC optimizer currently reports: telemetry, active profile, performance state, its last action and result, and adapter health.",
+      "read",
+      {},
+    ),
+    async () => {
+      // One call rather than six tools: the model needs the whole picture to say
+      // something useful, and a wide tool surface makes a local model worse at picking.
+      // Each field is settled independently so one unimplemented endpoint cannot blank
+      // the rest of the report.
+      const [health, telemetry, profile, performanceState, lastAction, lastResult] =
+        await Promise.all([
+          optimizer.getHealth().catch(() => null),
+          optimizer.getTelemetry().catch(() => null),
+          optimizer.getCurrentProfile().catch(() => null),
+          optimizer.getPerformanceState().catch(() => null),
+          optimizer.getLastAction().catch(() => null),
+          optimizer.getOptimizationResult().catch(() => null),
+        ]);
+
+      if (!telemetry?.available) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary:
+            "The optimizer did not return telemetry, so I have nothing authoritative about the machine from it. I am not guessing values.",
+          data: { health, profile, performanceState } as unknown as JsonObject,
+        };
+      }
+
+      const context = inspectWorkload(hardware, { optimizerActive: true });
+      const explanation = explainPerformance({ bound: telemetry.bound, context });
+      const parts = [
+        `The optimizer reports the machine is ${telemetry.bound}-bound.`,
+        explanation,
+        profile ? `Active profile: ${profile}.` : "The optimizer did not name an active profile.",
+        performanceState ? `Performance state: ${performanceState}.` : null,
+        lastAction ? `Its last action was ${lastAction}${lastResult ? ` (${lastResult})` : ""}.` : "It reports no previous action.",
+        ...telemetry.notes,
+      ].filter(Boolean);
+
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: parts.join(" "),
+        data: {
+          telemetry,
+          profile,
+          performanceState,
+          lastAction,
+          lastResult,
+          health,
+          context,
+        } as unknown as JsonObject,
+      };
+    },
+  );
+
+  registry.register(
     spec("optimizer_analyze", "Request analysis from the optimizer adapter.", "read", {}),
     async () => {
       const analysis = await optimizer.analyze();
@@ -628,6 +692,109 @@ export function registerBuiltinTools(input: {
       }
       await background.resume();
       return { ok: true, epistemic: "changed", summary: `Background state is ${background.state()}.` };
+    },
+  );
+
+  registry.register(
+    spec(
+      "obs_status",
+      "Ask OBS Studio directly whether it is recording or streaming.",
+      "read",
+      {},
+    ),
+    async () => {
+      if (!obs) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary: "OBS integration is not configured on this host.",
+        };
+      }
+      const status = obs.isConnected() ? await obs.status() : await obs.connect();
+      if (!status.observed) {
+        // Falling back to process presence is fine; calling it observed is not.
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary: `${status.detail} I can still see whether the OBS process is running, but that does not tell me if it is recording.`,
+          data: status as unknown as JsonObject,
+        };
+      }
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: status.detail,
+        data: status as unknown as JsonObject,
+      };
+    },
+  );
+
+  registry.register(
+    spec(
+      "events_recent",
+      "List recent events Vesper observed on this host.",
+      "read",
+      {
+        type: { type: "string", description: "Optional event type filter, e.g. obs.state" },
+        limit: { type: "number", description: "How many events to return (default 20)" },
+      },
+    ),
+    async (args) => {
+      const limit = Math.min(Math.max(Number(args.limit ?? 20) || 20, 1), 100);
+      const type = typeof args.type === "string" && args.type ? args.type : undefined;
+      const list = events.recent({ type, limit });
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: list.length
+          ? `${list.length} recent event(s): ${list.map((event) => event.title).join("; ")}`
+          : "No events have been recorded yet on this host.",
+        data: { events: list } as unknown as JsonObject,
+      };
+    },
+  );
+
+  registry.register(
+    spec(
+      "explain_change",
+      "Explain what Vesper observed around a moment of interest, such as a performance change reported by the optimizer.",
+      "read",
+      {
+        at: { type: "string", description: "ISO timestamp of the moment. Defaults to now." },
+        title: { type: "string", description: "What happened, for the explanation" },
+        beforeSeconds: { type: "number", description: "How far back to look (default 120)" },
+        afterSeconds: { type: "number", description: "How far forward to look (default 30)" },
+      },
+    ),
+    async (args) => {
+      const at = typeof args.at === "string" && args.at ? args.at : new Date().toISOString();
+      if (Number.isNaN(Date.parse(at))) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary: `'${at}' is not a timestamp I can read.`,
+        };
+      }
+      const title = typeof args.title === "string" && args.title ? args.title : "that moment";
+      const correlations = correlateAround(events.all(), at, {
+        beforeMs: Math.min(Math.max(Number(args.beforeSeconds ?? 120) || 120, 1), 3600) * 1000,
+        afterMs: Math.min(Math.max(Number(args.afterSeconds ?? 30) || 30, 0), 3600) * 1000,
+      });
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: explainCorrelations(title, correlations),
+        data: {
+          anchor: at,
+          correlations: correlations.map((item) => ({
+            type: item.event.type,
+            title: item.event.title,
+            at: item.event.at,
+            offsetMs: item.offsetMs,
+            relation: item.relation,
+          })),
+        } as unknown as JsonObject,
+      };
     },
   );
 
