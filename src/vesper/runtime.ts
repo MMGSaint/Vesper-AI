@@ -41,6 +41,7 @@ import { TaskQueue } from "./distributed/tasks.ts";
 import { buildNow, renderNow } from "./distributed/now.ts";
 import { discoverCapabilities, type CapabilityManifest } from "./distributed/capabilities.ts";
 import { buildDiscoveryProbes } from "./distributed/discovery.ts";
+import type { RequestOrigin } from "./tools/remote.ts";
 import { describeStartupRegistration } from "./windows/startup.ts";
 import type {
   AgentTurn,
@@ -277,6 +278,8 @@ export class VesperRuntime {
       signal?: AbortSignal;
       /** Receives reply text as it is generated, when the backend can stream. */
       onDelta?: (delta: string) => void;
+      /** Who is driving this turn. Absent means the person at this machine. */
+      origin?: RequestOrigin;
     },
   ): Promise<AgentTurn> {
     if (!this.started) await this.start();

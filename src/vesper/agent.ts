@@ -2,6 +2,7 @@ import { createId, nowIso } from "./id.ts";
 import type { Logger } from "./logging.ts";
 import type { MemoryStore } from "./memory/store.ts";
 import { attribute } from "./memory/scopes.ts";
+import type { RequestOrigin } from "./tools/remote.ts";
 import type { KnowledgeIndex } from "./knowledge/rag.ts";
 import type { ModelRouter } from "./models/router.ts";
 import type { NotificationHub } from "./notifications.ts";
@@ -204,6 +205,8 @@ export class Agent {
       approve?: boolean;
       signal?: AbortSignal;
       onDelta?: (delta: string) => void;
+      /** Who is driving this turn. Absent means the person at this machine. */
+      origin?: RequestOrigin;
     },
   ): Promise<AgentTurn> {
     const run = this.queue.then(
@@ -241,9 +244,12 @@ export class Agent {
       signal?: AbortSignal;
       /** Receives assistant text as it is generated, when the backend can stream. */
       onDelta?: (delta: string) => void;
+      /** Who is driving this turn. Absent means the person at this machine. */
+      origin?: RequestOrigin;
     },
   ): Promise<AgentTurn> {
     const at = nowIso();
+    const origin = options?.origin;
     const workspace = this.deps.workspaces.current();
     const epistemic: EpistemicTag[] = [];
     const toolCalls: ToolCallRecord[] = [];
@@ -268,6 +274,7 @@ export class Agent {
         );
       }
       const record = await this.deps.tools.invoke({
+        origin,
         name: confirmation.toolName,
         args: confirmation.args,
         workspaceId: confirmation.workspaceId,
@@ -290,7 +297,7 @@ export class Agent {
 
     const intent = classifyIntent(userText);
     if (intent && intent.confidence >= 0.85) {
-      const direct = await this.executeIntent(intent, userText);
+      const direct = await this.executeIntent(intent, userText, origin);
       this.deps.history.push({ role: "user", content: userText });
       this.deps.history.push({ role: "assistant", content: direct.reply });
       this.trimHistory();
@@ -412,6 +419,7 @@ export class Agent {
       const toolMessages: ChatMessage[] = [];
       for (const call of completion.toolCalls) {
         const record = await this.deps.tools.invoke({
+          origin,
           name: call.name,
           args: call.arguments,
           workspaceId: workspace.id,
@@ -508,13 +516,18 @@ export class Agent {
     return this.turn(userText, reply, epistemic, toolCalls, pending, at, undefined, completion);
   }
 
-  private async executeIntent(intent: DirectIntent, userText: string): Promise<AgentTurn> {
+  private async executeIntent(
+    intent: DirectIntent,
+    userText: string,
+    origin?: RequestOrigin,
+  ): Promise<AgentTurn> {
     const at = nowIso();
     const workspace = this.deps.workspaces.current();
     const toolCalls: ToolCallRecord[] = [];
 
     const invoke = async (name: string, args: JsonObject, confirmed = false) => {
       const record = await this.deps.tools.invoke({
+        origin,
         name,
         args,
         workspaceId: workspace.id,

@@ -118,7 +118,24 @@ export class VesperClientGateway {
     if ("ok" in session) return session;
     const trimmed = text.trim();
     if (!trimmed) return clientError("INVALID", "Empty message.");
-    return this.runtime.chat(trimmed);
+    // A conversation is a tool-calling loop, so a remote turn must carry who is asking
+    // all the way to the point tools run. Without this, "may converse" silently means
+    // "may call anything the agent decides to call" on the host's own machine.
+    // Trust is the requester's; the manifest is this device's. The question being
+    // asked is "may a device of that trust class ask *this* machine to do X", so the
+    // capability has to be looked up on the machine that would perform it.
+    const [requester, self] = await Promise.all([
+      this.runtime.devices.get(session.deviceId),
+      this.runtime.devices.get(this.runtime.deviceIdentity.deviceId),
+    ]);
+    return this.runtime.chat(trimmed, {
+      origin: {
+        kind: "remote",
+        deviceId: session.deviceId,
+        trust: requester?.trust ?? "unknown",
+        manifest: self?.capabilities ?? null,
+      },
+    });
   }
 
   async confirm(
