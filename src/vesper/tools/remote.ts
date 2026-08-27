@@ -79,6 +79,14 @@ const TRUSTED_ONLY_TOOLS: readonly string[] = [
   "workspace_switch",
   "runtime_pause",
   "runtime_resume",
+  // The task queue is the owner's private work list. Descriptions are free text the
+  // owner wrote — "wipe the drive holding the tax records; passphrase is in the safe" is
+  // the shape of a real entry — and `task_list` returns every one of them with no scope
+  // mapping at all, so it fell through to "allowed" for a device holding nothing but
+  // `conversation`. A trusted phone reading its owner's task list is the feature; a
+  // restricted one, on a host Vesper cannot vouch for, is disclosure.
+  "task_list",
+  "task_create",
 ];
 
 /**

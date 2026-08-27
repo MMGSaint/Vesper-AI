@@ -207,3 +207,74 @@ describe("retrieval into the prompt answers to the same scopes", () => {
     await runtime.stop();
   });
 });
+
+describe("the owner's task queue is not readable from a lower-trust device", () => {
+  /**
+   * `task_list` returns every queued task with its description — free text the owner
+   * wrote, and in practice the place a real instruction lands: "wipe the drive holding
+   * the tax records; passphrase is in the safe" is the shape of an entry, not a
+   * contrived payload.
+   *
+   * It had no capability and no scope mapping, so it fell through the tool gate to
+   * "allowed" for a device holding nothing but `conversation`. A trusted phone reading
+   * its owner's task list is the feature; a restricted one — the portable class, on a
+   * host whose surroundings Vesper cannot vouch for — is disclosure.
+   */
+  const SECRET = "passphrase is in the safe";
+
+  async function taskListFrom(trust: "trusted" | "restricted") {
+    const runtime = await testRuntime({
+      providers: [scripted("task_list", {}).provider],
+    });
+    await runtime.taskQueue.create({
+      description: `Wipe and reinstall the drive holding the tax records; ${SECRET}.`,
+      createdBy: runtime.deviceIdentity.deviceId,
+    });
+    const gateway = createClientGateway(runtime);
+    const phone = await enrolCompanion(runtime, { name: "phone", trust });
+    const session = await gateway.issueSession({
+      deviceId: phone.deviceId,
+      deviceLabel: "phone",
+      scopes: ["status", "conversation"],
+    });
+    if ("ok" in session) throw new Error(session.detail);
+    const turn = await gateway.converse(session.token, "what is on my list?");
+    if ("ok" in turn) throw new Error(turn.detail);
+    const record = turn.toolCalls.find((call) => call.toolName === "task_list");
+    const everything = JSON.stringify(turn);
+    await runtime.stop();
+    return { record, everything };
+  }
+
+  it("refuses task_list for a restricted device and leaks nothing into the turn", async () => {
+    const { record, everything } = await taskListFrom("restricted");
+    assert.equal(
+      everything.includes(SECRET),
+      false,
+      "a restricted device read the owner's task descriptions",
+    );
+    assert.equal(record?.decision.allowed, false, "task_list ran for a restricted device");
+    assert.equal(record?.result?.ok, false);
+  });
+
+  it("still allows it for a trusted device, which is the feature", async () => {
+    const { record } = await taskListFrom("trusted");
+    assert.equal(record?.decision.allowed, true, `a trusted device lost its task list`);
+    assert.equal(record?.result?.ok, true);
+  });
+
+  it("still allows it at the machine itself", async () => {
+    const runtime = await testRuntime({ providers: [scripted("task_list", {}).provider] });
+    await runtime.taskQueue.create({
+      description: "Ordinary work",
+      createdBy: runtime.deviceIdentity.deviceId,
+    });
+    const record = await runtime.tools.invoke({
+      name: "task_list",
+      args: {},
+      workspaceId: "general",
+    });
+    assert.equal(record.result?.ok, true, record.result?.summary);
+    await runtime.stop();
+  });
+});
