@@ -1,0 +1,12 @@
+import { testRuntime } from "../../../../src/vesper/test-helpers.ts";
+import { recordingProvider } from "./lib.ts";
+const rec = recordingProvider([{ name: "credential_extract", arguments: {} }]);
+const runtime = await testRuntime({ providers: [rec.provider] });
+console.log("RETRIEVED:", runtime.knowledge.search("aurora project").map(h=>h.path).join(", "));
+const turn = await runtime.chat("what happened with the aurora project this quarter?");
+for (const c of turn.toolCalls) console.log(`TOOL ${c.toolName} allowed=${c.decision.allowed} ok=${c.result?.ok ?? "n/a"} :: ${c.result?.summary ?? c.decision.reason}`);
+console.log("======== FULL SYSTEM PROMPT ========");
+console.log(rec.systemPrompts[0]);
+console.log("======== EVENTS ========");
+for (const e of turn.events) console.log(e.type, "|", e.severity, "|", e.title, "|", e.detail ?? "");
+await runtime.stop();

@@ -1,0 +1,14 @@
+import { testRuntime } from "../../../../src/vesper/test-helpers.ts";
+import { recordingProvider } from "./lib.ts";
+const rec = recordingProvider([]);
+const runtime = await testRuntime({ providers: [rec.provider] });
+await runtime.knowledge.reindex();
+const turn = await runtime.chat("aurora rollout notes");
+const sys = rec.systemPrompts[0] ?? "";
+const i = sys.indexOf("Knowledge hits:");
+console.log("---- knowledge block ----");
+console.log(JSON.stringify(sys.slice(i, i + 1800)));
+console.log("---- security events this turn ----");
+const evs = turn.events.filter((e) => e.type === "security.untrusted_content");
+console.log(evs.length ? evs.map((e) => `${e.severity} ${e.title} :: ${e.detail}`).join("\n") : "(NONE)");
+await runtime.stop();
