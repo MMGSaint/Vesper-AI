@@ -200,6 +200,33 @@ export class VesperRuntime {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+    // Stored state that could not be read is a security event, not a footnote.
+    //
+    // The registry treats a corrupt file as "costs knowledge of peers, never the ability
+    // to run locally", which is the right call for availability — but it held no logger,
+    // so a *revocation* could disappear in silence and the device it named could enrol
+    // again as a fresh `pending` peer awaiting approval. Losing a decision the owner made
+    // about who may reach their machine has to be visible, whatever else is done about it.
+    const storage = this.storage as unknown as { wasCorrupted?: () => boolean };
+    if (typeof storage.wasCorrupted === "function") {
+      if (storage.wasCorrupted()) {
+        this.log.error("lifecycle", "Stored state was unreadable and has been reset", {});
+        this.events.emit({
+          type: "security.state_unreadable",
+          title: "Stored state could not be read and was reset",
+          detail:
+            "Device trust, revocations, pending confirmations and memories are restored from that file. " +
+            "Anything it held is gone: check the device list, because a revoked device can enrol again as pending.",
+          severity: "error",
+        });
+        this.notifications.push({
+          title: "Vesper's saved state could not be read",
+          body: "Device trust and revocations may have been lost. Review your device list before approving anything.",
+          kind: "error",
+        });
+      }
+    }
+
     // A grant table that names a forbidden power would hand remote devices exactly what
     // the forbidden list exists to withhold. Checked at startup, not only in tests: the
     // tables are edited by hand and this is the assertion that catches a bad edit on a

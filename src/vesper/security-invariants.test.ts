@@ -11,7 +11,12 @@ import { isClientError } from "./client/protocol.ts";
 import { decideRemoteToolRequest } from "./tools/remote.ts";
 import { isDangerousRoot } from "./security.ts";
 import { isBoundaryIntact, screenForInjection, wrapUntrusted } from "./untrusted.ts";
-import { decideRemoteRequest, manifestHas } from "./distributed/capabilities.ts";
+import {
+  NEVER_REMOTE,
+  decideRemoteRequest,
+  grantsRespectForbiddenPowers,
+  manifestHas,
+} from "./distributed/capabilities.ts";
 import type { CapabilityManifest } from "./distributed/capabilities.ts";
 import type { ChatMessage, CompletionRequest, ModelToolCall } from "./types.ts";
 
@@ -240,12 +245,23 @@ describe("invariant: untrusted text never changes deterministic policy", () => {
   });
 
   it("hostile configuration cannot promote a high-risk tool", async () => {
+    // The override has to be written in the shape the schema actually accepts
+    // (`{ toolOverrides }`), or zod strips the unknown keys and the gate is handed an
+    // empty override map — which is how this test previously passed without ever
+    // exercising the mechanism it names.
     const runtime = await testRuntime({
       config: {
-        permissions: { disk_wipe: "safe", credential_extract: "read" } as never,
+        permissions: {
+          toolOverrides: { disk_wipe: "safe", credential_extract: "read" },
+        } as never,
         approvedRoots: ["/"],
       },
     });
+    assert.deepEqual(
+      runtime.config.permissions.toolOverrides,
+      { disk_wipe: "safe", credential_extract: "read" },
+      "the hostile override never reached the gate, so this test proves nothing",
+    );
     for (const tool of ["disk_wipe", "credential_extract"]) {
       const record = await runtime.tools.invoke({
         name: tool,
@@ -255,6 +271,33 @@ describe("invariant: untrusted text never changes deterministic policy", () => {
       });
       assert.equal(record.result?.ok, false, `${tool} was promoted by configuration`);
     }
+    await runtime.stop();
+  });
+
+  it("an override cannot relax a tool's tier, even one the never-list does not pin", async () => {
+    // disk_wipe and credential_extract are held by *two* mechanisms — the override
+    // ordering and the never-list — so they cannot show which one is working. fs_write
+    // is confirm-tier by declaration and is not on the never-list, so it isolates the
+    // one that matters here: an override may tighten a tier, never loosen it.
+    const runtime = await testRuntime({
+      config: { permissions: { toolOverrides: { fs_write: "read" } } as never },
+    });
+    assert.equal(
+      runtime.config.permissions.toolOverrides.fs_write,
+      "read",
+      "the override never reached the gate, so this test proves nothing",
+    );
+    const record = await runtime.tools.invoke({
+      name: "fs_write",
+      args: { path: "notes/x.txt", content: "x" },
+      workspaceId: "general",
+    });
+    assert.equal(
+      record.decision.requiresConfirmation,
+      true,
+      "a configuration override downgraded a confirm-tier tool to autonomous",
+    );
+    assert.equal(record.result?.ok, undefined, "the write ran without its confirmation");
     await runtime.stop();
   });
 });
@@ -616,6 +659,30 @@ describe("invariant: a confirm-tier control cannot be reached by a safe-tier rou
   });
 });
 
+describe("invariant: the startup self-check can actually fail", () => {
+  it("reports false when a never-remote capability becomes reachable", () => {
+    // The previous version compared bare capability names against dotted power names —
+    // two namespaces that cannot intersect — so it was a constant true that never read
+    // the table it was named for. A guard that cannot fail is not a guard, so what it
+    // now checks is the property that protects the machine: that the decision function
+    // refuses every never-remote capability at every trust class.
+    assert.equal(grantsRespectForbiddenPowers(), true);
+
+    for (const capability of NEVER_REMOTE) {
+      for (const trust of ["trusted", "restricted", "pending", "unknown", "revoked"] as const) {
+        assert.equal(
+          decideRemoteRequest({ trust, capability, manifest: manifest([capability]) }).allowed,
+          false,
+          `${capability} was reachable by a ${trust} device, which the self-check must catch`,
+        );
+      }
+    }
+    // And the check is not vacuous on an empty list: it reads NEVER_REMOTE, which has
+    // entries, and each of those is asserted above.
+    assert.ok(NEVER_REMOTE.length > 0, "NEVER_REMOTE is empty, making the self-check vacuous");
+  });
+});
+
 describe("invariant: an authority ceiling applies wherever authority is read", () => {
   it("caps a grant's scopes by live trust, not by trust at signing time", async () => {
     // Two models owned the same question and only one applied the ceiling: a grant minted
@@ -731,6 +798,35 @@ describe("invariant: an authority ceiling applies wherever authority is read", (
     });
     assert.equal(resolved.ok, false, "picked one of two equally-matching devices");
     assert.match(resolved.problem ?? "", /More than one/);
+    await runtime.stop();
+  });
+});
+
+describe("invariant: losing a security decision is never silent", () => {
+  it("reports unreadable stored state instead of quietly starting fresh", async () => {
+    // A corrupt registry costs knowledge of peers rather than the ability to run — the
+    // right call for availability. But it was also *undetectable*: a revocation could
+    // vanish and the device it named could enrol again as a fresh pending peer awaiting
+    // approval, with nothing in the events, the notifications or the log to say why.
+    const { FileStorage } = await import("./storage.ts");
+    const dir = await mkdtemp(join(tmpdir(), "vesper-corrupt-"));
+    await writeFile(join(dir, "state.json"), "{ this is not json", "utf8");
+
+    const runtime = await createRuntime({
+      storage: new FileStorage(join(dir, "state.json")),
+      skipDiscovery: true,
+    });
+    await runtime.start();
+
+    const events = runtime.events.recent({ limit: 30 });
+    assert.ok(
+      events.some((event) => event.type === "security.state_unreadable"),
+      "unreadable stored state produced no event",
+    );
+    assert.ok(
+      runtime.notifications.recent(10).some((note) => /could not be read/i.test(note.title)),
+      "the owner was never told their saved state was reset",
+    );
     await runtime.stop();
   });
 });
