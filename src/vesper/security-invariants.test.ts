@@ -1602,3 +1602,106 @@ describe("invariant: Vesper's own files are not documents", () => {
     await runtime.stop();
   });
 });
+
+describe("invariant: a failed turn reports what happened, not what is convenient", () => {
+  /**
+   * The reverse of a false action claim, and the direction nobody checks: asserting that
+   * *nothing* happened when something did.
+   *
+   * The runtime's recovery synthesised a fresh turn with `epistemic: ["could_not_access"]`,
+   * no tool calls and no pending confirmations. The records accumulated inside the turn
+   * were local to it and went out with the exception, so a memory write that had landed,
+   * a workspace the owner's next turn would run in, and an app that had been launched all
+   * vanished from the only structured account of the turn.
+   *
+   * The confirmations are the sharper half. The queue is live and the entry stays
+   * approvable, but the console only walks `turn.pendingConfirmations` — so a
+   * confirmation raised during a failed turn was invisible to the person who is supposed
+   * to answer it, and could not be declined, while remaining approvable later.
+   *
+   * No attacker is needed: any failure after the tools have run reaches it.
+   */
+  function failsAfterTools(failAt: number) {
+    let call = 0;
+    return {
+      id: "breaks",
+      kind: "local" as const,
+      isAvailable: () => true,
+      async probe() {
+        return { available: true, detail: "breaks" };
+      },
+      async complete(request: CompletionRequest, model: string) {
+        call += 1;
+        if (call > failAt) throw new Error("backend socket closed");
+        const toolCalls: ModelToolCall[] = [
+          { id: "c1", name: "memory_remember", arguments: { key: "pin", value: "0000", category: "fact" } as never },
+          { id: "c2", name: "workspace_switch", arguments: { name: "gaming" } as never },
+          { id: "c3", name: "fs_write", arguments: { path: "notes/x.txt", content: "hi" } as never },
+        ];
+        return { text: "", toolCalls, providerId: "breaks", model, role: request.role };
+      },
+    };
+  }
+
+  it("names the steps that already ran", async () => {
+    const runtime = await testRuntime({ providers: [failsAfterTools(1)] });
+    const turn = await runtime.chat("do several things");
+
+    assert.ok(turn.toolCalls.length >= 2, `the failed turn reported ${turn.toolCalls.length} tool calls`);
+    const names = turn.toolCalls.map((call) => call.toolName);
+    assert.ok(names.includes("memory_remember"), "a memory write that landed was not reported");
+    assert.ok(names.includes("workspace_switch"), "a workspace change that landed was not reported");
+    // The side effects really happened — that is what makes the omission a false claim.
+    assert.equal(runtime.workspaces.current().id, "gaming", "the fixture did not actually change state");
+    assert.match(turn.reply, /already run/i, "the reply did not mention them either");
+    await runtime.stop();
+  });
+
+  it("keeps could_not_access while adding what the steps actually did", async () => {
+    const runtime = await testRuntime({ providers: [failsAfterTools(1)] });
+    const turn = await runtime.chat("do several things");
+    assert.ok(turn.epistemic.includes("could_not_access"), "the failure stopped being reported");
+    assert.ok(
+      turn.epistemic.includes("changed"),
+      "a turn that changed the machine reported no change",
+    );
+    await runtime.stop();
+  });
+
+  it("surfaces a confirmation left in the live queue", async () => {
+    const runtime = await testRuntime({ providers: [failsAfterTools(1)] });
+    const turn = await runtime.chat("do several things");
+    assert.ok(runtime.confirmations.size > 0, "the fixture queued nothing, so this proves nothing");
+    assert.equal(
+      turn.pendingConfirmations.length,
+      runtime.confirmations.size,
+      "a confirmation sat in the live queue but was invisible to the user",
+    );
+    await runtime.stop();
+  });
+
+  it("does not discard a completed turn when only the bookkeeping fails", async () => {
+    // `persistConfirmations` runs *after* the turn. A failure there used to replace a
+    // finished turn with one asserting nothing happened.
+    const runtime = await testRuntime({ providers: [failsAfterTools(99)] });
+    const original = runtime.storage.set.bind(runtime.storage);
+    runtime.storage.set = async (key: string, value: never) => {
+      if (key.includes("confirm")) throw new Error("ENOSPC: no space left on device");
+      return original(key, value);
+    };
+    const turn = await runtime.chat("do several things");
+    assert.ok(turn.toolCalls.length >= 2, "a completed turn's record was discarded");
+    assert.match(turn.reply, /did happen/i, "the reply did not say the work was real");
+    assert.ok(turn.epistemic.includes("could_not_access"), "the save failure was not reported");
+    await runtime.stop().catch(() => undefined);
+  });
+
+  it("still reports a clean turn cleanly", async () => {
+    // Narrowing, not severing: an ordinary turn must not grow an error note.
+    const runtime = await testRuntime();
+    const turn = await runtime.chat("what is running?");
+    assert.doesNotMatch(turn.reply, /internal error/i);
+    assert.doesNotMatch(turn.reply, /could not save my record/i);
+    await runtime.stop();
+  });
+});

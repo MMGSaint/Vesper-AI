@@ -204,6 +204,29 @@ const READY_APPS: Record<string, string[]> = {
 export const MAX_TOOL_CALLS_PER_ROUND = 8;
 
 /**
+ * A turn that failed after doing some of its work.
+ *
+ * The tool records accumulated inside a turn were local to it and went out with the
+ * exception, so the runtime's recovery synthesised a turn asserting `could_not_access`
+ * with zero tool calls — while a memory write had really happened, the owner's workspace
+ * had really been switched, and a confirmation was really sitting in the live queue.
+ * The record said nothing happened; the machine disagreed.
+ *
+ * Carrying the partial records out with the error is what lets the recovery say what did
+ * happen. It mirrors `cancelledTurn`, which already reports the tools that ran before a
+ * cancellation.
+ */
+export class TurnFailure extends Error {
+  readonly toolCalls: ToolCallRecord[];
+  constructor(cause: unknown, toolCalls: ToolCallRecord[]) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "TurnFailure";
+    this.cause = cause;
+    this.toolCalls = toolCalls;
+  }
+}
+
+/**
  * The most of a message that is used as a retrieval query.
  *
  * Retrieval ranks stored items by similarity to what was asked; the first two thousand
@@ -276,11 +299,31 @@ export class Agent {
       origin?: RequestOrigin;
     },
   ): Promise<AgentTurn> {
+    // The accumulator lives out here so a throw from anywhere inside the turn still
+    // carries what already ran. See TurnFailure.
+    const toolCalls: ToolCallRecord[] = [];
+    try {
+      return await this.runTurn(userText, toolCalls, options);
+    } catch (error) {
+      throw error instanceof TurnFailure ? error : new TurnFailure(error, toolCalls);
+    }
+  }
+
+  private async runTurn(
+    userText: string,
+    toolCalls: ToolCallRecord[],
+    options?: {
+      confirmId?: string;
+      approve?: boolean;
+      signal?: AbortSignal;
+      onDelta?: (delta: string) => void;
+      origin?: RequestOrigin;
+    },
+  ): Promise<AgentTurn> {
     const at = nowIso();
     const origin = options?.origin;
     const workspace = this.deps.workspaces.current();
     const epistemic: EpistemicTag[] = [];
-    const toolCalls: ToolCallRecord[] = [];
     const pending: PendingConfirmation[] = [];
     const notes = [];
 

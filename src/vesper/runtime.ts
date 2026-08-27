@@ -30,7 +30,7 @@ import { createVoiceSession, type VoiceSession } from "./voice/session.ts";
 import { createModelRouter, type ModelRouter } from "./models/router.ts";
 import { createBenchmarkHarness, type BenchmarkHarness } from "./models/benchmark.ts";
 import { createIdleScheduler, type IdleScheduler } from "./scheduler.ts";
-import { Agent } from "./agent.ts";
+import { Agent, TurnFailure } from "./agent.ts";
 import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
 import { buildDiagnostics } from "./diagnostics.ts";
 import { createId } from "./id.ts";
@@ -53,6 +53,7 @@ import type {
   CapabilityProfile,
   ChatMessage,
   DiagnosticReport,
+  EpistemicTag,
   FirstBootReport,
   JsonObject,
   JsonValue,
@@ -341,21 +342,70 @@ export class VesperRuntime {
     },
   ): Promise<AgentTurn> {
     if (!this.started) await this.start();
+    let completed: AgentTurn | null = null;
     try {
-      const turn = await this.agent.handle(text, options);
+      completed = await this.agent.handle(text, options);
+      // Persisting the queue is bookkeeping that happens *after* the turn is done. A
+      // failure here used to discard the whole successful turn and replace it with one
+      // asserting `could_not_access` and no tool calls — the turn had run, its side
+      // effects had landed, and the account of it was thrown away.
       await this.persistConfirmations();
-      return turn;
+      return completed;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log.error("error", "Agent turn failed", { error: message });
       await this.recordLastError(message, text);
+
+      // Report what actually happened, not what would be convenient.
+      //
+      // This used to synthesise a turn with no tool calls and no pending confirmations,
+      // which is a false claim in the direction nobody checks: a memory write that had
+      // already landed, a workspace the owner's next turn would run in, an app that had
+      // been launched — all absent from the only structured account of the turn, while
+      // the turn asserted `could_not_access`.
+      //
+      // The confirmations are the sharper half. The queue is live and the entry is still
+      // approvable, but the console only walks `turn.pendingConfirmations`, so a
+      // confirmation raised during a failed turn was invisible to the person who is
+      // supposed to answer it — and could not be declined.
+      // Three cases, in order of how much is known: the turn finished and only the
+      // bookkeeping after it failed; the turn threw partway and carried its records out;
+      // or something failed before any record existed.
+      const ran = completed?.toolCalls ?? (error instanceof TurnFailure ? error.toolCalls : []);
+      if (completed) {
+        return {
+          ...completed,
+          reply:
+            `${completed.reply}\n\n[I could not save my record of this turn: ${message}. ` +
+            `What is described above did happen.]`,
+          epistemic: completed.epistemic.includes("could_not_access")
+            ? completed.epistemic
+            : [...completed.epistemic, "could_not_access"],
+          pendingConfirmations: [...this.confirmations.values()],
+        };
+      }
+      const queued = [...this.confirmations.values()];
+      const epistemic: EpistemicTag[] = ["could_not_access"];
+      for (const record of ran) {
+        const tag = record.result?.epistemic;
+        if (tag && !epistemic.includes(tag)) epistemic.push(tag);
+      }
+      const ranNote =
+        ran.length > 0
+          ? ` ${ran.length} step${ran.length === 1 ? "" : "s"} had already run before it failed: ` +
+            `${ran.map((record) => record.toolName).join(", ")}.`
+          : "";
+      const queuedNote =
+        queued.length > 0
+          ? ` ${queued.length} action${queued.length === 1 ? " is" : "s are"} still waiting for your confirmation.`
+          : "";
       return {
         id: createId("turn"),
         userText: text,
-        reply: `I hit an internal error and recovered: ${message}`,
-        epistemic: ["could_not_access"],
-        toolCalls: [],
-        pendingConfirmations: [],
+        reply: `I hit an internal error and recovered: ${message}.${ranNote}${queuedNote}`,
+        epistemic,
+        toolCalls: ran,
+        pendingConfirmations: queued,
         workspaceId: this.workspaces.current().id,
         notifications: this.notifications.recent(5),
         events: this.events.recent({ limit: 8 }),
