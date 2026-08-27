@@ -311,8 +311,9 @@ export function registerBuiltinTools(input: {
       { key: { type: "string" } },
       ["key"],
     ),
-    async (args) => {
-      const ok = await memory.forget(str(args, "key"));
+    async (args, context) => {
+      // Scoped: a workspace may only forget what it can see. See MemoryStore.forget.
+      const ok = await memory.forget(str(args, "key"), { workspaceId: context.workspaceId });
       return {
         ok,
         epistemic: ok ? "changed" : "could_not_access",

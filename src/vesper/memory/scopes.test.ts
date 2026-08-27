@@ -168,3 +168,129 @@ describe("wiring: the store applies the shared visibility rule", () => {
     );
   });
 });
+
+describe("the workspace boundary governs writes as well as reads", () => {
+  /**
+   * `search` filtered through `isVisibleFrom` and `retrieve` filtered on workspaceId,
+   * but `update` and `forget` took no scope at all and matched on bare id or key across
+   * the whole store. So the boundary the read half calls a rule was not a rule the write
+   * half knew about: an entry invisible to search in the active workspace could still be
+   * rewritten and deleted from it.
+   *
+   * `forget` matched on **key**, and a key is not unique — the same key exists in every
+   * workspace that stored it — so one call deleted every entry sharing that name
+   * everywhere, including the session pool. Reproduced end to end through `memory_forget`,
+   * which is reachable by the model.
+   */
+  async function twoWorkspaces() {
+    const runtime = await testRuntime();
+    await runtime.memory.remember({
+      category: "fact",
+      key: "boundary",
+      value: "MORTIS-ONLY-SECRET",
+      workspaceId: "mortis",
+      scope: "workspace",
+      source: "user",
+    });
+    await runtime.memory.remember({
+      category: "fact",
+      key: "boundary",
+      value: "general note",
+      workspaceId: "general",
+      scope: "workspace",
+      source: "user",
+    });
+    return runtime;
+  }
+
+  it("does not delete an entry the asking workspace cannot see", async () => {
+    const runtime = await twoWorkspaces();
+    const visible = await runtime.memory.search("boundary", { workspaceId: "general" });
+    assert.equal(
+      visible.some((entry) => entry.value === "MORTIS-ONLY-SECRET"),
+      false,
+      "the entry was visible from general, so this does not test what it claims",
+    );
+
+    const record = await runtime.tools.invoke({
+      name: "memory_forget",
+      args: { key: "boundary" },
+      workspaceId: "general",
+      confirmed: true,
+    });
+    assert.equal(record.result?.ok, true, "the workspace's own entry was not forgotten");
+
+    const left = await runtime.memory.search("boundary", { scope: "all" });
+    assert.equal(
+      left.some((entry) => entry.value === "MORTIS-ONLY-SECRET"),
+      true,
+      "one workspace deleted a memory belonging to another",
+    );
+    assert.equal(
+      left.some((entry) => entry.value === "general note"),
+      false,
+      "the entry it could see was not deleted",
+    );
+    await runtime.stop();
+  });
+
+  it("does not rewrite one either", async () => {
+    const runtime = await twoWorkspaces();
+    const hidden = (await runtime.memory.search("boundary", { scope: "all" })).find(
+      (entry) => entry.value === "MORTIS-ONLY-SECRET",
+    );
+    assert.ok(hidden, "the fixture is wrong");
+
+    const updated = await runtime.memory.update(
+      hidden.id,
+      { value: "REWRITTEN FROM ANOTHER WORKSPACE" },
+      { workspaceId: "general" },
+    );
+    assert.equal(updated, undefined, "an entry was rewritten from a workspace that cannot see it");
+
+    const after = await runtime.memory.search("boundary", { scope: "all" });
+    assert.equal(
+      after.some((entry) => entry.value === "MORTIS-ONLY-SECRET"),
+      true,
+      "the value was changed anyway",
+    );
+    await runtime.stop();
+  });
+
+  it("still forgets and updates within the asking workspace", async () => {
+    // Narrowing, not severing.
+    const runtime = await twoWorkspaces();
+    const mine = (await runtime.memory.search("boundary", { workspaceId: "general" })).find(
+      (entry) => entry.value === "general note",
+    );
+    assert.ok(mine, "the fixture is wrong");
+
+    const updated = await runtime.memory.update(
+      mine.id,
+      { value: "edited note" },
+      { workspaceId: "general" },
+    );
+    assert.equal(updated?.value, "edited note", "a workspace could not edit its own memory");
+
+    assert.equal(
+      await runtime.memory.forget("boundary", { workspaceId: "general" }),
+      true,
+      "a workspace could not forget its own memory",
+    );
+    await runtime.stop();
+  });
+
+  it("still lets an unscoped caller reach everything, which is what maintenance needs", async () => {
+    // The CLI and the maintenance paths name no workspace, and `isVisibleFrom` already
+    // treats that as unrestricted. Changing it here would break `vesper forget` silently.
+    const runtime = await twoWorkspaces();
+    assert.equal(await runtime.memory.forget("boundary"), true);
+    const left = await runtime.memory.search("boundary", { scope: "all" });
+    assert.equal(
+      left.some((entry) => entry.key === "boundary"),
+      false,
+      "an unscoped forget left entries behind",
+    );
+    await runtime.stop();
+  });
+});

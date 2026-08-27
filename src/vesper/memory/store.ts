@@ -281,31 +281,52 @@ export class MemoryStore {
     return hits.map((entry) => ({ entry, score: scoreMemory(entry, prepared) }));
   }
 
-  async update(id: string, patch: Partial<Pick<MemoryEntry, "value" | "tags" | "category" | "key">>) {
+  /**
+   * The scope a destructive call is asking from.
+   *
+   * Absent means "no workspace was named", which `isVisibleFrom` already treats as
+   * unrestricted — the shape the CLI and the maintenance paths use. A tool call always
+   * has a workspace and always passes it.
+   */
+  async update(
+    id: string,
+    patch: Partial<Pick<MemoryEntry, "value" | "tags" | "category" | "key">>,
+    context: { workspaceId?: string } = {},
+  ) {
     return this.runExclusive(async () => {
       const sessionHit = this.sessionEntries.find((item) => item.id === id);
       if (sessionHit) {
+        if (!isVisibleFrom(sessionHit, context)) return undefined;
         applyPatch(sessionHit, patch);
         return sessionHit;
       }
       const entries = await this.loadPersistent();
       const entry = entries.find((item) => item.id === id);
       if (!entry) return undefined;
+      // The workspace boundary the read path calls a rule is a rule here too. It was
+      // not: `update` and `forget` matched on bare id or key across the whole store,
+      // so an entry invisible to `search` in the active workspace could still be
+      // rewritten and deleted from it.
+      if (!isVisibleFrom(entry, context)) return undefined;
       applyPatch(entry, patch);
       await this.savePersistent(entries, entry.id);
       return entry;
     });
   }
 
-  async forget(idOrKey: string): Promise<boolean> {
+  async forget(idOrKey: string, context: { workspaceId?: string } = {}): Promise<boolean> {
     return this.runExclusive(async () => {
-      const sessionNext = this.sessionEntries.filter(
-        (entry) => entry.id !== idOrKey && entry.key !== idOrKey,
-      );
+      // Matched by id *or* key, and a key is not unique — the same key exists in every
+      // workspace that stored it. So visibility decides what may be removed, and a key
+      // that names entries the caller cannot see removes only the ones it can.
+      const targets = (entry: MemoryEntry) =>
+        (entry.id === idOrKey || entry.key === idOrKey) && isVisibleFrom(entry, context);
+
+      const sessionNext = this.sessionEntries.filter((entry) => !targets(entry));
       const sessionChanged = sessionNext.length !== this.sessionEntries.length;
       this.sessionEntries = sessionNext;
       const entries = await this.loadPersistent();
-      const next = entries.filter((entry) => entry.id !== idOrKey && entry.key !== idOrKey);
+      const next = entries.filter((entry) => !targets(entry));
       const persistentChanged = next.length !== entries.length;
       if (persistentChanged) await this.savePersistent(next);
       return sessionChanged || persistentChanged;
