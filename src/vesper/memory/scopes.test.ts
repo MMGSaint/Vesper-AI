@@ -294,3 +294,61 @@ describe("the workspace boundary governs writes as well as reads", () => {
     await runtime.stop();
   });
 });
+
+describe("a memory the assistant wrote does not claim the user said it", () => {
+  /**
+   * `memory_remember` stamped every write `provenance: { origin: "user-request", kind:
+   * "stated" }`. The model calls that tool, and it does not know whether the user stated
+   * anything — so a fact the model invented was indistinguishable in the record from one
+   * the user actually said.
+   *
+   * That matters because `attribute()` renders the difference back into the system prompt
+   * on every later turn. An invented fact stamped "stated" is how it becomes a remembered
+   * one, and the model is never the authority on what the user said.
+   */
+  it("records a model-written memory as inferred by the agent", async () => {
+    const runtime = await testRuntime();
+    await runtime.tools.invoke({
+      name: "memory_remember",
+      args: { key: "favourite-colour", value: "green", category: "preference" },
+      workspaceId: "general",
+      confirmed: true,
+    });
+    const entry = (await runtime.memory.search("favourite-colour", { scope: "all" })).find(
+      (item) => item.key === "favourite-colour",
+    );
+    assert.ok(entry, "the memory was not written at all");
+    assert.equal(entry.source, "agent");
+    assert.equal(entry.provenance?.kind, "inferred", "a model-written memory claimed the user stated it");
+    assert.notEqual(entry.provenance?.origin, "user-request");
+    await runtime.stop();
+  });
+
+  it("renders it differently from something the user really said", async () => {
+    // The consequence: the prompt has to carry the difference, or recording it is
+    // bookkeeping nobody reads.
+    const runtime = await testRuntime();
+    await runtime.memory.remember({
+      category: "preference",
+      key: "stated-fact",
+      value: "green",
+      source: "user",
+      provenance: { origin: "user", kind: "stated" },
+    });
+    await runtime.tools.invoke({
+      name: "memory_remember",
+      args: { key: "inferred-fact", value: "green", category: "preference" },
+      workspaceId: "general",
+      confirmed: true,
+    });
+    const all = await runtime.memory.search("green", { scope: "all" });
+    const stated = all.find((item) => item.key === "stated-fact")!;
+    const inferred = all.find((item) => item.key === "inferred-fact")!;
+    assert.notEqual(
+      attribute(stated, { deviceId: runtime.deviceIdentity.deviceId }),
+      attribute(inferred, { deviceId: runtime.deviceIdentity.deviceId }),
+      "the two read identically in the prompt",
+    );
+    await runtime.stop();
+  });
+});

@@ -289,7 +289,12 @@ export function registerBuiltinTools(input: {
         value,
         workspaceId: context.workspaceId,
         source: "agent",
-        provenance: { origin: "user-request", kind: "stated" },
+        // The assistant wrote this, and it does not know whether the user stated it.
+        // `origin: "user-request", kind: "stated"` claimed both, so a fact the model
+        // invented was indistinguishable in the record from one the user actually said —
+        // and `attribute()` renders that difference back into the prompt on every later
+        // turn, which is how an invented fact becomes a remembered one.
+        provenance: { origin: "agent", kind: "inferred" },
       });
       return { ok: true, epistemic: "changed", summary: `Remembered ${entry.key}.`, data: { id: entry.id, key: entry.key, category: entry.category } };
     },
