@@ -22,6 +22,7 @@ const SUITE = [
   ["src/vesper/security-invariants.test.ts", "the cross-cutting properties, as properties"],
   ["src/vesper/prompt-integrity.test.ts", "nothing but Vesper speaks in Vesper's voice"],
   ["src/vesper/untrusted.test.ts", "the untrusted-content boundary itself"],
+  ["src/vesper/untrusted-pipeline.test.ts", "sanitisation reaches a fixed point"],
   ["src/vesper/injection-redteam.test.ts", "prompt injection: containment"],
   ["src/vesper/injection-wiring.test.ts", "prompt injection: the product actually uses it"],
   ["src/vesper/tools/remote.test.ts", "remote authority limits at the tool gate"],

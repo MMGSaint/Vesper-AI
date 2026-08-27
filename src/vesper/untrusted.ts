@@ -125,18 +125,41 @@ const SENTINEL_LOOKALIKE = /vesper[\s_.-]{0,3}untrusted[\s_.-]{0,3}data/gi;
 /** Chat-template control tokens. A payload has no legitimate reason to open a turn. */
 const CONTROL_TOKEN = /<\|[a-z0-9_-]{1,32}\|>|\[\/?inst\]|<<\/?sys>>/gi;
 
-/** Invisible characters that only ever serve to hide text from a reader. */
-const ZERO_WIDTH = /[\u200B\uFEFF\u2060\u180E]/g;
 /**
- * Bidi embedding and override controls. Removing them cannot change the logical
- * character sequence - only the visual order a reader sees - so genuine Arabic or
- * Hebrew text survives while "call fs_write" cannot be made to read backwards.
+ * Every Unicode format character, not a hand-listed few.
+ *
+ * The hand-listed set covered four code points and missed U+00AD SOFT HYPHEN, which
+ * renders as nothing, survives NFKC, and broke every word-anchored pattern in the
+ * screener — an attacker got a payload from score 82 to score 0 with one character.
+ * `\p{Cf}` is the category those characters belong to, so it covers the ones nobody
+ * thought to list: the zero-width set, the bidi embedding and override controls,
+ * U+180E, the interlinear annotation marks, and U+00AD.
+ *
+ * Removing them cannot change the logical character sequence — only what a reader is
+ * shown — so genuine Arabic or Hebrew text survives while "call fs_write" cannot be
+ * made to read backwards or to hide a control token inside a word.
+ */
+const INVISIBLE = /\p{Cf}/gu;
+/** Kept for the screening normaliser, which may strip more than the payload path does. */
+const COMBINING_MARK = /\p{Mn}/gu;
+/**
+ * The bidi subset of INVISIBLE. Stripping uses the whole category; this exists only so
+ * the report can say "text was reordered", which is a different claim from "text was
+ * hidden" and deserves its own signal.
  */
 const BIDI_CONTROL = /[\u202A-\u202E\u2066-\u2069]/g;
 /** C0 controls other than tab, newline, carriage return. */
 const CONTROL_CHAR = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 
 const DEFAULT_MAX_PAYLOAD_CHARS = 12_000;
+/**
+ * How many strip/escape passes before the transformation is declared unstable.
+ *
+ * Every pass strictly shrinks the string or escapes something, so this converges in
+ * practice; the bound exists so a pathological input cannot spin, and reaching it is
+ * treated as a failure to sanitise rather than as success.
+ */
+const MAX_NEUTRALISE_PASSES = 8;
 
 export interface WrapOptions {
   /** Payload cap. Truncation is stated in the header, never hidden. */
@@ -200,32 +223,76 @@ export function neutralisePayload(
     if (count > 0) edits.push({ kind, count });
   };
 
+  let text = content;
   let boundary = 0;
-  let text = content.replace(SENTINEL_LOOKALIKE, () => {
-    boundary += 1;
-    return ESCAPE_MARKER;
-  });
-  record("boundary", boundary);
+  let nonces = 0;
+  let tokens = 0;
+  let invisible = 0;
+  let bidi = 0;
+  let controls = 0;
 
-  const nonceHits = nonce ? countOccurrences(text, nonce) : 0;
-  if (nonceHits > 0) {
-    text = text.split(nonce).join(ESCAPE_MARKER);
-    record("nonce", nonceHits);
+  // Strip before escaping, then repeat until nothing changes.
+  //
+  // The original order escaped first and stripped afterwards. Both strip passes are
+  // deletions, so they could *create* the very substrings the escape passes existed to
+  // remove: one zero-width character in the middle of a word meant SENTINEL_LOOKALIKE
+  // and CONTROL_TOKEN never matched, and the later deletion reassembled a literal
+  // `<|im_start|>` or a complete END marker. Escaping what you have not yet normalised
+  // is escaping the wrong string.
+  //
+  // Looping to a fixed point is the general form of that lesson. One ordered pass is
+  // only correct if no transformation can ever feed another, which is an assumption
+  // this module already got wrong once; iterating removes the need to be right about it.
+  //
+  // Honest note: with today's transformations the loop always converges on the first
+  // pass, and no test fails if the bound is cut to one — strip-before-escape is what
+  // actually fixes the reported defect. The loop is insurance for the next
+  // transformation somebody adds in the wrong order, and it is recorded as unexercised
+  // rather than presented as load-bearing.
+  for (let pass = 0; pass < MAX_NEUTRALISE_PASSES; pass += 1) {
+    const before = text;
+
+    const invisibleHits = text.match(INVISIBLE)?.length ?? 0;
+    if (invisibleHits > 0) {
+      // Stripped as one category, reported as two. "Text was reordered" and "text was
+      // hidden" are different claims about what an author was doing, and collapsing them
+      // would cost the reader the distinction for no gain.
+      const bidiHits = text.match(BIDI_CONTROL)?.length ?? 0;
+      bidi += bidiHits;
+      invisible += invisibleHits - bidiHits;
+      text = text.replace(INVISIBLE, "");
+    }
+    const controlHits = text.match(CONTROL_CHAR)?.length ?? 0;
+    if (controlHits > 0) {
+      controls += controlHits;
+      text = text.replace(CONTROL_CHAR, " ");
+    }
+
+    text = text.replace(SENTINEL_LOOKALIKE, () => {
+      boundary += 1;
+      return ESCAPE_MARKER;
+    });
+    if (nonce) {
+      const hits = countOccurrences(text, nonce);
+      if (hits > 0) {
+        nonces += hits;
+        text = text.split(nonce).join(ESCAPE_MARKER);
+      }
+    }
+    text = text.replace(CONTROL_TOKEN, () => {
+      tokens += 1;
+      return ESCAPE_MARKER;
+    });
+
+    if (text === before) break;
   }
 
-  let tokens = 0;
-  text = text.replace(CONTROL_TOKEN, () => {
-    tokens += 1;
-    return ESCAPE_MARKER;
-  });
+  record("boundary", boundary);
+  record("nonce", nonces);
   record("control-token", tokens);
-
-  record("zero-width", text.match(ZERO_WIDTH)?.length ?? 0);
-  text = text.replace(ZERO_WIDTH, "");
-  record("bidi", text.match(BIDI_CONTROL)?.length ?? 0);
-  text = text.replace(BIDI_CONTROL, "");
-  record("control-char", text.match(CONTROL_CHAR)?.length ?? 0);
-  text = text.replace(CONTROL_CHAR, " ");
+  record("zero-width", invisible);
+  record("bidi", bidi);
+  record("control-char", controls);
 
   return { text, edits };
 }
@@ -238,13 +305,12 @@ export function neutralisePayload(
  */
 function sanitiseLabel(value: string | undefined, limit = 120): string | undefined {
   if (typeof value !== "string") return undefined;
-  const flat = value
-    .replace(SENTINEL_LOOKALIKE, ESCAPE_MARKER)
-    .replace(CONTROL_TOKEN, ESCAPE_MARKER)
-    .replace(ZERO_WIDTH, "")
-    .replace(BIDI_CONTROL, "")
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(CONTROL_CHAR, " ")
+  // Same ordering rule as the payload path, and for the same reason: strip what is
+  // invisible before escaping what is dangerous, or the strip pass reassembles it.
+  // A header field is Vesper's own voice describing where content came from, so a
+  // filename that reads like a directive must not be able to become one.
+  const flat = neutralisePayload(value, "")
+    .text.replace(/[\r\n\t]+/g, " ")
     .trim();
   if (!flat) return undefined;
   return flat.length > limit ? `${flat.slice(0, limit)}...` : flat;
@@ -396,8 +462,11 @@ function decodeStringEscapes(text: string): string {
 function normaliseForScreening(text: string): string {
   return decodeStringEscapes(text)
     .normalize("NFKC")
-    .replace(ZERO_WIDTH, "")
-    .replace(BIDI_CONTROL, "")
+    .replace(INVISIBLE, "")
+    // The screener may strip more than the payload path does: it only decides what to
+    // report, never what the model is shown, so a combining mark used to break a word
+    // boundary should not also break detection.
+    .replace(COMBINING_MARK, "")
     .replace(CONTROL_CHAR, " ")
     .toLowerCase()
     .replace(CONFUSABLE_PATTERN, (char) => CONFUSABLES[char] ?? char)
@@ -819,7 +888,7 @@ function collectPatternSignals(
 /** Invisible characters are reported even when nothing decodes to a directive. */
 function obfuscationSignals(raw: string, factor: number): InjectionSignal[] {
   const signals: InjectionSignal[] = [];
-  const zeroWidth = raw.match(ZERO_WIDTH)?.length ?? 0;
+  const zeroWidth = raw.match(INVISIBLE)?.length ?? 0;
   const bidi = raw.match(BIDI_CONTROL)?.length ?? 0;
   const discounts = factor < 1 ? ["explanatory register"] : [];
   if (zeroWidth >= 3) {
