@@ -27,7 +27,13 @@ import { bm25, buildLexicalIndex, tokenize, type LexicalIndex } from "./lexical.
  */
 function realPathOrNull(target: string): string | null {
   try {
-    return realpathSync.native(resolve(target));
+    // Plain realpathSync, not `.native`. The native form asks the OS, and on Windows the
+    // OS answers with the extended-length form (`\\?\C:\Users\...`) — which then fails
+    // every containment comparison against an ordinary `C:\Users\...` approved root, so
+    // a correct root looked like an escaping one and nothing was indexed at all. The
+    // prefix is stripped as well, because a UNC-mapped drive can still produce it.
+    const real = realpathSync(resolve(target));
+    return real.startsWith("\\\\?\\") ? real.slice(4) : real;
   } catch {
     return null;
   }

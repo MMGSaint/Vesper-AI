@@ -987,6 +987,12 @@ describe("invariant: the device private key stays in its own protected file", ()
     for (const name of await readdir(dirs.data)) {
       const contents = await readFile(join(dirs.data, name), "utf8").catch(() => "");
       if (!contents.includes("privateKey")) continue;
+      // POSIX permission bits only. Windows does not have them — `stat().mode` there
+      // reports a synthesised value that says nothing about the ACL actually protecting
+      // the file — so asserting 0600 on Windows would be asserting a fiction. The
+      // platform-independent half of the property is checked below for every platform,
+      // and the Windows ACL remains unverified: see docs/known-limitations.md.
+      if (process.platform === "win32") continue;
       const mode = (await stat(join(dirs.data, name))).mode & 0o777;
       assert.equal(
         mode,
