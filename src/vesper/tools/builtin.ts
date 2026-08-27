@@ -1,3 +1,4 @@
+import { sanitiseInline } from "../untrusted.ts";
 import type { VesperConfig } from "../config.ts";
 import type { EventBus } from "../events.ts";
 import type { SimulatedHardware } from "../hardware/simulated.ts";
@@ -214,10 +215,20 @@ export function registerBuiltinTools(input: {
       ["title", "body"],
     ),
     async (args) => {
-      const title = str(args, "title");
-      const body = str(args, "body");
+      // Screened and attributed. `kind: "system"` is the most authoritative class in the
+      // hub and is reserved for Vesper's own machinery; a model-written notice is
+      // `info`, authored `model`, with its text neutralised the way any other
+      // model-chosen string bound for a durable record is.
+      const title = sanitiseInline(str(args, "title"), 80);
+      const body = sanitiseInline(str(args, "body"), 300);
       try {
-        const sent = notifications.push({ kind: "system", title, body, cooldownKey: `notify:${title}` });
+        const sent = notifications.push({
+          kind: "info",
+          author: "model",
+          title,
+          body,
+          cooldownKey: `notify:${title}`,
+        });
         const host = windows.notify(title, body);
         return {
           ok: true,

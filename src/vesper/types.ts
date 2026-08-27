@@ -231,6 +231,20 @@ export interface VesperNotification {
   body: string;
   at: string;
   kind: "info" | "success" | "warning" | "system" | "error";
+  /**
+   * Who wrote it. Set by the hub from the caller, never from the payload.
+   *
+   * A hub entry written by the model through the `notify` tool used to be byte-for-byte
+   * indistinguishable from one emitted by `app_launch` or by a subsystem. The hub keeps
+   * a hundred entries, every turn carries the most recent five, and the console prints
+   * each under the reply — so a model that had just been refused could write a durable,
+   * replayed, Vesper-voiced assertion that the action had succeeded, sitting next to the
+   * refusal that is the true record.
+   *
+   * `subsystem` is Vesper's own machinery saying something happened. `model` is the
+   * assistant repeating a claim, which the reader is entitled to weigh differently.
+   */
+  author: "subsystem" | "model";
   cooldownKey?: string;
 }
 

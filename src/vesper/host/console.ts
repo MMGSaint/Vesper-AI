@@ -209,7 +209,11 @@ export async function runConsole(options: ConsoleOptions): Promise<"exit" | "eof
         }
 
         for (const note of turn.notifications) {
-          io.writeLine(`  · ${note.title}`);
+          // Attributed, because a notice the assistant wrote and one Vesper's own
+          // machinery emitted read identically otherwise — and the model can write one
+          // claiming an action it was just refused actually succeeded.
+          const attribution = note.author === "model" ? " (said by the assistant)" : "";
+          io.writeLine(`  · ${note.title}${attribution}`);
         }
       } finally {
         turnAbort = null;
