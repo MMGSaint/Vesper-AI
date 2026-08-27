@@ -830,3 +830,146 @@ describe("invariant: losing a security decision is never silent", () => {
     await runtime.stop();
   });
 });
+
+describe("invariant: the never tier stops the handler, not just the summary", () => {
+  it("a never-tier tool's handler never runs, proven by its absent side effect", async () => {
+    // The three existing never-tier assertions used disk_wipe and credential_extract,
+    // whose handlers return ok:false unconditionally. With *both* enforcement points
+    // removed those tests still passed, because a refusing canary is indistinguishable
+    // from a working gate. This probe would succeed and leave a file behind if anything
+    // let it through.
+    const dir = await mkdtemp(join(tmpdir(), "vesper-never-"));
+    const witness = join(dir, "the-handler-ran.txt");
+    const runtime = await testRuntime();
+    runtime.tools.register(
+      {
+        name: "never_probe",
+        description: "A never-tier tool whose handler would really do something.",
+        permission: "never",
+        parameters: { type: "object", properties: {}, required: [] },
+      },
+      async () => {
+        await writeFile(witness, "the handler ran", "utf8");
+        return { ok: true, epistemic: "changed" as const, summary: "did the thing" };
+      },
+    );
+
+    const record = await runtime.tools.invoke({
+      name: "never_probe",
+      args: {},
+      workspaceId: "general",
+      confirmed: true,
+    });
+
+    assert.equal(record.decision.allowed, false);
+    assert.equal(record.result?.ok, false);
+    await assert.rejects(
+      () => readFile(witness, "utf8"),
+      "a never-tier handler ran: the gate reported a refusal it did not enforce",
+    );
+    await runtime.stop();
+  });
+
+  it("escalates a configured never-tier name the same way", async () => {
+    // neverAllowAutonomous is the user's own escalation list and had no coverage at all.
+    const dir = await mkdtemp(join(tmpdir(), "vesper-never2-"));
+    const witness = join(dir, "escalated-handler-ran.txt");
+    const runtime = await testRuntime({
+      config: { permissions: { neverAllowAutonomous: ["escalate_probe"] } as never },
+    });
+    assert.ok(
+      runtime.config.permissions.neverAllowAutonomous.includes("escalate_probe"),
+      "the escalation never reached the gate, so this test proves nothing",
+    );
+    runtime.tools.register(
+      {
+        name: "escalate_probe",
+        description: "Declared safe, escalated to never by configuration.",
+        permission: "safe",
+        parameters: { type: "object", properties: {}, required: [] },
+      },
+      async () => {
+        await writeFile(witness, "ran", "utf8");
+        return { ok: true, epistemic: "changed" as const, summary: "did the thing" };
+      },
+    );
+    const record = await runtime.tools.invoke({
+      name: "escalate_probe",
+      args: {},
+      workspaceId: "general",
+      confirmed: true,
+    });
+    assert.equal(record.result?.ok, false, "a configured never-tier tool ran");
+    await assert.rejects(() => readFile(witness, "utf8"), "its handler ran anyway");
+    await runtime.stop();
+  });
+});
+
+describe("invariant: the only authenticator is actually checked", () => {
+  it("refuses every wrong-token shape, including a prefix of the real one", async () => {
+    // The bearer token is the client protocol's only authenticator and its comparison had
+    // no test: every existing UNAUTHENTICATED assertion was satisfied by the missing-token
+    // guard or by an expiry, so replacing the equality with a prefix match went unnoticed.
+    const runtime = await testRuntime();
+    const gateway = createClientGateway(runtime);
+    const phone = await enrolCompanion(runtime, { name: "phone" });
+    const session = await gateway.issueSession({ deviceId: phone.deviceId, deviceLabel: "phone" });
+    if (isClientError(session)) throw new Error(session.detail);
+
+    const real = session.token;
+    const wrong = [
+      "",
+      " ",
+      real.slice(0, 1),
+      real.slice(0, real.length - 1),
+      `${real}x`,
+      real.toUpperCase() === real ? real.toLowerCase() : real.toUpperCase(),
+      real.split("").reverse().join(""),
+      "NOT-THE-TOKEN",
+    ];
+    for (const token of wrong) {
+      const result = await gateway.status(token);
+      assert.equal(isClientError(result), true, `token ${JSON.stringify(token)} was accepted`);
+      if (isClientError(result)) {
+        assert.equal(result.code, "UNAUTHENTICATED", `wrong token ${JSON.stringify(token)}`);
+      }
+    }
+
+    // And the real one still works, so this is not passing by refusing everything.
+    assert.equal(isClientError(await gateway.status(real)), false, "the real token was refused");
+    await runtime.stop();
+  });
+});
+
+describe("invariant: the device private key stays in its own protected file", () => {
+  it("never writes the private key into the shared state file", async () => {
+    // The production host passed no `dirs`, so it took the identity branch written for
+    // in-memory runs and put the key in state.json — created 0644, alongside memories
+    // and the device registry.
+    const { createProductionHost } = await import("./host/service.ts");
+    const { readdir, stat } = await import("node:fs/promises");
+    const root = await mkdtemp(join(tmpdir(), "vesper-keyfile-"));
+    const dirs = {
+      root,
+      config: join(root, "config"),
+      data: join(root, "data"),
+      logs: join(root, "logs"),
+      models: join(root, "models"),
+    };
+    const host = await createProductionHost({ dirs, runtime: { skipDiscovery: true } });
+
+    for (const name of await readdir(dirs.data)) {
+      const contents = await readFile(join(dirs.data, name), "utf8").catch(() => "");
+      if (!contents.includes("privateKey")) continue;
+      const mode = (await stat(join(dirs.data, name))).mode & 0o777;
+      assert.equal(
+        mode,
+        0o600,
+        `${name} holds the private key at mode ${mode.toString(8)}`,
+      );
+    }
+    const state = await readFile(join(dirs.data, "state.json"), "utf8").catch(() => "");
+    assert.equal(state.includes("privateKey"), false, "the private key is in state.json");
+    await host.runtime.stop();
+  });
+});

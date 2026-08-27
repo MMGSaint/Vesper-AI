@@ -132,6 +132,15 @@ export async function createProductionHost(options?: {
     config: options?.runtime?.config ?? loaded.config,
     storage,
     logger: log,
+    // The real host has directories, so say so.
+    //
+    // Without this the production host fell into the identity branch written for
+    // in-memory runs — "no dirs means no filesystem: keep the key in the storage adapter
+    // so tests never leave a private key on disk" — and the device's ed25519 private key
+    // was written into state.json instead of its own 0600 file. state.json holds
+    // memories and the device registry and is created at the default 0644, so the key
+    // that authenticates this machine to its peers sat world-readable next to them.
+    dirs: options?.runtime?.dirs ?? { data: dirs.data },
   });
   await runtime.start();
 
