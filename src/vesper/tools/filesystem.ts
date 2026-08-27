@@ -1,5 +1,6 @@
-import { readdir, writeFile, mkdir, open } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { readdir, mkdir, open, lstat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { basename, dirname, join, relative } from "node:path";
 import {
   assertWithinRoot,
   containsTraversal,
@@ -50,6 +51,51 @@ export async function resolveApprovedPathReal(
   return { ok: true, path: real.path, root: real.root };
 }
 
+/**
+ * Open a path that containment has already approved, refusing to traverse a symlink at
+ * the final component.
+ *
+ * Resolving a path and then opening it are two acts, and everything dangerous lives in
+ * the gap between them. `realpath` reports a *dangling* symlink as "does not exist yet",
+ * so the check concluded the path was inside the root while the write followed the link
+ * straight out of it — that is how an arbitrary file write reached /etc. And even for a
+ * link that resolves correctly, the target can be swapped between the check and the
+ * open.
+ *
+ * `O_NOFOLLOW` closes both, because it makes the kernel perform the check as part of the
+ * open itself: there is no window. The path handed here has already had legitimate
+ * symlinks resolved away by `resolveRealWithinRoot`, so a symlink still sitting at the
+ * final component is either the dangling case or a swap, and neither should be followed.
+ *
+ * Windows has no `O_NOFOLLOW`. There the explicit lstat is the whole defence rather than
+ * a nicety, and it is racy — stated plainly rather than papered over. Reparse-point
+ * behaviour on a real Windows machine has never been exercised; see
+ * docs/known-limitations.md.
+ */
+const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+async function openContained(
+  path: string,
+  flags: number,
+): Promise<{ ok: true; handle: Awaited<ReturnType<typeof open>> } | { ok: false; summary: string }> {
+  const link = await lstat(path).catch(() => null);
+  if (link?.isSymbolicLink()) {
+    return {
+      ok: false,
+      summary: "Refused to follow a symbolic link at the target path.",
+    };
+  }
+  try {
+    return { ok: true, handle: await open(path, flags | O_NOFOLLOW) };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ELOOP" || code === "EMLINK") {
+      return { ok: false, summary: "Refused to follow a symbolic link at the target path." };
+    }
+    throw error;
+  }
+}
+
 export async function listApproved(
   approvedRoots: string[],
   requested: string,
@@ -85,7 +131,11 @@ export async function readApproved(
     return { ok: false, epistemic: "could_not_access", summary: resolved.summary };
   }
   try {
-    const handle = await open(resolved.path, "r");
+    const opened = await openContained(resolved.path, constants.O_RDONLY);
+    if (!opened.ok) {
+      return { ok: false, epistemic: "could_not_access", summary: opened.summary };
+    }
+    const handle = opened.handle;
     try {
       const info = await handle.stat();
       if (info.isDirectory()) {
@@ -134,12 +184,56 @@ export async function writeApproved(
     };
   }
   try {
-    await mkdir(dirname(resolved.path), { recursive: true });
-    await writeFile(resolved.path, content, "utf8");
+    // Create the parent, then re-check it. `O_NOFOLLOW` only guards the final component,
+    // so a symlinked directory anywhere above it would still put the file outside the
+    // root — and mkdir -p will happily resolve through one.
+    //
+    // Honest note: no test in filesystem-containment.test.ts fails when this re-check is
+    // removed, because every *non-racy* symlinked-parent shape is already caught earlier
+    // (an existing link by resolveRealWithinRoot, a dangling one by mkdir failing
+    // ENOENT). What it actually guards is the window between that first resolution and
+    // this write, where the parent can be swapped for a link. That race has no
+    // deterministic test here, so this is unexercised defence-in-depth — kept because
+    // the window is real, and recorded as unexercised rather than presented as proven.
+    const parent = dirname(resolved.path);
+    await mkdir(parent, { recursive: true });
+    const parentReal = await resolveRealWithinRoot(resolved.root, parent);
+    if (!parentReal.ok) {
+      return { ok: false, epistemic: "could_not_access", summary: parentReal.reason };
+    }
+    const target = join(parentReal.path, basename(resolved.path));
+
+    const opened = await openContained(
+      target,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC,
+    );
+    if (!opened.ok) {
+      return { ok: false, epistemic: "could_not_access", summary: opened.summary };
+    }
+    try {
+      // A hard link is not a reference to a file, it *is* the file under another name, so
+      // no amount of path resolution will reveal that one of its names lives outside the
+      // root. Writing through one puts the bytes somewhere containment never approved.
+      // There is no portable way to ask where a file's other names are, so the only
+      // honest answer is to refuse to write to a file that has more than one — a
+      // condition essentially never true of a document in a notes directory.
+      const info = await opened.handle.stat();
+      if (info.nlink > 1) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary:
+            "Refused to write to a file with more than one hard link: another of its names may be outside the approved root.",
+        };
+      }
+      await opened.handle.writeFile(content, "utf8");
+    } finally {
+      await opened.handle.close().catch(() => undefined);
+    }
     return {
       ok: true,
       epistemic: "changed",
-      summary: `Wrote ${relative(resolved.root, resolved.path)}.`,
+      summary: `Wrote ${relative(parentReal.root, target)}.`,
     };
   } catch (error) {
     return {
