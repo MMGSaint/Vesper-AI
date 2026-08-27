@@ -170,6 +170,10 @@ export class ToolRegistry {
         reason: decision.reason,
         createdAt: nowIso(),
         workspaceId: input.workspaceId,
+        requestedBy: {
+          kind: input.origin?.kind ?? "local",
+          deviceId: input.origin?.deviceId,
+        },
       };
       this.confirmations.set(pending.id, pending);
       this.log.info("permission", "Queued confirmation", { id: pending.id, tool: input.name });

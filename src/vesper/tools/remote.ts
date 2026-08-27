@@ -90,10 +90,24 @@ export function decideRemoteToolRequest(input: {
     };
   }
 
+  // A trust floor that applies to every tool, capability-bearing or not.
+  //
+  // Without this, a tool with no capability mapping skipped the trust check entirely and
+  // a revoked device's request was still honoured — the session layer happened to be the
+  // only thing refusing it, and a held confirmation outlives the session that queued it.
+  // Revocation has to mean the same thing at every layer that can act on a request.
+  const trust = input.origin.trust ?? "unknown";
+  if (trust !== "trusted" && trust !== "restricted") {
+    return {
+      allowed: false,
+      reason: `A '${trust}' device may not have '${input.toolName}' run on its behalf.`,
+    };
+  }
+
   const capability = capabilityForTool(input.toolName);
   if (!capability) {
-    // Not capability-bearing. Client scopes already decided whether this device may be
-    // having this conversation at all.
+    // Not capability-bearing. Client scopes decide whether this device may be having
+    // this conversation at all; adding a second rule here would double-govern them.
     return { allowed: true, reason: "Not a capability-bearing tool." };
   }
 

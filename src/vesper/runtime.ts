@@ -470,6 +470,10 @@ export class VesperRuntime {
         reason: typeof rec.reason === "string" ? rec.reason : "confirmation required",
         createdAt: typeof rec.createdAt === "string" ? rec.createdAt : new Date().toISOString(),
         workspaceId: typeof rec.workspaceId === "string" ? rec.workspaceId : "general",
+        // An unreadable or absent origin is treated as remote-unknown, not as local.
+        // A restored confirmation is the one case where we cannot ask who queued it,
+        // and guessing "local" there would hand a persisted record local authority.
+        requestedBy: readRequestedBy(rec.requestedBy),
       });
     }
     if (this.confirmations.size > 0) {
@@ -742,6 +746,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     history,
     maxToolIterations: config.agent.maxToolIterations,
     deviceId: deviceIdentity.deviceId,
+    deviceTrust: async (id: string) => (await devices.get(id))?.trust ?? "unknown",
+    selfManifest: async () =>
+      (await devices.get(deviceIdentity.deviceId))?.capabilities ?? null,
     describeNow: async () => {
       const [records, tasks] = await Promise.all([devices.list(), taskQueue.list()]);
       const self =
@@ -810,5 +817,25 @@ function emptyProfile(config: VesperConfig): CapabilityProfile {
     optimizer: "mocked_simulated",
     voice: "documented_not_implemented",
     notes: [],
+  };
+}
+
+/**
+ * Read a persisted confirmation's origin without trusting the file.
+ *
+ * Absent or malformed means "we cannot tell", and the safe reading of that is *not*
+ * "local". A record on disk is attacker-influenceable in a way a live in-process origin
+ * is not, so an unreadable origin resolves to a remote device with no id — the most
+ * restricted thing it could be.
+ */
+function readRequestedBy(value: unknown): { kind: "local" | "remote"; deviceId?: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { kind: "remote" };
+  }
+  const record = value as { kind?: unknown; deviceId?: unknown };
+  const kind = record.kind === "local" ? "local" : "remote";
+  return {
+    kind,
+    deviceId: typeof record.deviceId === "string" ? record.deviceId : undefined,
   };
 }

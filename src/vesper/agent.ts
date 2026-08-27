@@ -2,7 +2,9 @@ import { createId, nowIso } from "./id.ts";
 import type { Logger } from "./logging.ts";
 import type { MemoryStore } from "./memory/store.ts";
 import { attribute } from "./memory/scopes.ts";
-import type { RequestOrigin } from "./tools/remote.ts";
+import { decideRemoteToolRequest, type RequestOrigin } from "./tools/remote.ts";
+import type { TrustState } from "./distributed/identity.ts";
+import type { CapabilityManifest } from "./distributed/capabilities.ts";
 import type { KnowledgeIndex } from "./knowledge/rag.ts";
 import type { ModelRouter } from "./models/router.ts";
 import type { NotificationHub } from "./notifications.ts";
@@ -46,6 +48,14 @@ interface AgentDeps {
    * claim which device a fact belongs to rather than guessing.
    */
   deviceId?: string;
+  /**
+   * Resolve a device's trust *now*. A confirmation can outlive the turn that queued it
+   * and even the process, so its record stores who asked, never what they were allowed
+   * — authority is re-read at the moment it is exercised.
+   */
+  deviceTrust?: (deviceId: string) => Promise<TrustState>;
+  /** This device's capability manifest, for deciding what a peer may ask of it. */
+  selfManifest?: () => Promise<CapabilityManifest | null>;
   models: ModelRouter;
   tools: ToolRegistry;
   workspaces: WorkspaceManager;
@@ -261,8 +271,8 @@ export class Agent {
       if (!confirmation) {
         return this.turn(userText, "That confirmation is no longer pending.", ["could_not_access"], [], [], at);
       }
-      this.deps.confirmations.delete(options.confirmId);
       if (options.approve === false) {
+        this.deps.confirmations.delete(options.confirmId);
         this.deps.log.info("permission", "User denied confirmation", { id: options.confirmId });
         return this.turn(
           userText,
@@ -273,6 +283,39 @@ export class Agent {
           at,
         );
       }
+
+      // An approval can never grant more authority than the request carried. Checked
+      // here as well as at queue time because a confirmation outlives the turn that
+      // created it: a record restored from disk is not a live origin, and treating a
+      // stored "local" as proof of local authority would make the queue file a way to
+      // ask for anything.
+      // Both sides are checked, because an approval is a second exercise of authority
+      // rather than a rubber stamp on the first: the request cannot carry more than the
+      // asker held, and it cannot gain more from whoever approves it.
+      const requester = await this.resolveOrigin(confirmation.requestedBy);
+      const checks = [
+        decideRemoteToolRequest({ toolName: confirmation.toolName, origin: requester }),
+        decideRemoteToolRequest({ toolName: confirmation.toolName, origin: origin ?? { kind: "local" } }),
+      ];
+      const allowedForRequester = checks.find((check) => !check.allowed) ?? checks[0];
+      if (!allowedForRequester.allowed) {
+        // Deliberately not consumed. A refusal on authority grounds must not destroy a
+        // confirmation the owner may still legitimately approve at the machine —
+        // otherwise anyone who can attempt an approval can cancel one.
+        this.deps.log.warn("permission", allowedForRequester.reason, {
+          tool: confirmation.toolName,
+          id: options.confirmId,
+        });
+        return this.turn(
+          userText,
+          `I did not run ${confirmation.toolName}. ${allowedForRequester.reason} It is still waiting for approval here.`,
+          ["could_not_access"],
+          [],
+          [confirmation],
+          at,
+        );
+      }
+
       const record = await this.deps.tools.invoke({
         origin,
         name: confirmation.toolName,
@@ -281,6 +324,9 @@ export class Agent {
         confirmed: true,
       });
       toolCalls.push(record);
+      // Authorized and attempted, so it is spent — whether the tool then succeeded or
+      // failed on its own terms. Only an authority refusal above leaves it pending.
+      this.deps.confirmations.delete(options.confirmId);
       const reply = record.result?.ok
         ? record.result.summary
         : `I could not complete ${confirmation.toolName}: ${record.result?.summary ?? record.decision.reason}`;
@@ -827,6 +873,30 @@ export class Agent {
       });
     }
     return decision.text;
+  }
+
+  /**
+   * Turn a recorded identity into the authority it actually holds right now.
+   *
+   * Trust is never taken from the record. A device demoted or revoked since the
+   * confirmation was queued must lose the approval with it, and a record with no
+   * readable origin resolves to the most restricted thing it could be.
+   */
+  private async resolveOrigin(
+    recorded: PendingConfirmation["requestedBy"],
+  ): Promise<RequestOrigin> {
+    if (!recorded || recorded.kind === "local") {
+      return { kind: recorded?.kind ?? "remote" };
+    }
+    const trust = recorded.deviceId && this.deps.deviceTrust
+      ? await this.deps.deviceTrust(recorded.deviceId)
+      : "unknown";
+    return {
+      kind: "remote",
+      deviceId: recorded.deviceId,
+      trust,
+      manifest: this.deps.selfManifest ? await this.deps.selfManifest() : null,
+    };
   }
 
   private turn(

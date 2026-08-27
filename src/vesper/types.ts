@@ -151,6 +151,13 @@ export interface PendingConfirmation {
   reason: string;
   createdAt: string;
   workspaceId: string;
+  /**
+   * Who asked for the action being held. Recorded so an approval can never grant more
+   * authority than the request carried, and so the audit trail says which device set a
+   * dangerous action up. Deliberately minimal: an id, not a cached capability manifest,
+   * because authority must be re-read live at approval time rather than replayed.
+   */
+  requestedBy?: { kind: "local" | "remote"; deviceId?: string };
 }
 
 export interface MemoryEntry {

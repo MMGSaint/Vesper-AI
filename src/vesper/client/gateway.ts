@@ -12,6 +12,7 @@ import {
   type ClientScope,
 } from "./protocol.ts";
 import { ClientSessionStore, type ClientSession, type IssueSessionInput } from "./session.ts";
+import type { RequestOrigin } from "../tools/remote.ts";
 
 export interface ClientStatus {
   hello: ClientHello;
@@ -36,6 +37,26 @@ export class VesperClientGateway {
 
   async issueSession(input: IssueSessionInput): Promise<ClientSession | ClientError> {
     return this.sessions.issue(input);
+  }
+
+  /**
+   * The authority a remote device is exercising, read fresh.
+   *
+   * Trust is the requester's; the manifest is this device's. The question being asked
+   * is "may a device of that trust class ask *this* machine to do X", so the capability
+   * has to be looked up on the machine that would perform the work.
+   */
+  private async remoteOrigin(deviceId: string): Promise<RequestOrigin> {
+    const [requester, self] = await Promise.all([
+      this.runtime.devices.get(deviceId),
+      this.runtime.devices.get(this.runtime.deviceIdentity.deviceId),
+    ]);
+    return {
+      kind: "remote",
+      deviceId,
+      trust: requester?.trust ?? "unknown",
+      manifest: self?.capabilities ?? null,
+    };
   }
 
   hello(): ClientHello {
@@ -121,21 +142,7 @@ export class VesperClientGateway {
     // A conversation is a tool-calling loop, so a remote turn must carry who is asking
     // all the way to the point tools run. Without this, "may converse" silently means
     // "may call anything the agent decides to call" on the host's own machine.
-    // Trust is the requester's; the manifest is this device's. The question being
-    // asked is "may a device of that trust class ask *this* machine to do X", so the
-    // capability has to be looked up on the machine that would perform it.
-    const [requester, self] = await Promise.all([
-      this.runtime.devices.get(session.deviceId),
-      this.runtime.devices.get(this.runtime.deviceIdentity.deviceId),
-    ]);
-    return this.runtime.chat(trimmed, {
-      origin: {
-        kind: "remote",
-        deviceId: session.deviceId,
-        trust: requester?.trust ?? "unknown",
-        manifest: self?.capabilities ?? null,
-      },
-    });
+    return this.runtime.chat(trimmed, { origin: await this.remoteOrigin(session.deviceId) });
   }
 
   async confirm(
@@ -148,12 +155,30 @@ export class VesperClientGateway {
     const pending = this.runtime.confirmations.get(confirmationId);
     if (!pending) return clientError("NOT_FOUND", "No pending confirmation with that id.");
     if (!approve) {
+      // Declining is the safe direction, so it needs no extra authority.
       this.runtime.confirmations.delete(confirmationId);
       return this.runtime.chat("Operator denied the pending action.");
     }
+
+    // The approval carries the approver's own authority into the deferred tool call.
+    //
+    // Without this the confirmation queue was an authority launderer: a device that is
+    // absolutely forbidden the filesystem could approve a held fs_write and it would
+    // execute as though the person at the machine had run it. Approving is exercising
+    // authority, not merely acknowledging a prompt, so the same limits apply to it as
+    // to asking directly.
+    const origin = await this.remoteOrigin(session.deviceId);
+    this.runtime.events.emit({
+      type: "security.remote_confirmation",
+      title: `Remote device approved ${pending.toolName}`,
+      detail: `Device ${session.deviceId} approved a held ${pending.toolName} requested by ${pending.requestedBy?.kind ?? "an unrecorded origin"}.`,
+      severity: "warn",
+      workspaceId: pending.workspaceId,
+    });
     return this.runtime.chat("Operator approved the pending action.", {
       confirmId: confirmationId,
       approve: true,
+      origin,
     });
   }
 
