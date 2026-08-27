@@ -63,9 +63,23 @@ export interface ResolvedTarget {
   reason: string;
 }
 
+/**
+ * How strongly a device answers to a hint like "desktop".
+ *
+ * `deviceType` is a constrained enum fixed at enrolment. `name` is free text the
+ * enrolling device supplies about *itself*, never validated and never deduplicated — so
+ * treating the two as equal let a phone enrolled as "my desktop" capture work aimed at
+ * the actual desktop, on nothing more than registry insertion order.
+ *
+ * 2 = the device type says so. 1 = only its self-chosen name says so. 0 = no.
+ */
+function hintStrength(device: DeviceRecord, hint: string): 0 | 1 | 2 {
+  if (device.identity.deviceType === hint) return 2;
+  return device.identity.name.toLowerCase().includes(hint) ? 1 : 0;
+}
+
 function matchesHint(device: DeviceRecord, hint: string): boolean {
-  const name = device.identity.name.toLowerCase();
-  return device.identity.deviceType === hint || name.includes(hint);
+  return hintStrength(device, hint) > 0;
 }
 
 /**
@@ -104,7 +118,22 @@ export function resolveTarget(input: {
   }
 
   if (input.intent.kind === "device") {
-    const named = input.devices.filter((device) => matchesHint(device, input.intent.kind === "device" ? input.intent.hint : ""));
+    const hint = input.intent.kind === "device" ? input.intent.hint : "";
+    const matched = input.devices.filter((device) => matchesHint(device, hint));
+    // A device type beats a self-chosen name, and only the strongest tier is considered:
+    // once a real desktop answers, a phone that merely calls itself one does not.
+    const best = matched.reduce((top, device) => Math.max(top, hintStrength(device, hint)), 0);
+    const named = matched.filter((device) => hintStrength(device, hint) === best);
+    if (named.length > 1) {
+      return {
+        ok: false,
+        problem:
+          `More than one enrolled device answers to "${hint}" (${named
+            .map((device) => device.identity.name)
+            .join(", ")}). Name the one you mean; I will not pick for you.`,
+        reason: input.intent.reason,
+      };
+    }
     if (named.length === 0) {
       return {
         ok: false,

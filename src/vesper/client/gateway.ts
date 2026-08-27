@@ -161,7 +161,19 @@ export class VesperClientGateway {
     const pending = this.runtime.confirmations.get(confirmationId);
     if (!pending) return clientError("NOT_FOUND", "No pending confirmation with that id.");
     if (!approve) {
-      // Declining is the safe direction, so it needs no extra authority.
+      // Declining is the safe direction for the *action*, but it is not a safe act
+      // against the person waiting on it: any session holding operator.confirm could
+      // delete a confirmation the owner had queued and was about to approve, silently
+      // and repeatedly. Deciding the fate of a held request is authority over it either
+      // way, so a remote device may only decline what its own device asked for.
+      const requester = pending.requestedBy;
+      const ownsIt = requester?.kind === "remote" && requester.deviceId === session.deviceId;
+      if (!ownsIt) {
+        return clientError(
+          "PERMISSION_DENIED",
+          "Only the device that requested an action, or the person at the machine, can decline it.",
+        );
+      }
       this.runtime.confirmations.delete(confirmationId);
       return this.runtime.chat("Operator denied the pending action.");
     }
@@ -204,12 +216,18 @@ export class VesperClientGateway {
     if (!input.key.trim() || !input.value.trim()) {
       return clientError("INVALID", "Memory key and value are required.");
     }
+    // Recorded as what it is: a companion device asserting something, not the person at
+    // the machine saying it. Labelling it "user" gave a remote write the store's most
+    // protected eviction rank, so a flood of them pushed out the owner's own memories
+    // instead of being pruned first — and it told any UI reading the store back that the
+    // owner had said it.
     const entry = await this.runtime.memory.remember({
       category: input.category ?? "preference",
       key: input.key.trim(),
       value: input.value.trim(),
-      source: "user",
-      provenance: { origin: "client", kind: "stated" },
+      workspaceId: this.runtime.workspaces.current().id,
+      source: "agent",
+      provenance: { origin: `client:${session.deviceId}`, kind: "stated" },
     });
     return { entry };
   }
@@ -220,7 +238,14 @@ export class VesperClientGateway {
   ): Promise<{ hits: { path: string; snippet: string; score: number }[] } | ClientError> {
     const session = await this.sessions.require(token, "knowledge.read");
     if ("ok" in session) return session;
-    const hits = await this.runtime.knowledge.search(query, { limit: 8 });
+    // Workspace scoping is enforced by rank() only when it is given a workspaceId, and
+    // this was the one retrieval path that passed none — so a companion read documents
+    // belonging to workspaces it was not in, while the agent and the knowledge_search
+    // tool both scoped correctly.
+    const hits = await this.runtime.knowledge.search(query, {
+      limit: 8,
+      workspaceId: this.runtime.workspaces.current().id,
+    });
     return {
       hits: hits.map((hit) => ({ path: hit.path, snippet: hit.snippet, score: hit.score })),
     };

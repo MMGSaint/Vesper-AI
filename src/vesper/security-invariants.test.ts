@@ -615,3 +615,122 @@ describe("invariant: a confirm-tier control cannot be reached by a safe-tier rou
     assert.equal(isDangerousRoot("/home/someone/notes"), false);
   });
 });
+
+describe("invariant: an authority ceiling applies wherever authority is read", () => {
+  it("caps a grant's scopes by live trust, not by trust at signing time", async () => {
+    // Two models owned the same question and only one applied the ceiling: a grant minted
+    // while a device was trusted kept every scope it was signed with, so a demotion to
+    // restricted was only half applied until the grant expired.
+    const { loadDeviceIdentity } = await import("./distributed/identity.ts");
+    const { issueSessionGrant, verifySessionGrant, ReplayGuard } = await import(
+      "./distributed/session.ts"
+    );
+    const dirs = { data: await mkdtemp(join(tmpdir(), "vesper-grant-")) };
+    const { identity: issuer } = await loadDeviceIdentity({ dirs, name: "desktop", vesperVersion: "t" });
+
+    const runtime = await testRuntime();
+    // The issuer has to be an enrolled, trusted device: a grant is only as good as who
+    // signed it.
+    await runtime.devices.enrol(issuer.publicIdentity());
+    await runtime.devices.setTrust(issuer.deviceId, "trusted");
+    const phone = await enrolCompanion(runtime, { name: "phone" });
+    const signed = issueSessionGrant({
+      issuer,
+      deviceId: phone.deviceId,
+      scopes: ["status", "conversation", "memory.write", "operator.confirm"],
+    });
+
+    // While trusted, the grant carries what it was signed with.
+    const beforeDemotion = await verifySessionGrant({
+      signed,
+      registry: runtime.devices,
+      replay: new ReplayGuard(),
+      requiredScope: "memory.write",
+    });
+    assert.equal(beforeDemotion.ok, true, `a trusted device lost its own grant: ${beforeDemotion.detail}`);
+
+    await runtime.devices.setTrust(phone.deviceId, "restricted");
+    for (const scope of ["memory.write", "operator.confirm"] as const) {
+      const verdict = await verifySessionGrant({
+        signed,
+        registry: runtime.devices,
+        replay: new ReplayGuard(),
+        requiredScope: scope,
+      });
+      assert.equal(verdict.ok, false, `a restricted device exercised '${scope}' from an old grant`);
+      assert.equal(verdict.ok === false && verdict.reason, "SCOPE_DENIED");
+    }
+    await runtime.stop();
+  });
+
+  it("refuses a replayed nonce rather than forgetting one to make room", async () => {
+    // The guard dropped the oldest entry under capacity pressure — by stored expiry, not
+    // by whether the grant was still valid — so flooding it re-opened replay of a nonce
+    // that had genuinely been spent.
+    const { ReplayGuard } = await import("./distributed/session.ts");
+    const guard = new ReplayGuard(8);
+    const now = 1_000;
+    const expiry = now + 60 * 60 * 1000;
+
+    assert.equal(guard.admit("victim-nonce", expiry, now), true);
+    for (let i = 0; i < 32; i += 1) guard.admit(`flood-${i}`, expiry, now);
+
+    assert.equal(
+      guard.admit("victim-nonce", expiry, now),
+      false,
+      "a spent nonce became replayable after the guard was flooded",
+    );
+  });
+
+  it("does not let a self-chosen name shadow a real device type", async () => {
+    // deviceType is a constrained enum fixed at enrolment. `name` is free text a device
+    // supplies about itself, never validated — so treating them as equal let a phone
+    // enrolled as "my desktop" capture work aimed at the actual desktop on nothing more
+    // than registry insertion order.
+    const { loadDeviceIdentity } = await import("./distributed/identity.ts");
+    const { classifyDeviceIntent, resolveTarget } = await import("./distributed/intent.ts");
+    const runtime = await testRuntime();
+
+    // The impostor enrols first, so insertion order favours it.
+    const impostor = await enrolCompanion(runtime, { name: "my desktop" });
+    const dirs = { data: await mkdtemp(join(tmpdir(), "vesper-desk-")) };
+    const { identity: real } = await loadDeviceIdentity({
+      dirs,
+      name: "workstation",
+      deviceType: "desktop",
+      vesperVersion: "t",
+    });
+    await runtime.devices.enrol(real.publicIdentity());
+    await runtime.devices.setTrust(real.deviceId, "trusted");
+
+    const resolved = resolveTarget({
+      intent: classifyDeviceIntent("prepare my desktop for VRChat"),
+      devices: await runtime.devices.list(),
+      currentDeviceId: runtime.deviceIdentity.deviceId,
+    });
+    assert.equal(resolved.ok, true, resolved.problem);
+    assert.equal(
+      resolved.device?.identity.deviceId,
+      real.deviceId,
+      "work aimed at the desktop landed on a phone named 'my desktop'",
+    );
+    assert.notEqual(resolved.device?.identity.deviceId, impostor.deviceId);
+    await runtime.stop();
+  });
+
+  it("refuses to choose when two devices answer to the same name", async () => {
+    const { classifyDeviceIntent, resolveTarget } = await import("./distributed/intent.ts");
+    const runtime = await testRuntime();
+    await enrolCompanion(runtime, { name: "my laptop" });
+    await enrolCompanion(runtime, { name: "my laptop too" });
+
+    const resolved = resolveTarget({
+      intent: classifyDeviceIntent("run it on my laptop"),
+      devices: await runtime.devices.list(),
+      currentDeviceId: runtime.deviceIdentity.deviceId,
+    });
+    assert.equal(resolved.ok, false, "picked one of two equally-matching devices");
+    assert.match(resolved.problem ?? "", /More than one/);
+    await runtime.stop();
+  });
+});

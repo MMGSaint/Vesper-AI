@@ -18,9 +18,24 @@
 
 import { randomUUID } from "node:crypto";
 import type { ClientScope } from "../client/protocol.ts";
-import { CLIENT_SCOPES } from "../client/protocol.ts";
+import { CLIENT_SCOPES, RESTRICTED_COMPANION_SCOPES } from "../client/protocol.ts";
+import type { TrustState } from "./identity.ts";
 import { canonicalJson, safeEqual, verifySignature, type DeviceIdentity } from "./identity.ts";
 import type { DeviceRegistry } from "./registry.ts";
+
+/**
+ * The scopes a device of this trust class may actually exercise.
+ *
+ * Shared with the client session store's ceiling so the two cannot drift: a restricted
+ * device holds at most RESTRICTED_COMPANION_SCOPES however it authenticated, and
+ * whatever it was granted while it was still trusted.
+ */
+function capScopesForTrust(scopes: ClientScope[], trust: TrustState): ClientScope[] {
+  if (trust !== "restricted") return scopes;
+  const ceiling = new Set<ClientScope>(RESTRICTED_COMPANION_SCOPES);
+  return scopes.filter((scope) => ceiling.has(scope));
+}
+
 
 export const SESSION_GRANT_VERSION = 1 as const;
 
@@ -115,9 +130,15 @@ export class ReplayGuard {
     }
     if (this.seen.has(nonce)) return false;
     if (this.seen.size >= this.max) {
-      // Drop the oldest rather than refuse service; entries are expiring anyway.
-      const oldest = [...this.seen.entries()].sort((a, b) => a[1] - b[1])[0];
-      if (oldest) this.seen.delete(oldest[0]);
+      // Refuse rather than forget. The expired entries were already dropped above, so
+      // everything still here belongs to a grant that has not expired — and grants live
+      // up to twelve hours. Evicting one to make room did not merely lose a record, it
+      // re-opened replay of a nonce that had genuinely been spent, and an attacker could
+      // cause exactly that by flooding the guard with grants of their own.
+      //
+      // Failing closed here costs availability under pressure, which is the right way
+      // round for a control whose entire purpose is to remember what was already used.
+      return false;
     }
     this.seen.set(nonce, expiresAtMs);
     return true;
@@ -183,8 +204,22 @@ export async function verifySessionGrant(input: VerifyInput): Promise<GrantVerdi
     return fail("DEVICE_UNTRUSTED", `Device ${grant.deviceId} is '${holder.trust}'.`);
   }
 
-  if (input.requiredScope && !grant.scopes.includes(input.requiredScope)) {
-    return fail("SCOPE_DENIED", `The grant does not carry the '${input.requiredScope}' scope.`);
+  // Cap by live trust, exactly as the client session store does.
+  //
+  // Two authorization models owned the same question and only one applied the ceiling:
+  // a grant minted while a device was trusted kept every scope it was signed with, so a
+  // device demoted to `restricted` — the portable class, on a host nobody can vouch for
+  // — went on holding memory.write and operator.confirm until the grant expired. Trust
+  // is re-read here already; the scopes have to be re-read with it, or the demotion is
+  // only half applied.
+  const effectiveScopes = capScopesForTrust(grant.scopes, holder.trust);
+  if (input.requiredScope && !effectiveScopes.includes(input.requiredScope)) {
+    return fail(
+      "SCOPE_DENIED",
+      grant.scopes.includes(input.requiredScope)
+        ? `A '${holder.trust}' device may not exercise the '${input.requiredScope}' scope.`
+        : `The grant does not carry the '${input.requiredScope}' scope.`,
+    );
   }
 
   if (!input.replay.admit(grant.nonce, expiresAtMs, nowMs)) {
@@ -195,7 +230,7 @@ export async function verifySessionGrant(input: VerifyInput): Promise<GrantVerdi
     ok: true,
     reason: "OK",
     detail: `Accepted session ${grant.sessionId} for ${holder.trust} device ${grant.deviceId}.`,
-    grant,
+    grant: { ...grant, scopes: effectiveScopes },
   };
 }
 
