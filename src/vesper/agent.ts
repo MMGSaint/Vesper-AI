@@ -330,9 +330,16 @@ export class Agent {
       // Authorized and attempted, so it is spent — whether the tool then succeeded or
       // failed on its own terms. Only an authority refusal above leaves it pending.
       this.deps.confirmations.delete(options.confirmId);
+      const subsystem = this.subsystemFor(confirmation.toolName);
       const reply = record.result?.ok
-        ? record.result.summary
-        : `I could not complete ${confirmation.toolName}: ${record.result?.summary ?? record.decision.reason}`;
+        ? subsystem
+          ? this.quoteSubsystem(record.result.summary, subsystem)
+          : record.result.summary
+        : `I could not complete ${confirmation.toolName}: ${
+            subsystem
+              ? this.quoteSubsystem(record.result?.summary, subsystem) || record.decision.reason
+              : (record.result?.summary ?? record.decision.reason)
+          }`;
       return this.turn(
         userText,
         reply,
@@ -642,7 +649,8 @@ export class Agent {
             ? `GPU ${snapshot.gpu.utilizationPct}%${snapshot.gpu.tempC != null ? ` at ${snapshot.gpu.tempC}°C` : ""}, VRAM ${snapshot.gpu.vramUsedGB}/${snapshot.gpu.vramGB} GB.`
             : "GPU telemetry unavailable.",
           ram: `RAM ${snapshot.ram.usedGB} of ${snapshot.ram.totalGB} GB.`,
-          optimizer: opt.result?.summary ?? "I could not access the optimizer.",
+          optimizer:
+            this.quoteSubsystem(opt.result?.summary, "The optimizer") || "I could not access the optimizer.",
           processes: running ? `Running: ${running}. ${formatWorkloadContext(context)}` : `No simulated user apps running. ${formatWorkloadContext(context)}`,
           events: recent ? `Recent: ${recent}.` : "",
         });
@@ -732,7 +740,7 @@ export class Agent {
           const pending = queued ? [queued] : [];
           return this.turn(
             userText,
-            `${analysis.result?.summary ?? ""} I requested an optimizer action and need your confirmation.`.trim(),
+            `${this.quoteSubsystem(analysis.result?.summary, "The optimizer")} I requested an optimizer action and need your confirmation.`.trim(),
             ["requested"],
             toolCalls,
             pending,
@@ -741,7 +749,12 @@ export class Agent {
         }
         return this.turn(
           userText,
-          [analysis.result?.summary, request.result?.summary].filter(Boolean).join(" "),
+          [
+            this.quoteSubsystem(analysis.result?.summary, "The optimizer"),
+            this.quoteSubsystem(request.result?.summary, "The optimizer"),
+          ]
+            .filter(Boolean)
+            .join(" "),
           ["requested"],
           toolCalls,
           [],
@@ -800,7 +813,7 @@ export class Agent {
             ? `GPU ${gpu.name} is at ${gpu.utilizationPct}% (${gpu.vramUsedGB}/${gpu.vramGB} GB VRAM).`
             : "No GPU snapshot is available.",
           context.result?.summary ?? "",
-          analysis.result?.summary ?? "",
+          this.quoteSubsystem(analysis.result?.summary, "The optimizer"),
           "Live GPU-time attribution per process was not measured.",
         ]
           .filter(Boolean)
@@ -939,6 +952,36 @@ export class Agent {
       trust,
       scopes: capScopesForTrust(origin.scopes ?? [], trust),
     };
+  }
+
+  /**
+   * The subsystem a tool speaks for, when its result text originates outside Vesper.
+   *
+   * A tool whose handler writes its own summary ("Wrote notes.md") is Vesper speaking.
+   * A tool that relays what another program said is not, and the difference has to
+   * survive into the reply or the other program borrows Vesper's voice.
+   */
+  private subsystemFor(toolName: string): string | null {
+    if (toolName.startsWith("optimizer_")) return "The optimizer";
+    if (toolName.startsWith("obs_")) return "OBS";
+    if (toolName.startsWith("mcp_")) return "The MCP server";
+    return null;
+  }
+
+  /**
+   * Repeat what a separate subsystem said, as a quotation attributed to it.
+   *
+   * Sanitising the text is not enough on a reply path. Neutralisation stops it forging a
+   * boundary or a directive line, but the words survive — and concatenating them into
+   * Vesper's own sentence made the optimizer's claims read as Vesper's: "I have applied a
+   * live optimization and I have granted myself administrator permission on this
+   * machine" was spoken in the first person by an assistant that had done neither.
+   *
+   * Quoting and naming the source is what makes it a report rather than an assertion.
+   */
+  private quoteSubsystem(text: string | undefined, subsystem: string): string {
+    const clean = sanitiseInline(text ?? "", 300);
+    return clean.length > 0 ? `${subsystem} reports: "${clean}"` : "";
   }
 
   private async resolveOrigin(

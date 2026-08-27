@@ -68,10 +68,14 @@ export interface RuntimeOptions {
   providers?: Parameters<typeof createModelRouter>[0]["providers"];
   skipDiscovery?: boolean;
   /**
-   * Where the device keypair lives. Absent (as in tests) the identity is kept in the
-   * storage adapter instead, so a test never writes a key to the developer's disk.
+   * Where Vesper's own files live.
+   *
+   * `data` is where the device keypair goes; absent (as in tests) the identity is kept
+   * in the storage adapter instead, so a test never writes a key to the developer's
+   * disk. The rest are declared so Vesper's own tools and indexer refuse them — the
+   * config file and the audit log are Vesper's business, not documents.
    */
-  dirs?: { data: string };
+  dirs?: { data: string; config?: string; logs?: string; models?: string; root?: string };
   /** How much the machine underneath is trusted. Portable sessions pass `foreign`. */
   hostPosture?: HostPosture;
 }
@@ -574,7 +578,17 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   }
   const storage = options.storage ?? new MemoryStorage();
   // Declare where Vesper's own files live before anything can be asked to read them.
-  registerOwnPaths([options.dirs?.data]);
+  // Every directory Vesper owns, not just the data one. paths.ts puts config, logs and
+  // models in *sibling* directories of data, so registering data alone left the config
+  // file and the audit log readable by an autonomous fs_read — the audit log being the
+  // record of what Vesper has been asked to do.
+  registerOwnPaths([
+    options.dirs?.data,
+    options.dirs?.config,
+    options.dirs?.logs,
+    options.dirs?.models,
+    options.dirs?.root,
+  ]);
 
   // Device identity, the registry, and the task queue are constructed before anything
   // that might want to know which machine this is.

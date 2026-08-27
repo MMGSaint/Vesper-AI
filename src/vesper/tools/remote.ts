@@ -52,6 +52,14 @@ export const HOST_ONLY_TOOLS: readonly string[] = [
   "knowledge_register",
   "knowledge_remove",
   "knowledge_reindex",
+  // `notify` writes into the owner's notification hub, and the only scope that named it
+  // — `notifications` — is a *read* scope whose own gateway method returns recent items
+  // and which every default companion holds. Mapping a write to a read scope made a
+  // phishing primitive out of a default grant: a companion could plant a `system`-kind
+  // notification in the owner's hub, in Vesper's voice, saying whatever it liked. There
+  // is no notifications.write scope to map it to, and inventing one would hand the same
+  // capability out under a new name.
+  "notify",
 ];
 
 /**
@@ -88,7 +96,6 @@ const TOOL_SCOPE: Readonly<Record<string, ClientScope>> = {
   memory_remember: "memory.write",
   memory_forget: "memory.write",
   knowledge_search: "knowledge.read",
-  notify: "notifications",
 };
 
 export function scopeForTool(toolName: string): ClientScope | null {

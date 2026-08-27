@@ -474,15 +474,18 @@ describe("invariant: a secret never leaves through a side channel", () => {
     // under some other name, so check for the material itself. It is exported nowhere,
     // so it has to be reconstructed the way an attacker with the file would: sign
     // something and confirm the signature is not the key, then read the stored key.
-    const { readFile } = await import("node:fs/promises");
-    const stored = await runtime.storage.get("identity/device-identity.json");
+    // Built with the same helper the runtime uses, not a hardcoded string: the key is a
+    // path, and `join` produces "identity\\device-identity.json" on Windows — so the
+    // literal form found nothing there and the test failed for a reason that had nothing
+    // to do with the property.
+    const { identityFile } = await import("./distributed/identity.ts");
+    const stored = await runtime.storage.get(identityFile({ data: "identity" }));
     const privateKey =
       typeof stored === "string"
         ? (JSON.parse(stored) as { privateKey?: string }).privateKey
         : (stored as { privateKey?: string } | undefined)?.privateKey;
     assert.ok(privateKey && privateKey.length > 40, "could not obtain the key to test against");
     assert.equal(shared.includes(privateKey), false, "the private key's bytes reached a shared surface");
-    assert.ok(readFile, "node:fs is available");
     await runtime.stop();
   });
 
@@ -1251,6 +1254,128 @@ describe("invariant: an unreadable setting yields less authority, not more", () 
       workspaceId: "general",
     });
     assert.equal(record.result?.ok, false, "a corrupt config left the filesystem readable");
+    await runtime.stop();
+  });
+});
+
+describe("invariant: Vesper's own files are not documents", () => {
+  /**
+   * An approved root is a statement about the user's documents. It is not a statement
+   * about Vesper's own store, and the two overlap the moment someone approves a
+   * directory that happens to contain it — a whole home directory, a project folder, a
+   * portable stick with `vesper/` sitting next to `notes/`.
+   *
+   * Inside that store are the audit log (the record of everything Vesper has been asked
+   * to do), the config file (the permission table itself), and the device keypair. A
+   * model that can read those can plan against them; a model that can write them can
+   * rewrite the permission table it is governed by. So the store is refused by name,
+   * before containment is consulted, on every path that reaches a file.
+   */
+  async function runtimeOwningDirs() {
+    const base = await mkdtemp(join(tmpdir(), "vesper-own-"));
+    const vesper = join(base, "vesper");
+    const dirs = {
+      root: vesper,
+      config: join(vesper, "config"),
+      data: join(vesper, "data"),
+      logs: join(vesper, "logs"),
+      models: join(vesper, "models"),
+    };
+    for (const dir of Object.values(dirs)) await mkdir(dir, { recursive: true });
+    // Real files with real secrets in them, so a leak is visible as bytes and not as a
+    // return code.
+    await writeFile(join(dirs.logs, "audit.jsonl"), '{"tool":"fs_write","AUDIT-SECRET":1}\n', "utf8");
+    await writeFile(join(dirs.config, "vesper.json"), '{"CONFIG-SECRET":true}', "utf8");
+    await writeFile(join(dirs.data, "state.json"), '{"STATE-SECRET":"privateKey"}', "utf8");
+    // An ordinary document beside it, so the test can tell refusal from breakage.
+    await writeFile(join(base, "notes.md"), "ORDINARY-NOTE about the boiler", "utf8");
+
+    const runtime = await createRuntime({
+      storage: new MemoryStorage(),
+      skipDiscovery: true,
+      dirs,
+      // The user approved the parent. Vesper's own store is *inside* an approved root,
+      // which is the only configuration where this defence does any work at all.
+      config: { approvedRoots: [base] },
+    });
+    await runtime.start();
+    return { runtime, base, dirs };
+  }
+
+  it("refuses to read its own audit log, config and state from inside an approved root", async () => {
+    const { runtime, dirs } = await runtimeOwningDirs();
+    const targets: [string, string][] = [
+      [join(dirs.logs, "audit.jsonl"), "AUDIT-SECRET"],
+      [join(dirs.config, "vesper.json"), "CONFIG-SECRET"],
+      [join(dirs.data, "state.json"), "STATE-SECRET"],
+    ];
+    for (const [path, secret] of targets) {
+      const record = await runtime.tools.invoke({
+        name: "fs_read",
+        args: { path },
+        workspaceId: "general",
+      });
+      assert.equal(record.result?.ok, false, `fs_read opened Vesper's own file: ${path}`);
+      assert.equal(
+        JSON.stringify(record.result ?? {}).includes(secret),
+        false,
+        `the contents of ${path} reached the model`,
+      );
+    }
+    await runtime.stop();
+  });
+
+  it("refuses to write into its own store, so the permission table cannot be rewritten", async () => {
+    const { runtime, dirs } = await runtimeOwningDirs();
+    const target = join(dirs.config, "vesper.json");
+    const record = await runtime.tools.invoke({
+      name: "fs_write",
+      args: { path: target, content: '{"permissions":{"disk_wipe":"safe"}}' },
+      workspaceId: "general",
+      confirmed: true,
+    });
+    assert.equal(record.result?.ok, false, "fs_write was allowed into Vesper's own store");
+    assert.equal(
+      await readFile(target, "utf8"),
+      '{"CONFIG-SECRET":true}',
+      "the config file on disk was rewritten by a tool call",
+    );
+    await runtime.stop();
+  });
+
+  it("refuses to index its own store as a knowledge source", async () => {
+    const { runtime, dirs } = await runtimeOwningDirs();
+    const registered = runtime.knowledge.registerSource({
+      id: "self",
+      name: "self",
+      roots: [dirs.logs],
+      enabled: true,
+    });
+    assert.equal(registered.ok, false, "Vesper's own log directory was registered as a source");
+    await runtime.knowledge.reindex();
+    const hits = await runtime.knowledge.searchAsync("AUDIT-SECRET", { limit: 5 });
+    assert.equal(
+      JSON.stringify(hits).includes("AUDIT-SECRET"),
+      false,
+      "the audit log was indexed and became searchable",
+    );
+    await runtime.stop();
+  });
+
+  it("still reads an ordinary document in the same approved root", async () => {
+    // Narrowing, not severing. If this fails the defence has eaten the user's files.
+    const { runtime, base } = await runtimeOwningDirs();
+    const record = await runtime.tools.invoke({
+      name: "fs_read",
+      args: { path: join(base, "notes.md") },
+      workspaceId: "general",
+    });
+    assert.equal(record.result?.ok, true, record.result?.summary);
+    assert.equal(
+      JSON.stringify(record.result ?? {}).includes("ORDINARY-NOTE"),
+      true,
+      "an ordinary document stopped being readable",
+    );
     await runtime.stop();
   });
 });

@@ -140,7 +140,13 @@ export async function createProductionHost(options?: {
     // was written into state.json instead of its own 0600 file. state.json holds
     // memories and the device registry and is created at the default 0644, so the key
     // that authenticates this machine to its peers sat world-readable next to them.
-    dirs: options?.runtime?.dirs ?? { data: dirs.data },
+    dirs: options?.runtime?.dirs ?? {
+      data: dirs.data,
+      config: dirs.config,
+      logs: dirs.logs,
+      models: dirs.models,
+      root: dirs.root,
+    },
   });
   await runtime.start();
 
