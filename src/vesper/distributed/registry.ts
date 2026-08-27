@@ -220,10 +220,18 @@ export class DeviceRegistry {
       await this.load();
       const record = this.records.get(deviceId);
       if (!record) return { ok: false, reason: `No device ${deviceId} is enrolled.` };
-      if (record.trust === "revoked" && trust === "trusted") {
+      // Revoked is absorbing: no transition leaves it, not just the one to `trusted`.
+      //
+      // Guarding only the direct edge left a two-hop laundering path — revoked ->
+      // restricted -> trusted, or via `pending` — that fully restored a device the owner
+      // had declared lost, sessions and all, while `revokedAt` sat on the record proving
+      // it had been revoked. A terminal state that can be left through an intermediate
+      // is not terminal; the guard has to be on leaving the state, not on the
+      // destination. `forget` remains the one deliberate way back.
+      if (record.trust === "revoked" && trust !== "revoked") {
         return {
           ok: false,
-          reason: `Device ${deviceId} is revoked. Re-trusting requires removing and re-enrolling it deliberately.`,
+          reason: `Device ${deviceId} is revoked. Restoring it requires removing and re-enrolling it deliberately.`,
         };
       }
       record.trust = trust;

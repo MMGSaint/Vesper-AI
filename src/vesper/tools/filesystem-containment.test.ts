@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, symlink, link, readFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, symlink, link, readFile, stat, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listApproved, readApproved, writeApproved } from "./filesystem.ts";
@@ -199,5 +199,88 @@ describe("containment narrows without severing", () => {
     const result = await writeApproved(roots, join(approved, "once.txt"), "second");
     assert.equal(result.ok, true, result.summary);
     assert.equal(await contains(join(approved, "once.txt"), "second"), true);
+  });
+});
+
+describe("a knowledge source cannot index outside the approved roots", () => {
+  it("refuses a symlinked directory as a source root", async () => {
+    // The containment check compared lexical paths, so a link sitting inside the
+    // approved root read as satisfied while the indexer read everything it pointed at.
+    const { approved, outside, base } = await sandbox();
+    await writeFile(join(outside, "secret.md"), "KNOWLEDGE-SECRET", "utf8");
+    await symlink(outside, join(approved, "link-dir"));
+
+    const runtime = await testRuntime({ config: { approvedRoots: [approved] } });
+    const registered = runtime.knowledge.registerSource({
+      id: "pwn",
+      name: "pwn",
+      roots: [join(approved, "link-dir")],
+      enabled: true,
+    });
+    assert.equal(registered.ok, false, "a symlinked root was registered");
+
+    await runtime.knowledge.reindex();
+    const hits = await runtime.knowledge.searchAsync("KNOWLEDGE-SECRET", { limit: 5 });
+    assert.equal(
+      JSON.stringify(hits).includes("KNOWLEDGE-SECRET"),
+      false,
+      "the index exposed a file outside the approved roots",
+    );
+    await runtime.stop();
+    assert.ok(base.length > 0);
+  });
+
+  it("skips a root that becomes a symlink after it was registered", async () => {
+    // Registration and indexing are separated by time, so a root approved as a real
+    // directory can be a link by the time it is read. This is caught by the walker's own
+    // per-entry containment rather than by the registration fix — asserted here because
+    // it is a property worth holding, not because this change introduced it.
+    const { approved, outside } = await sandbox();
+    await writeFile(join(outside, "secret.md"), "KNOWLEDGE-SECRET", "utf8");
+    const realDir = join(approved, "docs");
+    await mkdir(realDir, { recursive: true });
+    await writeFile(join(realDir, "ok.md"), "ordinary notes", "utf8");
+
+    const runtime = await testRuntime({ config: { approvedRoots: [approved] } });
+    const registered = runtime.knowledge.registerSource({
+      id: "docs",
+      name: "docs",
+      roots: [realDir],
+      enabled: true,
+    });
+    assert.equal(registered.ok, true, registered.summary);
+
+    // The directory is swapped for a link to somewhere else entirely.
+    await rm(realDir, { recursive: true, force: true });
+    await symlink(outside, realDir);
+
+    await runtime.knowledge.reindex();
+    const hits = await runtime.knowledge.searchAsync("KNOWLEDGE-SECRET", { limit: 5 });
+    assert.equal(
+      JSON.stringify(hits).includes("KNOWLEDGE-SECRET"),
+      false,
+      "a root swapped for a symlink after registration was still indexed",
+    );
+    await runtime.stop();
+  });
+
+  it("still registers and indexes an ordinary directory", async () => {
+    const { approved } = await sandbox();
+    const docs = join(approved, "docs");
+    await mkdir(docs, { recursive: true });
+    await writeFile(join(docs, "notes.md"), "capture card settings for streaming", "utf8");
+
+    const runtime = await testRuntime({ config: { approvedRoots: [approved] } });
+    const registered = runtime.knowledge.registerSource({
+      id: "docs",
+      name: "docs",
+      roots: [docs],
+      enabled: true,
+    });
+    assert.equal(registered.ok, true, registered.summary);
+    await runtime.knowledge.reindex();
+    const hits = await runtime.knowledge.searchAsync("capture card settings", { limit: 5 });
+    assert.ok(hits.length > 0, "an ordinary knowledge root stopped being indexed");
+    await runtime.stop();
   });
 });

@@ -147,3 +147,58 @@ describe("a restricted device is capped by trust, not by a separate protocol", (
     assert.ok(after.includes("conversation"));
   });
 });
+
+describe("revocation is terminal, not merely guarded on one edge", () => {
+  it("refuses every transition out of revoked, not just the one to trusted", async () => {
+    // The direct edge revoked -> trusted was refused, and re-enrolment was refused, but
+    // revoked -> restricted -> trusted restored a device the owner had declared lost —
+    // sessions, scopes and all — while revokedAt sat on the record proving it had been
+    // revoked. A terminal state that can be left through an intermediate is not terminal.
+    for (const intermediate of ["restricted", "pending"] as const) {
+      const runtime = await testRuntime();
+      const phone = await peer("phone");
+      await runtime.devices.enrol(phone.publicIdentity());
+      await runtime.devices.setTrust(phone.deviceId, "trusted");
+      await runtime.devices.setTrust(phone.deviceId, "revoked");
+
+      const hop = await runtime.devices.setTrust(phone.deviceId, intermediate);
+      assert.equal(hop.ok, false, `revoked -> ${intermediate} was allowed`);
+
+      const restore = await runtime.devices.setTrust(phone.deviceId, "trusted");
+      assert.equal(restore.ok, false, `revoked -> ${intermediate} -> trusted restored the device`);
+
+      const record = await runtime.devices.get(phone.deviceId);
+      assert.equal(record?.trust, "revoked", "the device left the revoked state");
+      await runtime.stop();
+    }
+  });
+
+  it("a revoked device cannot open a session by any route", async () => {
+    const runtime = await testRuntime();
+    const gateway = new VesperClientGateway(runtime);
+    const phone = await peer("phone");
+    await runtime.devices.enrol(phone.publicIdentity());
+    await runtime.devices.setTrust(phone.deviceId, "trusted");
+    await runtime.devices.setTrust(phone.deviceId, "revoked");
+    await runtime.devices.setTrust(phone.deviceId, "restricted");
+
+    const session = await gateway.issueSession({ deviceId: phone.deviceId, deviceLabel: "phone" });
+    assert.ok("ok" in session && session.ok === false, "a revoked device opened a session");
+    await runtime.stop();
+  });
+
+  it("still allows forgetting a revoked device, the one deliberate way back", async () => {
+    // The control must narrow, not sever: revocation has to be undoable by an explicit
+    // act at the machine, or a mistyped device id is permanent.
+    const runtime = await testRuntime();
+    const phone = await peer("phone");
+    await runtime.devices.enrol(phone.publicIdentity());
+    await runtime.devices.setTrust(phone.deviceId, "revoked");
+
+    assert.equal(await runtime.devices.forget(phone.deviceId), true);
+    const reEnrolled = await runtime.devices.enrol(phone.publicIdentity());
+    assert.equal(reEnrolled.ok, true, "a forgotten device could not re-enrol");
+    assert.equal((await runtime.devices.get(phone.deviceId))?.trust, "pending");
+    await runtime.stop();
+  });
+});

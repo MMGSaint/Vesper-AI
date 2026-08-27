@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
 import type { KnowledgeHit, KnowledgeSource } from "../types.ts";
@@ -15,6 +16,22 @@ import {
 } from "./embeddings.ts";
 import { excludesDirectory, includesFile, normalizeRelPath } from "./glob.ts";
 import { bm25, buildLexicalIndex, tokenize, type LexicalIndex } from "./lexical.ts";
+
+/**
+ * The real path of a directory, or null when it cannot be resolved.
+ *
+ * Used everywhere a knowledge root is checked. A root that does not resolve — because it
+ * does not exist, or is a dangling link — is treated as outside the approved set rather
+ * than as "probably fine": a path we cannot resolve is a path we cannot confine.
+ */
+function realPathOrNull(target: string): string | null {
+  try {
+    return realpathSync.native(resolve(target));
+  } catch {
+    return null;
+  }
+}
+
 
 const TEXT_EXT = new Set([".md", ".txt", ".json", ".ts", ".js", ".cs", ".yml", ".yaml"]);
 
@@ -155,9 +172,18 @@ export class KnowledgeIndex {
       return { ok: false, summary: "Refused to register a dangerous or traversing knowledge root." };
     }
     if (this.approvedRoots.length) {
-      const allowed = source.roots.every((root) =>
-        this.approvedRoots.some((item) => isPathInside(item, resolve(root))),
-      );
+      // Compare *real* paths. A lexical check accepts a symlinked directory sitting
+      // inside an approved root, and the indexer then reads and exposes everything the
+      // link points at — the containment reads as satisfied while the files come from
+      // somewhere the user never approved.
+      const allowed = source.roots.every((root) => {
+        const real = realPathOrNull(root);
+        if (real === null) return false;
+        return this.approvedRoots.some((item) => {
+          const realApproved = realPathOrNull(item) ?? resolve(item);
+          return isPathInside(realApproved, real);
+        });
+      });
       if (!allowed) {
         return { ok: false, summary: "Knowledge roots must stay inside approved directories." };
       }
@@ -211,9 +237,14 @@ export class KnowledgeIndex {
     let filesReused = 0;
     for (const source of this.sources.filter((item) => item.enabled)) {
       for (const root of source.roots) {
+        // Walk the resolved root, so cache keys and relative paths stay stable when a
+        // root is itself a link. Containment of what is *read* is `walk`'s own per-entry
+        // check against approvedRoots — an explicit skip here was tried and removed, as
+        // no test could distinguish it from walk already doing the work.
+        const realRoot = realPathOrNull(root) ?? resolve(root);
         const files: WalkedFile[] = [];
-        await walk(root, files, this.approvedRoots, {
-          base: resolve(root),
+        await walk(realRoot, files, this.approvedRoots, {
+          base: realRoot,
           include: source.include,
           exclude: source.exclude,
         });
@@ -221,7 +252,7 @@ export class KnowledgeIndex {
         // dense vectors are addressed by document index.
         files.sort((a, b) => a.path.localeCompare(b.path));
         for (const file of files) {
-          const cacheKey = cacheKeyFor(source.id, root, file.path);
+          const cacheKey = cacheKeyFor(source.id, realRoot, file.path);
           seen.add(cacheKey);
           const cached = this.fileCache.get(cacheKey);
           if (cached && cached.mtimeMs === file.mtimeMs && cached.size === file.size) {
@@ -231,7 +262,7 @@ export class KnowledgeIndex {
           }
           try {
             const text = await readFile(file.path, "utf8");
-            const rel = relative(root, file.path) || file.path;
+            const rel = relative(realRoot, file.path) || file.path;
             const title = file.path.split(/[\\/]/).at(-1) ?? file.path;
             const built = chunkText(text).map((chunk) => ({
               sourceId: source.id,
