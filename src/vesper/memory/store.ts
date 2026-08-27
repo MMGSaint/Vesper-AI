@@ -1,7 +1,7 @@
 import { createId, nowIso } from "../id.ts";
 import type { StorageAdapter } from "../storage.ts";
 import type { JsonValue, MemoryCategory, MemoryEntry, MemoryScopeLevel } from "../types.ts";
-import { defaultScopeFor, isSyncable } from "./scopes.ts";
+import { defaultScopeFor, isPersistable, isSyncable, isVisibleFrom } from "./scopes.ts";
 import { prepareQuery, scoreMemory } from "./retrieval.ts";
 import { coerceMemoryEntry } from "./sanitize.ts";
 
@@ -159,7 +159,9 @@ export class MemoryStore {
               deviceId: input.deviceId,
             }));
       // Session memory is the one scope that never reaches disk.
-      const session = scopeLevel === "session";
+      // The shared rule, not a local copy of it: a second opinion here is how the
+      // store and the sync engine drift apart.
+      const session = !isPersistable(scopeLevel);
       const pool = session ? this.sessionEntries : await this.loadPersistent();
       const existing = pool.find(
         (entry) =>
@@ -223,10 +225,10 @@ export class MemoryStore {
     const inScope = entries.filter((entry) => {
       if (options?.category && entry.category !== options.category) return false;
       if (options?.scope === "all") return true;
-      if (options?.workspaceId && entry.workspaceId && entry.workspaceId !== options.workspaceId) {
-        return false;
-      }
-      return true;
+      // The shared rule decides visibility. Filtering on workspaceId alone is
+      // scope-blind: it hid user-scoped facts — which exist precisely to follow the
+      // person across workspaces — because of the workspace they were recorded in.
+      return isVisibleFrom(entry, { workspaceId: options?.workspaceId });
     });
     const prepared = prepareQuery(query, { workspaceId: options?.workspaceId });
     const ranked = prepared

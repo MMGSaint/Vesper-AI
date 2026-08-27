@@ -680,6 +680,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     confirmations,
     history,
     maxToolIterations: config.agent.maxToolIterations,
+    deviceId: deviceIdentity.deviceId,
     describeNow: async () => {
       const [records, tasks] = await Promise.all([devices.list(), taskQueue.list()]);
       const self =

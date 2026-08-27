@@ -1,6 +1,7 @@
 import { createId, nowIso } from "./id.ts";
 import type { Logger } from "./logging.ts";
 import type { MemoryStore } from "./memory/store.ts";
+import { attribute } from "./memory/scopes.ts";
 import type { KnowledgeIndex } from "./knowledge/rag.ts";
 import type { ModelRouter } from "./models/router.ts";
 import type { NotificationHub } from "./notifications.ts";
@@ -38,6 +39,12 @@ interface AgentDeps {
    * dependency on the registry, the task queue, and presence separately.
    */
   describeNow?: () => Promise<string> | string;
+  /**
+   * This machine's device id, used to attribute device-scoped memory. Optional because
+   * a Vesper that cannot identify itself must still run locally — it simply declines to
+   * claim which device a fact belongs to rather than guessing.
+   */
+  deviceId?: string;
   models: ModelRouter;
   tools: ToolRegistry;
   workspaces: WorkspaceManager;
@@ -317,7 +324,12 @@ export class Agent {
       memories.length
         ? `Relevant memory:\n${
             this.screenUntrusted(
-              memories.map((entry) => `- [${entry.category}] ${entry.key}: ${entry.value}`).join("\n"),
+              memories
+                .map(
+                  (entry) =>
+                    `- [${entry.category}] ${entry.key}: ${attribute(entry, { deviceId: this.deps.deviceId })}`,
+                )
+                .join("\n"),
               { source: "memory", origin: `${memories.length} stored memor(y|ies)` },
               { maxChars: MAX_RETRIEVAL_CHARS },
             )
