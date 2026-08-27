@@ -265,3 +265,108 @@ describe("the bearer token is the only authenticator, so it is compared exactly"
     await second.runtime.stop();
   });
 });
+
+describe("revocation outlives the file the registry lives in", () => {
+  /**
+   * Revocation is documented as terminal — `forget` is the one deliberate way back — but
+   * that guarantee lived entirely in one record, inside one value, inside one file. A
+   * corrupt or unreadable `devices.registry` cost the *record*, and `enrol` then had
+   * nothing to refuse: a device the owner had declared lost re-enrolled as `pending` and
+   * could be trusted again.
+   *
+   * No attacker is required to trigger it — a truncated write or a full disk does — but
+   * an attacker who can cause one gets a revoked device back. An I/O error is not an
+   * authorization decision, so the revocation list is a separate store that the registry
+   * consults before its own records.
+   */
+  async function revokedDeviceAcross(options: { shareStorage: boolean }) {
+    const { MemoryStorage } = await import("../storage.ts");
+    const { DeviceRegistry } = await import("../distributed/registry.ts");
+    const registryStore = new MemoryStorage();
+    const revocationStore = options.shareStorage ? registryStore : new MemoryStorage();
+    const self = (await peer("host")).publicIdentity();
+    const phone = (await peer("phone")).publicIdentity();
+
+    const first = new DeviceRegistry({
+      storage: registryStore,
+      revocations: revocationStore,
+      self,
+    });
+    await first.enrol(phone);
+    await first.setTrust(phone.deviceId, "trusted");
+    const revoked = await first.setTrust(phone.deviceId, "revoked");
+    assert.equal(revoked.ok, true, revoked.reason);
+
+    // The registry's own store is destroyed, exactly as a truncated state file does.
+    await registryStore.set("devices.registry", "not-an-array" as never);
+
+    const second = new DeviceRegistry({
+      storage: registryStore,
+      revocations: revocationStore,
+      self,
+    });
+    return { second, phone };
+  }
+
+  it("refuses to re-enrol a revoked device after its registry record is destroyed", async () => {
+    const { second, phone } = await revokedDeviceAcross({ shareStorage: false });
+    assert.equal(
+      (await second.get(phone.deviceId))?.trust,
+      undefined,
+      "the record survived, so this does not test what it claims",
+    );
+    const again = await second.enrol(phone);
+    assert.equal(again.ok, false, "a revoked device re-enrolled after its record was lost");
+    assert.match(again.reason ?? "", /revoked and cannot re-enrol/);
+  });
+
+  it("cannot be trusted back into service either", async () => {
+    const { second, phone } = await revokedDeviceAcross({ shareStorage: false });
+    await second.enrol(phone);
+    const promoted = await second.setTrust(phone.deviceId, "trusted");
+    assert.equal(promoted.ok, false, "a revoked device was promoted after a registry loss");
+  });
+
+  it("still lets forget be the one deliberate way back, even with no record left", async () => {
+    // Narrowing, not severing. `forget` has to work on the state a corrupt registry
+    // leaves behind, which is a revocation entry with no record beside it.
+    const { second, phone } = await revokedDeviceAcross({ shareStorage: false });
+    assert.equal(await second.forget(phone.deviceId), true, "forget found nothing to do");
+    const back = await second.enrol(phone);
+    assert.equal(back.ok, true, `a forgotten device could not re-enrol: ${back.reason}`);
+    assert.equal(back.record?.trust, "pending", "it came back as something other than pending");
+  });
+
+  it("re-applies the revocation to a record that survived as trusted", async () => {
+    // The other direction: a state file restored from a backup taken before the
+    // revocation, or written mid-revoke. The list wins over the record.
+    const { MemoryStorage } = await import("../storage.ts");
+    const { DeviceRegistry } = await import("../distributed/registry.ts");
+    const registryStore = new MemoryStorage();
+    const revocationStore = new MemoryStorage();
+    const self = (await peer("host")).publicIdentity();
+    const phone = (await peer("phone")).publicIdentity();
+
+    const first = new DeviceRegistry({ storage: registryStore, revocations: revocationStore, self });
+    await first.enrol(phone);
+    await first.setTrust(phone.deviceId, "trusted");
+    await first.setTrust(phone.deviceId, "revoked");
+
+    // The registry is rolled back to a moment when the device was still trusted.
+    const stale = [
+      {
+        identity: phone,
+        trust: "trusted",
+        presence: { reachability: "offline", activity: "unknown", lastSeen: null },
+        capabilities: null,
+        enrolledAt: new Date().toISOString(),
+        revokedAt: null,
+      },
+    ];
+    await registryStore.set("devices.registry", stale as never);
+
+    const second = new DeviceRegistry({ storage: registryStore, revocations: revocationStore, self });
+    const record = await second.get(phone.deviceId);
+    assert.equal(record?.trust, "revoked", "a rolled-back registry restored a revoked device");
+  });
+});

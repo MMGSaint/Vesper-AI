@@ -14,6 +14,7 @@ import {
   lastErrorFile,
   resolveVesperDirs,
   stateFile,
+  revokedDevicesFile,
 } from "../paths.ts";
 import { runDoctor, formatDoctor, type DoctorReport } from "../doctor.ts";
 import type { VesperDirs } from "../types.ts";
@@ -132,10 +133,15 @@ export async function createProductionHost(options?: {
   }
 
   const storage = options?.runtime?.storage ?? new FileStorage(stateFile(dirs));
+  // Its own file, so a corrupt state.json cannot undo a revocation. See REVOKED_KEY in
+  // distributed/registry.ts.
+  const revocationStorage =
+    options?.runtime?.revocationStorage ?? new FileStorage(revokedDevicesFile(dirs));
   const runtime = await createRuntime({
     ...options?.runtime,
     config: options?.runtime?.config ?? loaded.config,
     storage,
+    revocationStorage,
     logger: log,
     // The real host has directories, so say so.
     //

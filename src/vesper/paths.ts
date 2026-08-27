@@ -54,6 +54,18 @@ export function configFile(dirs: VesperDirs): string {
   return join(dirs.config, "vesper.json");
 }
 
+/**
+ * The revocation list's own file.
+ *
+ * Deliberately not a key inside state.json. Revocation is documented as terminal, but
+ * that guarantee lived entirely in one record inside one value in one file: a truncated
+ * state.json cost the record, and losing the record let a device the owner had declared
+ * lost re-enrol. Two files fail independently; one does not.
+ */
+export function revokedDevicesFile(dirs: VesperDirs): string {
+  return join(dirs.data, "revoked-devices.json");
+}
+
 export function auditLogFile(dirs: VesperDirs): string {
   return join(dirs.logs, "audit.jsonl");
 }

@@ -22,6 +22,21 @@ import type { CapabilityManifest } from "./capabilities.ts";
 
 const KEY = "devices.registry";
 
+/**
+ * Revoked device ids, kept apart from the registry that holds them.
+ *
+ * Revocation is documented as terminal — `forget` is the one deliberate way back — but
+ * that guarantee lived entirely in one record inside one value in one file. A corrupt or
+ * unreadable `devices.registry` cost the *record*, and losing the record meant `enrol`
+ * had nothing to refuse: a device the owner had declared lost re-enrolled as `pending`
+ * and could be trusted again. An I/O error is not an authorization decision.
+ *
+ * So the list is separate, appended to rather than rewritten from the live map, and read
+ * independently. Losing one no longer undoes the other, and losing *both* is the case
+ * `forget` describes anyway. It holds ids and timestamps only: no keys, no labels.
+ */
+const REVOKED_KEY = "devices.revoked";
+
 export const REACHABILITY = ["online", "offline"] as const;
 export type Reachability = (typeof REACHABILITY)[number];
 
@@ -47,6 +62,13 @@ export interface DeviceRecord {
 
 export interface RegistryOptions {
   storage: StorageAdapter;
+  /**
+   * Where the revocation list lives, when it is to survive the loss of `storage`.
+   *
+   * Absent it falls back to `storage`, which is correct for an in-memory test but not
+   * for a real install: the two must be able to fail independently. See REVOKED_KEY.
+   */
+  revocations?: StorageAdapter;
   /** This device. It is trusted by construction; it is the one running the code. */
   self: PublicDeviceIdentity;
   now?: () => string;
@@ -80,11 +102,18 @@ export class DeviceRegistry {
   private readonly now: () => string;
   private readonly presenceTimeoutMs: number;
   private records = new Map<string, DeviceRecord>();
+  /** deviceId -> when it was revoked. Loaded from REVOKED_KEY, independent of `records`. */
+  private revoked = new Map<string, string>();
+  private readonly revocationStorage: StorageAdapter;
   private loaded = false;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(options: RegistryOptions) {
     this.storage = options.storage;
+    // Defaults to the same adapter, which keeps tests and any embedded use working. In
+    // production the host passes a *separate file*, which is the point: see
+    // REVOKED_KEY.
+    this.revocationStorage = options.revocations ?? options.storage;
     this.self = options.self;
     this.now = options.now ?? (() => new Date().toISOString());
     this.presenceTimeoutMs = options.presenceTimeoutMs ?? DEFAULT_PRESENCE_TIMEOUT_MS;
@@ -102,6 +131,7 @@ export class DeviceRegistry {
   private async load(): Promise<void> {
     if (this.loaded) return;
     this.loaded = true;
+    await this.loadRevoked();
     try {
       const raw = await this.storage.get(KEY);
       if (Array.isArray(raw)) {
@@ -129,6 +159,16 @@ export class DeviceRegistry {
       // A corrupt registry costs knowledge of peers, never the ability to run locally.
       this.records = new Map();
     }
+    // Whatever the registry said, the revocation list wins. A record that survived as
+    // `trusted` because the file was written mid-revoke, or one restored from a backup
+    // taken before the revocation, is corrected here rather than trusted.
+    for (const [deviceId, revokedAt] of this.revoked) {
+      const record = this.records.get(deviceId);
+      if (record && record.trust !== "revoked") {
+        record.trust = "revoked";
+        record.revokedAt = record.revokedAt ?? revokedAt;
+      }
+    }
     // This device is always present in its own registry, and always trusted: it is the
     // process making the decisions.
     if (!this.records.has(this.self.deviceId)) {
@@ -141,6 +181,36 @@ export class DeviceRegistry {
         revokedAt: null,
       });
     }
+  }
+
+  /**
+   * Read the revocation list. Never throws: an unreadable list is an empty one, and the
+   * registry's own `revoked` records still apply on top of it.
+   */
+  private async loadRevoked(): Promise<void> {
+    try {
+      const raw = await this.revocationStorage.get(REVOKED_KEY);
+      if (!Array.isArray(raw)) return;
+      for (const item of raw) {
+        const entry = item as { deviceId?: unknown; revokedAt?: unknown };
+        if (typeof entry?.deviceId !== "string" || entry.deviceId.length === 0) continue;
+        this.revoked.set(
+          entry.deviceId,
+          typeof entry.revokedAt === "string" ? entry.revokedAt : this.now(),
+        );
+      }
+    } catch {
+      // An unreadable list cannot be repaired here, and refusing to start would turn a
+      // storage fault into a lockout. The registry's own records still carry `revoked`.
+    }
+  }
+
+  /** Append-only: entries are added by `setTrust` and removed only by `forget`. */
+  private async persistRevoked(): Promise<void> {
+    const entries = [...this.revoked].map(([deviceId, revokedAt]) => ({ deviceId, revokedAt }));
+    await this.revocationStorage.set(REVOKED_KEY, entries as unknown as JsonValue).catch(() => {
+      // Best effort. The registry record is the other half and is written separately.
+    });
   }
 
   private async persist(): Promise<void> {
@@ -183,6 +253,15 @@ export class DeviceRegistry {
       await this.load();
       if (!validIdentity(identity)) {
         return { ok: false, reason: "The identity is malformed." };
+      }
+      // The list first, then the record. The record is the thing an I/O error takes
+      // away, and a revoked device that re-enrols because its record went missing has
+      // had its revocation undone by a disk fault.
+      if (this.revoked.has(identity.deviceId)) {
+        return {
+          ok: false,
+          reason: `Device ${identity.deviceId} was revoked and cannot re-enrol. Remove it explicitly first.`,
+        };
       }
       const existing = this.records.get(identity.deviceId);
       if (existing?.trust === "revoked") {
@@ -228,7 +307,12 @@ export class DeviceRegistry {
       // it had been revoked. A terminal state that can be left through an intermediate
       // is not terminal; the guard has to be on leaving the state, not on the
       // destination. `forget` remains the one deliberate way back.
-      if (record.trust === "revoked" && trust !== "revoked") {
+      // The `this.revoked` half is defence-in-depth and mutation does not distinguish
+      // it: `load` has already re-applied the list to every record it holds, so any
+      // record reaching here with an entry in the list already reads `revoked`. It stays
+      // because the two are maintained separately and a future path that builds a record
+      // without going through `load` would otherwise silently lose the check.
+      if ((record.trust === "revoked" || this.revoked.has(deviceId)) && trust !== "revoked") {
         return {
           ok: false,
           reason: `Device ${deviceId} is revoked. Restoring it requires removing and re-enrolling it deliberately.`,
@@ -236,6 +320,12 @@ export class DeviceRegistry {
       }
       record.trust = trust;
       record.revokedAt = trust === "revoked" ? this.now() : record.revokedAt;
+      if (trust === "revoked" && !this.revoked.has(deviceId)) {
+        this.revoked.set(deviceId, record.revokedAt ?? this.now());
+        // Written before the registry, so a crash between the two writes leaves the
+        // device revoked rather than leaves it trusted.
+        await this.persistRevoked();
+      }
       await this.persist();
       return { ok: true, record: { ...record } };
     });
@@ -247,8 +337,13 @@ export class DeviceRegistry {
       await this.load();
       if (safeEqual(deviceId, this.self.deviceId)) return false;
       const removed = this.records.delete(deviceId);
+      // `forget` is documented as the one deliberate way back from revoked, so it is the
+      // one thing that clears the list too — and it does so even when no record remains,
+      // which is exactly the state a corrupt registry leaves behind.
+      const unrevoked = this.revoked.delete(deviceId);
+      if (unrevoked) await this.persistRevoked();
       if (removed) await this.persist();
-      return removed;
+      return removed || unrevoked;
     });
   }
 

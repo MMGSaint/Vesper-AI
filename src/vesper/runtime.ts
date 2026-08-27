@@ -76,6 +76,13 @@ export interface RuntimeOptions {
    * config file and the audit log are Vesper's business, not documents.
    */
   dirs?: { data: string; config?: string; logs?: string; models?: string; root?: string };
+  /**
+   * Where the device revocation list is kept, when it must outlive the state file.
+   *
+   * Absent it shares `storage`. Production passes a separate file so a corrupt state
+   * file cannot resurrect a revoked device.
+   */
+  revocationStorage?: StorageAdapter;
   /** How much the machine underneath is trusted. Portable sessions pass `foreign`. */
   hostPosture?: HostPosture;
 }
@@ -615,7 +622,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   });
   const deviceIdentity = loadedIdentity.identity;
   const hostPosture: HostPosture = options.hostPosture ?? "owned";
-  const devices = new DeviceRegistry({ storage, self: deviceIdentity.publicIdentity() });
+  const devices = new DeviceRegistry({
+    storage,
+    revocations: options.revocationStorage,
+    self: deviceIdentity.publicIdentity(),
+  });
   const taskQueue = new TaskQueue({ storage });
 
   const memory = new MemoryStore(storage);
