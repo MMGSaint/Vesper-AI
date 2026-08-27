@@ -72,7 +72,11 @@ export function validateToolArgs(schema: ToolParameterSchema, args: JsonObject):
       dropped.push(key);
       continue;
     }
-    const declared = properties[key];
+    // `Object.hasOwn`, not a bare lookup. A bare `properties[key]` resolves through
+    // `Object.prototype`, so `toString` or `constructor` found a function and read as a
+    // declared parameter — and an MCP server that set the prototype of its properties
+    // map could declare parameters that are not in it at all.
+    const declared = Object.hasOwn(properties, key) ? properties[key] : undefined;
     if (!declared) {
       dropped.push(key);
       continue;
@@ -96,7 +100,9 @@ export function validateToolArgs(schema: ToolParameterSchema, args: JsonObject):
   }
 
   for (const key of schema.required ?? []) {
-    if (!(key in out)) errors.push(`'${key}' is required.`);
+    // `in` walks the prototype chain, so a schema requiring `toString` was satisfied by
+    // `Object.prototype` and the argument was never supplied.
+    if (!Object.hasOwn(out, key)) errors.push(`'${key}' is required.`);
   }
 
   return { ok: errors.length === 0, args: out, errors, dropped };

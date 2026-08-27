@@ -88,7 +88,12 @@ export function canonicalJson(value: JsonObject): string {
   const walk = (input: unknown): unknown => {
     if (Array.isArray(input)) return input.map(walk);
     if (input && typeof input === "object") {
-      const out: Record<string, unknown> = {};
+      // A null-prototype object, so an own `__proto__` key is *copied* rather than
+      // silently setting the prototype and vanishing. On a plain `{}` it disappeared
+      // from the canonical form, which means it was outside the signature: a signed
+      // grant could be augmented with content nobody signed. `JSON.stringify` treats a
+      // null-prototype object exactly like a plain one.
+      const out: Record<string, unknown> = Object.create(null);
       for (const key of Object.keys(input as Record<string, unknown>).sort()) {
         const item = (input as Record<string, unknown>)[key];
         if (item !== undefined) out[key] = walk(item);

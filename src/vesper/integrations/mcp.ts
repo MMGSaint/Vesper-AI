@@ -281,6 +281,10 @@ export function toToolSpec(
   };
   const properties: ToolSpec["parameters"]["properties"] = {};
   for (const [key, value] of Object.entries(schema.properties ?? {})) {
+    // An MCP server is untrusted input, and `properties["__proto__"] = {...}` sets the
+    // prototype of the map rather than adding a key — which made every undeclared
+    // argument resolve as declared.
+    if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
     const type = value?.type;
     if (
       type !== "string" &&

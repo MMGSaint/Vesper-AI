@@ -1705,3 +1705,101 @@ describe("invariant: a failed turn reports what happened, not what is convenient
     await runtime.stop();
   });
 });
+
+describe("nothing resolves an untrusted key through Object.prototype", () => {
+  /**
+   * Three places read a key out of an attacker-influenced object with a bare lookup or
+   * with `in`, both of which walk the prototype chain. None of them is currently
+   * reachable for privilege escalation, and they are recorded as LOW for that reason —
+   * but two of them are *validation* and one is a *signing* primitive, and those have to
+   * be exact rather than approximately right.
+   */
+
+  it("does not treat an inherited name as a declared parameter", async () => {
+    const { validateToolArgs } = await import("./tools/validate.ts");
+    const schema = {
+      type: "object" as const,
+      properties: { path: { type: "string" as const } },
+      required: [],
+    };
+    for (const key of ["toString", "constructor", "valueOf", "hasOwnProperty"]) {
+      const result = validateToolArgs(schema, { [key]: "x" } as never);
+      assert.equal(
+        Object.hasOwn(result.args, key),
+        false,
+        `'${key}' resolved through Object.prototype and was forwarded to the handler`,
+      );
+      assert.ok(result.dropped.includes(key), `'${key}' was not reported as dropped`);
+    }
+  });
+
+  it("does not consider a required inherited name already supplied", async () => {
+    const { validateToolArgs } = await import("./tools/validate.ts");
+    const schema = {
+      type: "object" as const,
+      properties: { toString: { type: "string" as const } },
+      required: ["toString"],
+    };
+    const missing = validateToolArgs(schema, {} as never);
+    assert.equal(missing.ok, false, "a required argument was satisfied by Object.prototype");
+    assert.ok(missing.errors.some((error) => error.includes("required")));
+
+    // And it still accepts the argument when it is genuinely supplied.
+    const supplied = validateToolArgs(schema, { toString: "real" } as never);
+    assert.equal(supplied.ok, true, supplied.errors.join("; "));
+    assert.equal(supplied.args.toString, "real");
+  });
+
+  it("ignores a prototype key in an MCP server's declared properties", async () => {
+    const { toToolSpec } = await import("./integrations/mcp.ts");
+    // The value must itself look like a valid declaration, or the type gate rejects it
+    // before the assignment and the test proves nothing.
+    const spec = toToolSpec("evil", {
+      name: "probe",
+      description: "hostile",
+      inputSchema: {
+        type: "object",
+        properties: JSON.parse('{"__proto__": {"type": "string"}, "safe": {"type": "string"}}'),
+      },
+    } as never);
+    assert.equal(
+      Object.getPrototypeOf(spec.parameters.properties),
+      Object.prototype,
+      "an MCP server replaced the prototype of the properties map",
+    );
+    // Which is what makes an undeclared name resolve as declared.
+    assert.equal(
+      (spec.parameters.properties as Record<string, unknown>).type,
+      undefined,
+      "an undeclared parameter resolved through the replaced prototype",
+    );
+    // Narrowing, not severing: its ordinary declarations survive.
+    assert.equal(spec.parameters.properties.safe?.type, "string");
+  });
+
+  it("signs an own __proto__ key rather than dropping it from the canonical form", async () => {
+    // A signing primitive. A key that vanishes from the canonical form is a key outside
+    // the signature, so a signed payload could be augmented with content nobody signed.
+    const { canonicalJson } = await import("./distributed/identity.ts");
+    const withProto = JSON.parse('{"a": 1, "__proto__": "smuggled"}');
+    assert.equal(Object.hasOwn(withProto, "__proto__"), true, "the fixture is wrong");
+
+    const canonical = canonicalJson(withProto);
+    assert.ok(
+      canonical.includes("smuggled"),
+      `an own __proto__ key was dropped from the signed form: ${canonical}`,
+    );
+
+    // Two payloads differing only in that key must not canonicalise identically.
+    assert.notEqual(canonical, canonicalJson(JSON.parse('{"a": 1}')));
+  });
+
+  it("still canonicalises an ordinary payload stably and sorted", async () => {
+    const { canonicalJson } = await import("./distributed/identity.ts");
+    assert.equal(
+      canonicalJson({ b: 2, a: 1, c: { z: 1, y: 2 } } as never),
+      canonicalJson({ a: 1, c: { y: 2, z: 1 }, b: 2 } as never),
+    );
+    assert.equal(canonicalJson({ b: 2, a: 1 } as never), '{"a":1,"b":2}');
+  });
+});
