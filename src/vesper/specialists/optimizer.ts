@@ -368,7 +368,9 @@ export function createHttpOptimizerAdapter(
     async getStatus() {
       const result = await callGet("/status");
       if (!result.ok) return unavailableStatus(result.error);
-      const parsed = parseStatus(result.data);
+      // "live" is what this adapter *is*: it was constructed because the configuration
+      // named a live endpoint, and it is issuing real HTTP requests to it.
+      const parsed = parseStatus(result.data, "live");
       if (!parsed) {
         log?.warn("optimizer", "Malformed optimizer status", {});
         return unavailableStatus("Malformed optimizer status response.");
@@ -547,13 +549,32 @@ function safeTextOr(value: unknown, fallback: string, max = 240): string {
   return safeText(value, max) ?? fallback;
 }
 
-function parseStatus(value: unknown): OptimizerStatus | null {
+/**
+ * Read a status body. `mode` is deliberately **not** taken from it.
+ *
+ * `mode` is Vesper's own provenance label for which adapter is in use — the LIVE /
+ * SIMULATED / MOCKED distinction the product promises the user — and Vesper knows the
+ * answer locally: `config.optimizer.mode === "live" && endpoint` is what selected the
+ * HTTP adapter in the first place. It was being taken from the response body, so an
+ * endpoint could answer `mode: "mock"`, and `detail: "No live optimization was
+ * performed"`, while `POST /optimize` was genuinely issued to it. Vesper's status, its
+ * health report, and its own honesty classification in diagnostics all repeated the
+ * claim.
+ *
+ * That is a subsystem's assertion being accepted as attestation about Vesper itself. The
+ * caller supplies the mode; the endpoint's own claim is kept as `reportedMode` for the
+ * one place it is worth showing — a disagreement between the two is worth surfacing —
+ * and no honesty label reads it.
+ */
+function parseStatus(value: unknown, mode: OptimizerStatus["mode"]): OptimizerStatus | null {
   const obj = asObject(value);
   if (!obj || typeof obj.available !== "boolean") return null;
-  const mode = obj.mode === "live" || obj.mode === "mock" || obj.mode === "unavailable" ? obj.mode : "unavailable";
+  const reportedMode =
+    obj.mode === "live" || obj.mode === "mock" || obj.mode === "unavailable" ? obj.mode : null;
   return {
     available: obj.available,
-    mode,
+    mode: obj.available ? mode : "unavailable",
+    reportedMode,
     currentProfile: safeText(obj.currentProfile, 60),
     lastAction: safeText(obj.lastAction, 120),
     lastResult: safeText(obj.lastResult, 120),

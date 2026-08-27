@@ -123,3 +123,120 @@ describe("optimizer adapter", () => {
     );
   });
 });
+
+describe("the optimizer does not get to say what Vesper is", () => {
+  /**
+   * `mode` is the LIVE / SIMULATED / MOCKED distinction the product promises the user.
+   * It is a fact about which adapter Vesper is running, which Vesper knows locally —
+   * `config.optimizer.mode === "live" && endpoint` is what selected the HTTP adapter —
+   * and it was being read out of the response body instead.
+   *
+   * So an endpoint could answer `mode: "mock"`, with a `detail` saying no live
+   * optimization was performed, while `POST /optimize` was genuinely issued to it. Every
+   * consumer repeated the claim: the tool result, the health report, and — the one that
+   * matters — Vesper's own honesty classification in diagnostics, which said
+   * `mocked_simulated` about a subsystem that was really changing the machine.
+   *
+   * A subsystem's assertion is not attestation about Vesper.
+   */
+  function lyingEndpoint(claims: "mock" | "live" | "unavailable" | "nonsense") {
+    const hits: string[] = [];
+    const adapter = createHttpOptimizerAdapter("http://127.0.0.1:9", {
+      timeoutMs: 50,
+      retries: 0,
+      fetchImpl: (async (input, init) => {
+        const url = new URL(String(input));
+        hits.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        if (url.pathname === "/status") {
+          return new Response(
+            JSON.stringify({
+              available: true,
+              mode: claims,
+              currentProfile: "balanced",
+              detail: "Mock optimizer adapter. No live optimization was performed.",
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ accepted: true, summary: "Applied." }), { status: 200 });
+      }) as typeof fetch,
+    });
+    return { adapter, hits };
+  }
+
+  it("reports live when it is really issuing live requests, whatever the endpoint claims", async () => {
+    for (const claim of ["mock", "unavailable", "nonsense"] as const) {
+      const { adapter, hits } = lyingEndpoint(claim);
+      const status = await adapter.getStatus();
+      assert.equal(status.mode, "live", `an endpoint claiming ${claim} was believed`);
+      // And it really is live: the request goes out.
+      await adapter.requestOptimization({ profile: "performance" });
+      assert.ok(
+        hits.some((hit) => hit === "POST /optimize"),
+        "no live request was issued, so this proves nothing",
+      );
+    }
+  });
+
+  it("keeps the endpoint's own claim, separately, where no honesty label reads it", async () => {
+    const { adapter } = lyingEndpoint("mock");
+    const status = await adapter.getStatus();
+    assert.equal(status.reportedMode, "mock", "the endpoint's claim was discarded entirely");
+    assert.notEqual(status.mode, status.reportedMode, "the two collapsed back into one field");
+  });
+
+  it("says live in the health report too", async () => {
+    const { adapter } = lyingEndpoint("mock");
+    const health = await adapter.getHealth();
+    assert.equal(health.mode, "live");
+  });
+
+  it("classifies the optimizer as hardware-dependent, not simulated", async () => {
+    // The consequence that matters: Vesper's own honesty classification.
+    const { buildDiagnostics } = await import("./diagnostics.ts");
+    const { adapter } = lyingEndpoint("mock");
+    const status = await adapter.getStatus();
+    const report = buildDiagnostics({
+      instanceId: "test",
+      started: true,
+      health: { running: false } as never,
+      models: { active: "none", available: [] },
+      memory: { persistent: 0, session: 0 },
+      tools: { count: 0 },
+      permissions: { neverAllowAutonomous: [] },
+      optimizer: status,
+      windows: { simulated: true } as never,
+      voice: { enabled: false } as never,
+      knowledge: { sources: 0, documents: 0 } as never,
+      context: { notes: [] } as never,
+      capability: null,
+      recentErrors: [],
+    });
+    assert.equal(
+      report.classification.optimizer,
+      "implemented_hardware_dependent",
+      "Vesper described a live, machine-changing subsystem as a simulation",
+    );
+  });
+
+  it("still reports unavailable when the endpoint is genuinely down", async () => {
+    // Narrowing, not severing: the adapter must not claim live when it reached nothing.
+    const adapter = createHttpOptimizerAdapter("http://127.0.0.1:9", {
+      timeoutMs: 30,
+      retries: 0,
+      fetchImpl: (async () => new Response("", { status: 503 })) as typeof fetch,
+    });
+    const status = await adapter.getStatus();
+    assert.equal(status.available, false);
+    assert.equal(status.mode, "unavailable");
+  });
+
+  it("still lets the mock adapter say it is a mock", async () => {
+    // Through the runtime, which is where the mock adapter actually lives.
+    const runtime = await testRuntime();
+    const status = await runtime.optimizer.getStatus();
+    assert.equal(status.mode, "mock");
+    assert.equal((await runtime.optimizer.getHealth()).mode, "mock");
+    await runtime.stop();
+  });
+});

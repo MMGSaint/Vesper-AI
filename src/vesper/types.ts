@@ -449,7 +449,18 @@ export interface ApprovedApp {
 
 export interface OptimizerStatus {
   available: boolean;
+  /**
+   * Which adapter Vesper is actually using. Set by Vesper, never by the endpoint.
+   *
+   * This is the LIVE / SIMULATED / MOCKED distinction the product promises, so it is a
+   * fact about Vesper, not a fact the optimizer is entitled to assert. See `parseStatus`.
+   */
   mode: "mock" | "live" | "unavailable";
+  /**
+   * What the endpoint said about itself, if anything. Recorded so a disagreement with
+   * `mode` can be shown; read by nothing that decides how Vesper describes itself.
+   */
+  reportedMode?: "mock" | "live" | "unavailable" | null;
   currentProfile: string | null;
   lastAction: string | null;
   lastResult: string | null;
