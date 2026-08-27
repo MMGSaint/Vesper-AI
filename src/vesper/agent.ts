@@ -12,6 +12,11 @@ import type { OptimizerAdapter } from "./specialists/optimizer.ts";
 import { VESPER_SYSTEM_PROMPT, composeStatusReply } from "./personality.ts";
 import { formatWorkloadContext, inspectWorkload } from "./specialists/context.ts";
 import { MEMORY_CATEGORIES } from "./types.ts";
+import {
+  decideUntrusted,
+  type UntrustedPolicyOptions,
+  type UntrustedProvenance,
+} from "./untrusted.ts";
 import type {
   AgentTurn,
   ChatMessage,
@@ -82,6 +87,14 @@ const HISTORY_LIMIT = 40;
  */
 const MAX_TOOL_RESULT_CHARS = 3_000;
 const MAX_CONTEXT_CHARS = 24_000;
+/**
+ * Retrieved memory and knowledge are pasted into the system prompt, and `fitContext`
+ * treats the system prompt as untrimmable — it can only drop conversation. So an
+ * unbounded retrieval envelope does not merely crowd the history, it starves it with no
+ * way to recover. Tool results are already capped by `encodeToolResult`; these are the
+ * two paths where the text is arbitrary-length and caller-controlled.
+ */
+const MAX_RETRIEVAL_CHARS = 3_000;
 
 /**
  * Serialize a tool result for the model, keeping the parts that carry meaning.
@@ -302,10 +315,22 @@ export class Agent {
         ? `Optimizer: ${optimizer.available ? optimizer.detail : "unavailable"}. Profile ${optimizer.currentProfile ?? "n/a"}.`
         : "Optimizer: could not query.",
       memories.length
-        ? `Relevant memory:\n${memories.map((entry) => `- [${entry.category}] ${entry.key}: ${entry.value}`).join("\n")}`
+        ? `Relevant memory:\n${
+            this.screenUntrusted(
+              memories.map((entry) => `- [${entry.category}] ${entry.key}: ${entry.value}`).join("\n"),
+              { source: "memory", origin: `${memories.length} stored memor(y|ies)` },
+              { maxChars: MAX_RETRIEVAL_CHARS },
+            )
+          }`
         : "No relevant memory hits.",
       knowledge.length
-        ? `Knowledge hits:\n${knowledge.map((hit) => `- ${hit.title}: ${hit.snippet}`).join("\n")}`
+        ? `Knowledge hits:\n${
+            this.screenUntrusted(
+              knowledge.map((hit) => `- ${hit.title}: ${hit.snippet}`).join("\n"),
+              { source: "knowledge", origin: `${knowledge.length} approved source hit(s)` },
+              { maxChars: MAX_RETRIEVAL_CHARS },
+            )
+          }`
         : "",
     ]
       .filter(Boolean)
@@ -391,8 +416,9 @@ export class Agent {
           role: "tool",
           name: call.name,
           toolCallId: call.id,
-          content: encodeToolResult(
-            record.result ?? { pending: true, reason: record.decision.reason },
+          content: this.screenUntrusted(
+            encodeToolResult(record.result ?? { pending: true, reason: record.decision.reason }),
+            { source: "tool", origin: call.name },
           ),
         });
       }
@@ -735,6 +761,47 @@ export class Agent {
       const kept = historyWindow(this.deps.history, HISTORY_LIMIT);
       this.deps.history.splice(0, this.deps.history.length, ...kept);
     }
+  }
+
+  /**
+   * The single door every byte of external text walks through before the model sees it.
+   *
+   * Screening is evidence, not enforcement: the boundary and the escaping are what
+   * actually contain an attack, and they apply to clean content too. What this adds is
+   * the decision — high-scoring content is withheld outright rather than merely sealed —
+   * and the disclosure, because content Vesper refused to read or silently truncated is
+   * something the user is owed a record of. Only Vesper-authored labels reach the event
+   * log; the attacker's own text never does.
+   */
+  private screenUntrusted(
+    content: string,
+    provenance: UntrustedProvenance,
+    options: UntrustedPolicyOptions = {},
+  ): string {
+    const decision = decideUntrusted(content, provenance, options);
+    const origin = provenance.origin ?? "an unnamed source";
+    const lostData = decision.action === "refuse" || decision.wrapped?.truncated === true;
+    if (decision.notice && (decision.action !== "wrap" || lostData)) {
+      this.deps.events.emit({
+        type: "security.untrusted_content",
+        title:
+          decision.action === "refuse"
+            ? `Withheld ${provenance.source} content from ${origin}`
+            : `Screened ${provenance.source} content from ${origin}`,
+        detail: decision.notice,
+        severity: decision.action === "wrap" ? "info" : "warn",
+        workspaceId: this.deps.workspaces.current().id,
+        data: {
+          action: decision.action,
+          source: provenance.source,
+          origin,
+          score: decision.verdict.score,
+          severity: decision.verdict.severity,
+          signals: decision.verdict.signals.map((signal) => signal.id),
+        },
+      });
+    }
+    return decision.text;
   }
 
   private turn(
