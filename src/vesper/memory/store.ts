@@ -1,6 +1,7 @@
 import { createId, nowIso } from "../id.ts";
 import type { StorageAdapter } from "../storage.ts";
-import type { JsonValue, MemoryCategory, MemoryEntry } from "../types.ts";
+import type { JsonValue, MemoryCategory, MemoryEntry, MemoryScopeLevel } from "../types.ts";
+import { defaultScopeFor, isSyncable } from "./scopes.ts";
 import { prepareQuery, scoreMemory } from "./retrieval.ts";
 import { coerceMemoryEntry } from "./sanitize.ts";
 
@@ -8,7 +9,10 @@ const KEY = "memory.entries";
 const DEFAULT_MAX_PERSISTENT = 500;
 const MAX_NOTICES = 100;
 
-/** Memory scope. `global` entries are visible from every workspace. */
+/**
+ * Legacy write scope, kept because it reads naturally at call sites: "file this
+ * globally" rather than "file this at scope global". It maps onto `MemoryScopeLevel`.
+ */
 export type MemoryScope = "workspace" | "global";
 
 export type MemoryNoticeKind = "skipped" | "repaired" | "pruned" | "pruned-stated";
@@ -133,14 +137,29 @@ export class MemoryStore {
     value: string;
     workspaceId?: string;
     scope?: MemoryScope;
+    /** Explicit scope level. Wins over `scope` and over the derived default. */
+    scopeLevel?: MemoryScopeLevel;
+    /** The machine a device-scoped fact describes. */
+    deviceId?: string;
+    originDevice?: string;
     source?: MemoryEntry["source"];
     tags?: string[];
     provenance?: MemoryEntry["provenance"];
   }): Promise<MemoryEntry> {
     return this.runExclusive(async () => {
       const now = nowIso();
-      const session = input.category === "session";
       const workspaceId = input.scope === "global" ? undefined : input.workspaceId;
+      const scopeLevel: MemoryScopeLevel =
+        input.scopeLevel ??
+        (input.scope === "global"
+          ? "user"
+          : defaultScopeFor({
+              category: input.category,
+              workspaceId,
+              deviceId: input.deviceId,
+            }));
+      // Session memory is the one scope that never reaches disk.
+      const session = scopeLevel === "session";
       const pool = session ? this.sessionEntries : await this.loadPersistent();
       const existing = pool.find(
         (entry) =>
@@ -153,6 +172,9 @@ export class MemoryStore {
         existing.updatedAt = now;
         if (input.tags) existing.tags = input.tags;
         if (input.provenance) existing.provenance = input.provenance;
+        // A revision bump is what lets sync order two edits deterministically.
+        existing.revision = (existing.revision ?? 0) + 1;
+        if (input.originDevice) existing.originDevice = input.originDevice;
         if (!session) await this.savePersistent(pool, existing.id);
         return existing;
       }
@@ -170,11 +192,21 @@ export class MemoryStore {
           origin: input.source ?? "user",
           kind: input.source === "agent" ? "inferred" : "stated",
         },
+        scope: scopeLevel,
+        deviceId: scopeLevel === "device" ? input.deviceId : undefined,
+        revision: 1,
+        originDevice: input.originDevice,
       };
       pool.push(entry);
       if (!session) await this.savePersistent(pool, entry.id);
       return entry;
     });
+  }
+
+  /** Entries eligible to leave this device. Session memory is never included. */
+  async syncableEntries(): Promise<MemoryEntry[]> {
+    const persistent = await this.loadPersistent();
+    return persistent.filter((entry) => isSyncable(entry.scope)).map((entry) => ({ ...entry }));
   }
 
   async retrieve(idOrKey: string, workspaceId?: string): Promise<MemoryEntry | undefined> {
