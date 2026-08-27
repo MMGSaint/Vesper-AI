@@ -15,6 +15,7 @@ import type { HostPosture } from "./identity.ts";
 import type { DeviceRecord } from "./registry.ts";
 import type { VesperTask } from "./tasks.ts";
 import { manifestHas, type Capability } from "./capabilities.ts";
+import { sanitiseInline } from "../untrusted.ts";
 
 /** Capabilities worth naming in a one-line device summary. */
 const HEADLINE: Capability[] = ["local_llm", "nexus", "voice_stt", "obs"];
@@ -62,13 +63,13 @@ export function buildNow(input: {
     generatedAt: (input.now ?? (() => new Date().toISOString()))(),
     activeDevice: {
       deviceId: input.self.identity.deviceId,
-      name: input.self.identity.name,
+      name: sanitiseInline(input.self.identity.name, 60),
       trust: input.self.trust,
       hostPosture: input.hostPosture,
     },
     workspace: input.workspace,
     devices: input.devices.map((device) => ({
-      name: device.identity.name,
+      name: sanitiseInline(device.identity.name, 60),
       deviceId: device.identity.deviceId,
       type: device.identity.deviceType,
       trust: device.trust,
@@ -102,7 +103,7 @@ export function renderNow(now: VesperNow): string {
     now.activeDevice.hostPosture === "foreign"
       ? " — running on a host that is not yours; treat it as able to observe this session"
       : "";
-  lines.push(`Active device: ${now.activeDevice.name} (${now.activeDevice.trust})${host}`);
+  lines.push(`Active device: "${now.activeDevice.name}" (${now.activeDevice.trust})${host}`);
   lines.push(`Workspace: ${now.workspace}`);
 
   const others = now.devices.filter((device) => !device.isCurrent);
@@ -112,7 +113,7 @@ export function renderNow(now: VesperNow): string {
       const caps = device.headline.length ? ` [${device.headline.join(", ")}]` : "";
       const state =
         device.reachability === "online" ? `online/${device.activity}` : "offline";
-      lines.push(`  ${device.name} (${device.type}, ${device.trust}): ${state}${caps}`);
+      lines.push(`  "${device.name}" (${device.type}, ${device.trust}): ${state}${caps}`);
     }
   } else {
     lines.push("Other devices: none enrolled.");

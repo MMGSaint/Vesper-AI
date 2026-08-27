@@ -165,6 +165,32 @@ function countOccurrences(haystack: string, needle: string): number {
  * hide characters from a reader. Every edit is counted so the caller can report it -
  * silent rewriting would hide the attack from the user as effectively as ignoring it.
  */
+/**
+ * Make an externally-influenced *field* safe to place inline in the prompt.
+ *
+ * Wrapping suits a block of retrieved content. It does not suit a device name or a
+ * status line, which have to read as the one-line values they are — and those were the
+ * fields nobody wrapped, so they went into the system prompt verbatim. A device name is
+ * chosen by whoever enrols; an optimizer status line comes from a separate subsystem
+ * over HTTP. Neither is Vesper's own voice, and both sat in the position that is.
+ *
+ * Three things happen here, and the second is the one that matters most: line breaks
+ * are collapsed. A single-line field that can introduce a newline can start what looks
+ * like a fresh directive line in Vesper's own instructions, which is exactly how the
+ * reproduction worked.
+ */
+export function sanitiseInline(value: string, maxChars = 240): string {
+  const { text } = neutralisePayload(value, "");
+  const flattened = text
+    .replace(/[\r\n\u2028\u2029]+/g, " ")
+    // A field rendered inside quotes must not be able to close them and speak outside.
+    .replace(/["\u201C\u201D]/g, "'")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  if (flattened.length <= maxChars) return flattened;
+  return `${flattened.slice(0, maxChars)}…`;
+}
+
 export function neutralisePayload(
   content: string,
   nonce: string,
@@ -181,7 +207,7 @@ export function neutralisePayload(
   });
   record("boundary", boundary);
 
-  const nonceHits = countOccurrences(text, nonce);
+  const nonceHits = nonce ? countOccurrences(text, nonce) : 0;
   if (nonceHits > 0) {
     text = text.split(nonce).join(ESCAPE_MARKER);
     record("nonce", nonceHits);

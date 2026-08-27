@@ -19,6 +19,7 @@ import { formatWorkloadContext, inspectWorkload } from "./specialists/context.ts
 import { MEMORY_CATEGORIES } from "./types.ts";
 import {
   decideUntrusted,
+  sanitiseInline,
   type UntrustedPolicyOptions,
   type UntrustedProvenance,
 } from "./untrusted.ts";
@@ -377,15 +378,26 @@ export class Agent {
     const system = [
       VESPER_SYSTEM_PROMPT,
       nowContext,
-      `Active workspace: ${workspace.name} (${workspace.id}). ${workspace.description}`,
-      `Hardware mode: ${snapshot.mode}. ${snapshot.notes.join(" ")}`,
+      `Active workspace: ${sanitiseInline(workspace.name, 60)} (${workspace.id}). ${sanitiseInline(workspace.description)}`,
+      `Hardware mode: ${snapshot.mode}. ${sanitiseInline(snapshot.notes.join(" "))}`,
       `CPU: ${snapshot.cpu.name} ${snapshot.cpu.utilizationPct}% ${snapshot.cpu.tempC ?? "n/a"}°C`,
       snapshot.gpu
         ? `GPU: ${snapshot.gpu.name} ${snapshot.gpu.utilizationPct}% ${snapshot.gpu.tempC ?? "n/a"}°C VRAM ${snapshot.gpu.vramUsedGB}/${snapshot.gpu.vramGB} GB`
         : "GPU: unavailable",
       `RAM: ${snapshot.ram.usedGB}/${snapshot.ram.totalGB} GB`,
       optimizer
-        ? `Optimizer: ${optimizer.available ? optimizer.detail : "unavailable"}. Profile ${optimizer.currentProfile ?? "n/a"}.`
+        ? // The optimizer is a separate subsystem reached over HTTP, so its status text
+          // is free-form output from another program. Vesper's own words here are the
+          // profile and the availability; the subsystem's words get the same envelope as
+          // any other external content rather than a place in Vesper's voice.
+          [
+            `Optimizer profile ${sanitiseInline(optimizer.currentProfile ?? "n/a", 40)}, ${optimizer.available ? "available" : "unavailable"}.`,
+            optimizer.available && optimizer.detail
+              ? `Status reported by the optimizer:\n${this.screenUntrusted(optimizer.detail, { source: "tool", origin: "optimizer" }, { maxChars: 1_000 })}`
+              : "",
+          ]
+            .filter(Boolean)
+            .join("\n")
         : "Optimizer: could not query.",
       memories.length
         ? `Relevant memory:\n${

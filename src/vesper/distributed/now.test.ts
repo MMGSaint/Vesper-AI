@@ -171,8 +171,10 @@ test("Vesper Now", async (t) => {
   await t.test("renders compactly and names offline devices as offline", () => {
     const now = buildNow({ ...base, devices: [device({ id: "dev_desktop", name: "desktop-main", online: false }), LAPTOP] });
     const text = renderNow(now);
-    assert.match(text, /Active device: laptop-main \(trusted\)/);
-    assert.match(text, /desktop-main \(desktop, trusted\): offline/);
+    // Names are rendered as quoted values: a device name is chosen by whoever enrols,
+    // so it has to read as a name rather than as part of Vesper's own sentence.
+    assert.match(text, /Active device: "laptop-main" \(trusted\)/);
+    assert.match(text, /"desktop-main" \(desktop, trusted\): offline/);
     assert.ok(text.split("\n").length < 12, "this is included every turn; it has to stay small");
   });
 
