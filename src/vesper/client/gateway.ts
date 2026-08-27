@@ -46,7 +46,10 @@ export class VesperClientGateway {
    * is "may a device of that trust class ask *this* machine to do X", so the capability
    * has to be looked up on the machine that would perform the work.
    */
-  private async remoteOrigin(deviceId: string): Promise<RequestOrigin> {
+  private async remoteOrigin(
+    deviceId: string,
+    scopes: readonly ClientScope[],
+  ): Promise<RequestOrigin> {
     const [requester, self] = await Promise.all([
       this.runtime.devices.get(deviceId),
       this.runtime.devices.get(this.runtime.deviceIdentity.deviceId),
@@ -56,6 +59,7 @@ export class VesperClientGateway {
       deviceId,
       trust: requester?.trust ?? "unknown",
       manifest: self?.capabilities ?? null,
+      scopes,
     };
   }
 
@@ -142,7 +146,9 @@ export class VesperClientGateway {
     // A conversation is a tool-calling loop, so a remote turn must carry who is asking
     // all the way to the point tools run. Without this, "may converse" silently means
     // "may call anything the agent decides to call" on the host's own machine.
-    return this.runtime.chat(trimmed, { origin: await this.remoteOrigin(session.deviceId) });
+    return this.runtime.chat(trimmed, {
+      origin: await this.remoteOrigin(session.deviceId, session.scopes),
+    });
   }
 
   async confirm(
@@ -167,7 +173,7 @@ export class VesperClientGateway {
     // execute as though the person at the machine had run it. Approving is exercising
     // authority, not merely acknowledging a prompt, so the same limits apply to it as
     // to asking directly.
-    const origin = await this.remoteOrigin(session.deviceId);
+    const origin = await this.remoteOrigin(session.deviceId, session.scopes);
     this.runtime.events.emit({
       type: "security.remote_confirmation",
       title: `Remote device approved ${pending.toolName}`,

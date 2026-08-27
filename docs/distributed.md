@@ -96,6 +96,17 @@ discussed. That distinction was a real hole: a conversation is a tool-calling lo
 a device permitted only to converse was, in practice, permitted to call anything the
 agent decided to call.
 
+Client scopes are enforced in the same three places, for the same reason. A scope names
+data, and data reaches a session by three routes: the gateway method, the tool a
+conversation can call, and the retrieval that fills the prompt. Guarding only the first
+left the other two open.
+
+Approving a held action is also exercising authority, not acknowledging a prompt. A
+confirmation records who asked but never what they were allowed — trust is re-read when
+it is exercised — and both the requester's and the approver's authority must permit the
+action. Otherwise the confirmation queue launders authority: a device forbidden the
+filesystem could approve a held write it could not have requested.
+
 ## Memory scopes
 
 Five scopes, with visibility and syncability defined in exactly one module so the store

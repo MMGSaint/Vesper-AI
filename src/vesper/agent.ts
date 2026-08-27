@@ -4,6 +4,7 @@ import type { MemoryStore } from "./memory/store.ts";
 import { attribute } from "./memory/scopes.ts";
 import { decideRemoteToolRequest, type RequestOrigin } from "./tools/remote.ts";
 import type { TrustState } from "./distributed/identity.ts";
+import type { ClientScope } from "./client/protocol.ts";
 import type { CapabilityManifest } from "./distributed/capabilities.ts";
 import type { KnowledgeIndex } from "./knowledge/rag.ts";
 import type { ModelRouter } from "./models/router.ts";
@@ -350,13 +351,25 @@ export class Agent {
       return direct;
     }
 
-    const memories = await this.deps.memory.search(userText, { workspaceId: workspace.id, limit: 6 });
+    // Retrieval is a channel in its own right. A remote session that may not *call*
+    // memory_search must not have the same records handed to a model it is talking to —
+    // the tool gate would otherwise be the front door on a building with no back wall.
+    const mayRead = (scope: ClientScope): boolean =>
+      !origin || origin.kind !== "remote" || (origin.scopes ?? []).includes(scope);
+    const memoryWithheld = !mayRead("memory.read");
+    const knowledgeWithheld = !mayRead("knowledge.read");
+
+    const memories = memoryWithheld
+      ? []
+      : await this.deps.memory.search(userText, { workspaceId: workspace.id, limit: 6 });
     // Awaitable retrieval so a model-backed embedder can actually influence ranking;
     // it falls back to lexical scoring when no embedding backend is reachable.
-    const knowledge = await this.deps.knowledge.searchAsync(userText, {
-      workspaceId: workspace.id,
-      limit: 4,
-    });
+    const knowledge = knowledgeWithheld
+      ? []
+      : await this.deps.knowledge.searchAsync(userText, {
+          workspaceId: workspace.id,
+          limit: 4,
+        });
     const snapshot = this.deps.hardware.snapshot();
     const optimizer = await this.deps.optimizer.getStatus().catch(() => null);
 
@@ -387,7 +400,9 @@ export class Agent {
               { maxChars: MAX_RETRIEVAL_CHARS },
             )
           }`
-        : "No relevant memory hits.",
+        : memoryWithheld
+          ? "Stored memory is not readable by this session. Say it is unavailable rather than guessing at it."
+          : "No relevant memory hits.",
       knowledge.length
         ? `Knowledge hits:\n${
             this.screenUntrusted(
@@ -396,7 +411,9 @@ export class Agent {
               { maxChars: MAX_RETRIEVAL_CHARS },
             )
           }`
-        : "",
+        : knowledgeWithheld
+          ? "Indexed documents are not readable by this session. Say so rather than guessing at them."
+          : "",
     ]
       .filter(Boolean)
       .join("\n");

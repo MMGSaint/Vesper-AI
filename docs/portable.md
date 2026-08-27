@@ -85,6 +85,12 @@ nothing more, and `restricted` devices do not hold `memory.read` at all — a po
 session that needs a stored fact asks a trusted device, which answers the question
 rather than handing over the record.
 
+That holds on every route, not only the one named after it. A scope governs the gateway
+method, the tool of the same name when a conversation calls it, *and* the retrieval that
+fills the prompt — a session that may not read memory is not handed memory to talk
+about. Until this was enforced at all three, a portable session on a foreign host could
+read the user's memory through a conversation while being refused the method.
+
 The reasoning: whatever reaches the foreign host may be captured. The defence that
 actually works is not encrypting it in transit — it is not sending it.
 

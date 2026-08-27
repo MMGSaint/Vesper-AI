@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { capabilityForTool, decideRemoteToolRequest } from "./remote.ts";
+import { capabilityForTool, decideRemoteToolRequest, scopeForTool } from "./remote.ts";
 import { enrolCompanion, testRuntime } from "../test-helpers.ts";
 import { createClientGateway } from "../client/gateway.ts";
 import type { CompletionRequest, ModelToolCall } from "../types.ts";
@@ -126,15 +126,41 @@ describe("the remote tool decision itself", () => {
     assert.equal(decision.allowed, false, "a request with no stated trust was allowed");
   });
 
-  it("does not double-govern tools that client scopes already cover", () => {
-    // memory and knowledge are governed by scopes; adding them here too would mean two
-    // rules with no single owner.
-    assert.equal(capabilityForTool("memory_search"), null);
-    assert.equal(capabilityForTool("knowledge_search"), null);
+  it("enforces the client scope a tool needs, wherever the tool is reached from", () => {
+    // This test previously asserted the opposite — that memory and knowledge tools were
+    // "already governed by scopes" and needed no rule here. That belief was the
+    // vulnerability: scopes govern gateway *methods*, and a conversation calls tools,
+    // so a session holding only `conversation` reached the very data its missing scopes
+    // describe. Scope is still the single owner of that decision; this is the one place
+    // the tool path asks it.
+    assert.equal(capabilityForTool("memory_search"), null, "not capability-bearing");
+    assert.equal(scopeForTool("memory_search"), "memory.read", "but it is scope-bearing");
+
+    const without = decideRemoteToolRequest({
+      toolName: "memory_search",
+      origin: { kind: "remote", trust: "trusted", manifest: manifest([]), scopes: ["status"] },
+    });
+    assert.equal(without.allowed, false);
+
+    const withScope = decideRemoteToolRequest({
+      toolName: "memory_search",
+      origin: {
+        kind: "remote",
+        trust: "trusted",
+        manifest: manifest([]),
+        scopes: ["status", "memory.read"],
+      },
+    });
+    assert.equal(withScope.allowed, true, "the control must narrow, not sever");
+  });
+
+  it("treats an origin with no established scopes as holding none", () => {
+    // Absent must not read as "unrestricted". A request whose authority cannot be
+    // established gets none of it.
     const decision = decideRemoteToolRequest({
       toolName: "memory_search",
       origin: { kind: "remote", trust: "trusted", manifest: manifest([]) },
     });
-    assert.equal(decision.allowed, true);
+    assert.equal(decision.allowed, false);
   });
 });
