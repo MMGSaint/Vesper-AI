@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { testRuntime } from "./test-helpers.ts";
+import { MAX_MEMORY_VALUE_CHARS } from "./memory/store.ts";
 import type { ChatMessage, CompletionRequest, ModelToolCall } from "./types.ts";
 
 /**
@@ -159,20 +160,30 @@ describe("wiring: a poisoned tool result never reaches the model", () => {
 });
 
 describe("wiring: retrieval cannot starve the context budget", () => {
-  it("bounds the system prompt even when a stored memory is enormous", async () => {
+  it("bounds the system prompt however much memory retrieval returns", async () => {
     // `fitContext` treats the system prompt as untrimmable — it can only drop
     // conversation. So an unbounded retrieval envelope does not just crowd history out,
     // it starves it with no way to recover. Anything Vesper reads can ask to be
     // remembered, which makes the size of a memory attacker-influenced.
+    //
+    // A single entry is now capped at MAX_MEMORY_VALUE_CHARS by the store, so the shape
+    // of this attack is no longer one enormous memory but several at the ceiling:
+    // retrieval returns up to six, and six times the per-entry limit is still far more
+    // than the prompt may carry. The property under test is unchanged — it is the
+    // *retrieval envelope*, not any one memory, that must not starve the budget.
     const { seen, provider } = recordingProvider(() => ({ text: "noted" }));
     const runtime = await testRuntime({ providers: [provider] });
 
-    await runtime.memory.remember({
-      category: "fact",
-      key: "capture card notes",
-      value: `capture card ${"filler ".repeat(20_000)}`,
-      source: "user",
-    });
+    const atTheCeiling = `capture card ${"filler ".repeat(2000)}`.slice(0, MAX_MEMORY_VALUE_CHARS);
+    assert.equal(atTheCeiling.length, MAX_MEMORY_VALUE_CHARS, "the fixture is not at the cap");
+    for (let i = 0; i < 8; i += 1) {
+      await runtime.memory.remember({
+        category: "fact",
+        key: `capture card notes ${i}`,
+        value: atTheCeiling,
+        source: "user",
+      });
+    }
 
     await runtime.chat("help me plan tonight's capture card session");
 

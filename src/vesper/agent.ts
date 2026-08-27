@@ -195,6 +195,22 @@ const READY_APPS: Record<string, string[]> = {
   development: ["vscode"],
 };
 
+/**
+ * The widest a single round of tool calls may be.
+ *
+ * Eight is already more than any legitimate turn needs — the model gets another round if
+ * it needs one. See the truncation site in `handle` for why a bound exists at all.
+ */
+export const MAX_TOOL_CALLS_PER_ROUND = 8;
+
+/**
+ * The most of a message that is used as a retrieval query.
+ *
+ * Retrieval ranks stored items by similarity to what was asked; the first two thousand
+ * characters carry the question. Beyond that the extra tokens add cost, not relevance.
+ */
+export const MAX_RETRIEVAL_QUERY_CHARS = 2000;
+
 export class Agent {
   private readonly deps: AgentDeps;
   /**
@@ -368,14 +384,23 @@ export class Agent {
     const memoryWithheld = !mayRead("memory.read");
     const knowledgeWithheld = !mayRead("knowledge.read");
 
+    // Retrieval is a relevance heuristic, so it does not need the whole message — and
+    // giving it the whole message makes its cost the sender's choice. Both stores score
+    // every stored item against every query token, so an unbounded query is unbounded
+    // work on a single-threaded host. The gateway refuses very long messages outright;
+    // this bounds the local path too, where there is no gateway to refuse anything.
+    const retrievalQuery = userText.length > MAX_RETRIEVAL_QUERY_CHARS
+      ? userText.slice(0, MAX_RETRIEVAL_QUERY_CHARS)
+      : userText;
+
     const memories = memoryWithheld
       ? []
-      : await this.deps.memory.search(userText, { workspaceId: workspace.id, limit: 6 });
+      : await this.deps.memory.search(retrievalQuery, { workspaceId: workspace.id, limit: 6 });
     // Awaitable retrieval so a model-backed embedder can actually influence ranking;
     // it falls back to lexical scoring when no embedding backend is reachable.
     const knowledge = knowledgeWithheld
       ? []
-      : await this.deps.knowledge.searchAsync(userText, {
+      : await this.deps.knowledge.searchAsync(retrievalQuery, {
           workspaceId: workspace.id,
           limit: 4,
         });
@@ -489,6 +514,23 @@ export class Agent {
     let repeated: string | null = null;
     while (completion.toolCalls.length && iterations < this.deps.maxToolIterations) {
       iterations += 1;
+      // How many tool calls one round may contain.
+      //
+      // `maxToolIterations` bounds the number of *rounds*, and nothing bounded the width
+      // of a round, so a steered model multiplied its own reach by asking for hundreds of
+      // calls at once. A model asking for more than this in a single round is either
+      // malfunctioning or hostile; the extras are dropped and the model is told so on the
+      // next round rather than silently.
+      if (completion.toolCalls.length > MAX_TOOL_CALLS_PER_ROUND) {
+        this.deps.log.warn("tool", "Truncated an oversized tool-call round", {
+          asked: completion.toolCalls.length,
+          kept: MAX_TOOL_CALLS_PER_ROUND,
+        });
+        completion = {
+          ...completion,
+          toolCalls: completion.toolCalls.slice(0, MAX_TOOL_CALLS_PER_ROUND),
+        };
+      }
       const signature = completion.toolCalls
         .map((call) => `${call.name}:${JSON.stringify(call.arguments ?? {})}`)
         .sort()

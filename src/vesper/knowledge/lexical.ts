@@ -41,11 +41,20 @@ export function buildLexicalIndex(texts: string[]): LexicalIndex {
   return { docs, df, avgdl: docs.length ? total / docs.length : 0, count: docs.length };
 }
 
-export function bm25(queryTokens: string[], index: LexicalIndex, docIndex: number): number {
+/**
+ * Score one document against a query.
+ *
+ * `queryTerms` is a Set the caller builds once. It used to be built here — a fresh
+ * `new Set(queryTokens)` per document — which made a long query cost
+ * O(documents x query-tokens) in allocation as well as comparison, and turned one large
+ * message into tens of seconds of blocked event loop. The de-duplication belongs to the
+ * query, not to the document.
+ */
+export function bm25(queryTerms: ReadonlySet<string>, index: LexicalIndex, docIndex: number): number {
   const doc = index.docs[docIndex];
   if (!doc || doc.length === 0 || index.avgdl === 0) return 0;
   let score = 0;
-  for (const token of new Set(queryTokens)) {
+  for (const token of queryTerms) {
     const tf = doc.tf.get(token);
     if (!tf) continue;
     const df = index.df.get(token) ?? 0;

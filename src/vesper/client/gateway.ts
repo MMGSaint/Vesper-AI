@@ -22,6 +22,21 @@ export interface ClientStatus {
   pendingConfirmations: number;
 }
 
+/**
+ * The longest message another device may send.
+ *
+ * Vesper is single-threaded, and a conversation turn does retrieval over the whole
+ * message: memory search and knowledge search both score every stored item against
+ * every query token. There was no bound at all, so a single 10.9 MiB message from a
+ * *restricted* companion — the class the code itself describes as one whose
+ * surroundings Vesper cannot vouch for, holding neither memory nor write scope —
+ * blocked the entire host for 84 seconds. A larger corpus makes that minutes.
+ *
+ * 32k characters is far longer than anything a person types and far shorter than
+ * anything that hurts.
+ */
+export const MAX_REMOTE_MESSAGE_CHARS = 32_000;
+
 export class VesperClientGateway {
   readonly sessions: ClientSessionStore;
   private readonly runtime: VesperRuntime;
@@ -163,6 +178,14 @@ export class VesperClientGateway {
     if ("ok" in session) return session;
     const trimmed = text.trim();
     if (!trimmed) return clientError("INVALID", "Empty message.");
+    if (trimmed.length > MAX_REMOTE_MESSAGE_CHARS) {
+      // Refused at the boundary rather than truncated, so the sender knows Vesper did
+      // not read what they sent. See MAX_REMOTE_MESSAGE_CHARS for why there is a bound.
+      return clientError(
+        "INVALID",
+        `Message is ${trimmed.length} characters; the limit is ${MAX_REMOTE_MESSAGE_CHARS}.`,
+      );
+    }
     // A conversation is a tool-calling loop, so a remote turn must carry who is asking
     // all the way to the point tools run. Without this, "may converse" silently means
     // "may call anything the agent decides to call" on the host's own machine.

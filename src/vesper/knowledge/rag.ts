@@ -413,12 +413,14 @@ export class KnowledgeIndex {
     );
     const lexicalIndex = this.lexicalIndex();
     const queryTokens = tokenize(query);
+    // Built once for the whole ranking pass, not once per document.
+    const queryTerms = new Set(queryTokens);
     const phrase = query.trim().toLowerCase();
     const scored = this.documents
       .map((doc, index) => ({ doc, index }))
       .filter((row) => allowedSources.has(row.doc.sourceId))
       .map((row) => {
-        const lexical = queryTokens.length ? bm25(queryTokens, lexicalIndex, row.index) : 0;
+        const lexical = queryTerms.size ? bm25(queryTerms, lexicalIndex, row.index) : 0;
         const docVec = this.vectors?.[row.index];
         const dense = queryVec && docVec ? cosineSimilarity(queryVec, docVec) : 0;
         const idx = phrase ? row.doc.text.toLowerCase().indexOf(phrase) : -1;

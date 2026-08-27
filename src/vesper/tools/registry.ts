@@ -19,6 +19,44 @@ export interface RegisteredTool {
   handler: ToolHandler;
 }
 
+/**
+ * How many confirmations may wait at once.
+ *
+ * A confirmation is a question put to a person, and a person can only ever answer a
+ * handful. The queue had no cap, no expiry and no quota, and the model decides both how
+ * many tool calls a round contains and what arguments they carry — so one steered turn
+ * queued 4,000 entries, a few turns reached a V8 heap OOM, and the whole queue was
+ * re-serialised to disk after every turn.
+ *
+ * The cap refuses rather than evicts. Evicting the oldest would let an attacker push a
+ * genuine pending request out of the queue, which turns a denial-of-service into a
+ * silent authorization change.
+ */
+export const MAX_PENDING_CONFIRMATIONS = 32;
+
+/**
+ * How long an unanswered confirmation stays askable.
+ *
+ * Not a security boundary on its own — the cap is — but a confirmation nobody answered
+ * within the hour is stale, and answering it later would approve an action whose context
+ * is long gone.
+ */
+export const CONFIRMATION_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * The most argument text one queued confirmation may carry.
+ *
+ * The queue is persisted after every turn and `validateToolArgs` checks a declared JSON
+ * type but never a length, so one string argument could be any size at all — and with
+ * the count capped at 32, per-entry size is the remaining way to make the queue large.
+ *
+ * Deliberately generous: a confirmation that holds a document the user is about to write
+ * is the normal case, and this must refuse an attack, not a long note. Oversized
+ * arguments are refused rather than clipped, because a clipped argument that is later
+ * approved would execute something other than what was asked for.
+ */
+const MAX_CONFIRMATION_ARGS_BYTES = 256 * 1024;
+
 export class ToolRegistry {
   readonly confirmations: Map<string, PendingConfirmation>;
   private tools = new Map<string, RegisteredTool>();
@@ -44,6 +82,28 @@ export class ToolRegistry {
     this.log = log;
     this.confirmations = confirmations;
     this.trustOf = trustOf;
+  }
+
+  /**
+   * Drop confirmations nobody answered in time.
+   *
+   * Run before the cap is checked so an old flood cannot permanently wedge the queue
+   * against a legitimate request, and on read so a stale entry is never presented as
+   * still askable.
+   */
+  sweepExpiredConfirmations(now = Date.now()): number {
+    let removed = 0;
+    for (const [id, pending] of this.confirmations) {
+      const created = Date.parse(pending.createdAt);
+      // An unparseable timestamp is treated as expired: a confirmation Vesper cannot
+      // date is one it cannot vouch for the age of.
+      if (!Number.isFinite(created) || now - created > CONFIRMATION_TTL_MS) {
+        this.confirmations.delete(id);
+        removed += 1;
+      }
+    }
+    if (removed > 0) this.log.info("permission", "Expired stale confirmations", { removed });
+    return removed;
   }
 
   /** A remote origin, re-read against live trust and re-capped to that class's ceiling. */
@@ -189,6 +249,45 @@ export class ToolRegistry {
     }
 
     if (decision.requiresConfirmation && !input.confirmed) {
+      this.sweepExpiredConfirmations();
+      if (this.confirmations.size >= MAX_PENDING_CONFIRMATIONS) {
+        // Refused, not evicted: dropping the oldest to make room would let a flood push
+        // a genuine pending request out of the queue, and a request that silently
+        // disappears is worse than one that is visibly refused.
+        const reason =
+          `There are already ${this.confirmations.size} actions waiting for your confirmation, ` +
+          `which is the most I will hold. Answer or clear some before asking for more.`;
+        this.log.warn("permission", "Refused to queue a confirmation: the queue is full", {
+          tool: input.name,
+          queued: this.confirmations.size,
+        });
+        return {
+          id: createId("tool"),
+          toolName: input.name,
+          args: input.args,
+          at: nowIso(),
+          decision,
+          result: { ok: false, summary: reason, epistemic: "could_not_access" },
+        };
+      }
+      const argsBytes = JSON.stringify(args).length;
+      if (argsBytes > MAX_CONFIRMATION_ARGS_BYTES) {
+        const reason =
+          `That request carries ${argsBytes} characters of arguments, more than I will hold ` +
+          `for a confirmation. Ask for something smaller.`;
+        this.log.warn("permission", "Refused to queue a confirmation: arguments too large", {
+          tool: input.name,
+          bytes: argsBytes,
+        });
+        return {
+          id: createId("tool"),
+          toolName: input.name,
+          args: input.args,
+          at: nowIso(),
+          decision,
+          result: { ok: false, summary: reason, epistemic: "could_not_access" },
+        };
+      }
       const pending: PendingConfirmation = {
         id: createId("confirm"),
         toolName: input.name,

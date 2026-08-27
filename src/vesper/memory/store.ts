@@ -10,6 +10,18 @@ const DEFAULT_MAX_PERSISTENT = 500;
 const MAX_NOTICES = 100;
 
 /**
+ * The largest a single remembered value may be.
+ *
+ * Generous for a fact about the user — a long paragraph of preferences fits — and small
+ * enough that 500 of them cannot make retrieval slow. See `remember` for why the bound
+ * is enforced there rather than at the callers.
+ */
+export const MAX_MEMORY_VALUE_CHARS = 8000;
+
+/** Keys are looked up and compared constantly; a key is a name, not a document. */
+export const MAX_MEMORY_KEY_CHARS = 200;
+
+/**
  * Legacy write scope, kept because it reads naturally at call sites: "file this
  * globally" rather than "file this at scope global". It maps onto `MemoryScopeLevel`.
  */
@@ -146,6 +158,23 @@ export class MemoryStore {
     tags?: string[];
     provenance?: MemoryEntry["provenance"];
   }): Promise<MemoryEntry> {
+    // Bounded before the lock is taken, so an oversized write costs nothing.
+    //
+    // Memory search scores every stored entry against every query token, so the size of
+    // what is stored is the cost of every future turn — one planted 18 MiB entry made an
+    // ordinary 53-character question take 1.7 seconds and grow the heap on each repeat.
+    // The model chooses what to remember, and the model is never the security authority,
+    // so the bound belongs here rather than in whichever caller happens to be careful.
+    if (input.value.length > MAX_MEMORY_VALUE_CHARS) {
+      throw new Error(
+        `Memory value is ${input.value.length} characters; the limit is ${MAX_MEMORY_VALUE_CHARS}.`,
+      );
+    }
+    if (input.key.length > MAX_MEMORY_KEY_CHARS) {
+      throw new Error(
+        `Memory key is ${input.key.length} characters; the limit is ${MAX_MEMORY_KEY_CHARS}.`,
+      );
+    }
     return this.runExclusive(async () => {
       const now = nowIso();
       const workspaceId = input.scope === "global" ? undefined : input.workspaceId;

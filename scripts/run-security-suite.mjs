@@ -32,6 +32,7 @@ const SUITE = [
   ["src/vesper/client/confirmation-authority.test.ts", "the confirmation queue as a trust boundary"],
   ["src/vesper/memory/scopes.test.ts", "memory scope visibility and attribution"],
   ["src/vesper/distributed/discovery.test.ts", "capabilities are discovered, never assumed"],
+  ["src/vesper/resource-bounds.test.ts", "nothing untrusted chooses how much the host allocates"],
 ];
 
 const missing = SUITE.filter(([file]) => !existsSync(file));
