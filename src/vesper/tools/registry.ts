@@ -11,6 +11,8 @@ import type {
   ToolSpec,
 } from "../types.ts";
 import { decideRemoteToolRequest, type RequestOrigin } from "./remote.ts";
+import { capScopesForTrust } from "../client/protocol.ts";
+import type { TrustState } from "../distributed/identity.ts";
 
 export interface RegisteredTool {
   spec: ToolSpec;
@@ -22,15 +24,34 @@ export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>();
   private readonly gate: PermissionGate;
   private readonly log: Logger;
+  /**
+   * Reads a device's trust *now*.
+   *
+   * Placed here rather than in the agent because this is the chokepoint every caller
+   * passes through: a RequestOrigin is a snapshot taken when a request was accepted, and
+   * anything holding one can outlive the trust it records. Re-reading in the agent left
+   * every direct `tools.invoke` — and every future caller — deciding on stale authority.
+   */
+  private readonly trustOf?: (deviceId: string) => Promise<TrustState>;
 
   constructor(
     gate: PermissionGate,
     log: Logger,
     confirmations: Map<string, PendingConfirmation> = new Map(),
+    trustOf?: (deviceId: string) => Promise<TrustState>,
   ) {
     this.gate = gate;
     this.log = log;
     this.confirmations = confirmations;
+    this.trustOf = trustOf;
+  }
+
+  /** A remote origin, re-read against live trust and re-capped to that class's ceiling. */
+  private async liveOrigin(origin: RequestOrigin | undefined): Promise<RequestOrigin> {
+    if (!origin) return { kind: "local" };
+    if (origin.kind !== "remote" || !origin.deviceId || !this.trustOf) return origin;
+    const trust = await this.trustOf(origin.deviceId);
+    return { ...origin, trust, scopes: capScopesForTrust(origin.scopes ?? [], trust) };
   }
 
   register(spec: ToolSpec, handler: ToolHandler) {
@@ -118,6 +139,7 @@ export class ToolRegistry {
     // From here on the validated arguments are the ones that count.
     const args = validation.args;
 
+    const origin = await this.liveOrigin(input.origin);
     const decision = this.gate.evaluate(registered.spec, args, input.workspaceId);
 
     // Narrowing only, and only after the gate has spoken: a remote device can lose
@@ -129,12 +151,12 @@ export class ToolRegistry {
       // disagree, but an alias or a namespace added later would open a differential
       // where authorization inspects one name and execution runs another.
       toolName: registered.spec.name,
-      origin: input.origin ?? { kind: "local" },
+      origin,
     });
     if (!remote.allowed) {
       this.log.warn("permission", remote.reason, {
         tool: input.name,
-        deviceId: input.origin?.deviceId ?? "unknown",
+        deviceId: origin.deviceId ?? "unknown",
       });
       return {
         id: createId("tool"),
@@ -174,10 +196,7 @@ export class ToolRegistry {
         reason: decision.reason,
         createdAt: nowIso(),
         workspaceId: input.workspaceId,
-        requestedBy: {
-          kind: input.origin?.kind ?? "local",
-          deviceId: input.origin?.deviceId,
-        },
+        requestedBy: { kind: origin.kind, deviceId: origin.deviceId },
       };
       this.confirmations.set(pending.id, pending);
       this.log.info("permission", "Queued confirmation", { id: pending.id, tool: input.name });

@@ -245,6 +245,20 @@ export class VesperClientGateway {
     if (!input.key.trim() || !input.value.trim()) {
       return clientError("INVALID", "Memory key and value are required.");
     }
+    // The same destructive-overwrite rule the tool path has. Replacing a memory destroys
+    // what was there, which is what memory_forget's confirmation exists to govern —
+    // and this route reaches the store directly, so guarding only the tool left the
+    // gateway as a way around it.
+    const workspaceId = this.runtime.workspaces.current().id;
+    const existing = (await this.runtime.memory.search(input.key.trim(), { workspaceId, scope: "all" }))
+      .find((item) => item.key.toLowerCase() === input.key.trim().toLowerCase());
+    if (existing && existing.value !== input.value.trim()) {
+      return clientError(
+        "PERMISSION_DENIED",
+        `'${input.key.trim()}' already holds a different value. Forgetting it first requires confirmation at the machine.`,
+      );
+    }
+
     // Recorded as what it is: a companion device asserting something, not the person at
     // the machine saying it. Labelling it "user" gave a remote write the store's most
     // protected eviction rank, so a flood of them pushed out the owner's own memories
@@ -254,7 +268,7 @@ export class VesperClientGateway {
       category: input.category ?? "preference",
       key: input.key.trim(),
       value: input.value.trim(),
-      workspaceId: this.runtime.workspaces.current().id,
+      workspaceId,
       source: "agent",
       provenance: { origin: `client:${session.deviceId}`, kind: "stated" },
     });

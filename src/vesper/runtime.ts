@@ -722,7 +722,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   });
   const gate = createPermissionGate(config.permissions, log);
   const confirmations = new Map<string, PendingConfirmation>();
-  const tools = new ToolRegistry(gate, log, confirmations);
+  const tools = new ToolRegistry(gate, log, confirmations, async (id) =>
+    (await devices.get(id))?.trust ?? "unknown",
+  );
   const models = createModelRouter({
     config,
     providers: options.providers,

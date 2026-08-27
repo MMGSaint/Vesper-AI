@@ -1082,3 +1082,96 @@ describe("invariant: a companion sees its own reply, not the host's business", (
     await runtime.stop();
   });
 });
+
+describe("invariant: revoking a device bites the turn already running", () => {
+  it("stops a remote turn's later tool calls once its device is revoked", async () => {
+    // RequestOrigin was a snapshot taken when the gateway accepted the request, and a
+    // turn outlives that moment. A phone revoked mid-conversation kept the trust it had
+    // at entry, so "revocation is immediate" was only true between turns.
+    const runtime = await testRuntime();
+    const gateway = createClientGateway(runtime);
+    const phone = await enrolCompanion(runtime, { name: "phone" });
+    const session = await gateway.issueSession({
+      deviceId: phone.deviceId,
+      deviceLabel: "phone",
+      scopes: ["status", "conversation", "memory.read"],
+    });
+    if (isClientError(session)) throw new Error(session.detail);
+
+    const origin = {
+      kind: "remote" as const,
+      deviceId: phone.deviceId,
+      trust: "trusted" as const,
+      manifest: null,
+      scopes: session.scopes,
+    };
+
+    // The turn is under way with a trusted origin in hand; then the owner revokes.
+    await runtime.devices.setTrust(phone.deviceId, "revoked");
+    const record = await runtime.tools.invoke({
+      name: "memory_search",
+      args: { query: "anything" },
+      workspaceId: "general",
+      origin,
+    });
+    assert.equal(
+      record.result?.ok,
+      false,
+      "a revoked device's in-flight turn kept calling tools with its stale authority",
+    );
+    await runtime.stop();
+  });
+
+  it("re-caps a demoted device's scopes mid-turn rather than trusting the snapshot", async () => {
+    const runtime = await testRuntime();
+    const phone = await enrolCompanion(runtime, { name: "phone" });
+    await runtime.devices.setTrust(phone.deviceId, "restricted");
+
+    // The snapshot still claims memory.read, which a restricted device may not hold.
+    const stale = {
+      kind: "remote" as const,
+      deviceId: phone.deviceId,
+      trust: "trusted" as const,
+      manifest: null,
+      scopes: ["status", "conversation", "memory.read"] as const,
+    };
+    const record = await runtime.tools.invoke({
+      name: "memory_search",
+      args: { query: "anything" },
+      workspaceId: "general",
+      origin: { ...stale, scopes: [...stale.scopes] },
+    });
+    assert.equal(record.result?.ok, false, "a stale scope snapshot was honoured");
+    await runtime.stop();
+  });
+
+  it("refuses a companion's write that would replace an existing memory", async () => {
+    // The tool path was guarded; this route reaches the store directly, so guarding only
+    // the tool left the gateway as a way around the same destruction.
+    const runtime = await testRuntime();
+    const gateway = createClientGateway(runtime);
+    await runtime.memory.remember({
+      category: "fact",
+      key: "mortis-boundary",
+      value: "Mortis is a separate project.",
+      source: "user",
+    });
+    const phone = await enrolCompanion(runtime, { name: "phone" });
+    const session = await gateway.issueSession({
+      deviceId: phone.deviceId,
+      deviceLabel: "phone",
+      scopes: ["status", "conversation", "memory.read", "memory.write"],
+    });
+    if (isClientError(session)) throw new Error(session.detail);
+
+    const result = await gateway.remember(session.token, {
+      key: "mortis-boundary",
+      value: "Mortis is now part of Vesper.",
+    });
+    assert.equal(isClientError(result), true, "a companion overwrote a stored memory");
+
+    const stored = await runtime.memory.search("mortis-boundary", { scope: "all" });
+    assert.match(stored.find((e) => e.key === "mortis-boundary")?.value ?? "", /separate project/);
+    await runtime.stop();
+  });
+});

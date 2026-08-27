@@ -18,23 +18,10 @@
 
 import { randomUUID } from "node:crypto";
 import type { ClientScope } from "../client/protocol.ts";
-import { CLIENT_SCOPES, RESTRICTED_COMPANION_SCOPES } from "../client/protocol.ts";
+import { CLIENT_SCOPES, capScopesForTrust } from "../client/protocol.ts";
 import type { TrustState } from "./identity.ts";
 import { canonicalJson, safeEqual, verifySignature, type DeviceIdentity } from "./identity.ts";
 import type { DeviceRegistry } from "./registry.ts";
-
-/**
- * The scopes a device of this trust class may actually exercise.
- *
- * Shared with the client session store's ceiling so the two cannot drift: a restricted
- * device holds at most RESTRICTED_COMPANION_SCOPES however it authenticated, and
- * whatever it was granted while it was still trusted.
- */
-function capScopesForTrust(scopes: ClientScope[], trust: TrustState): ClientScope[] {
-  if (trust !== "restricted") return scopes;
-  const ceiling = new Set<ClientScope>(RESTRICTED_COMPANION_SCOPES);
-  return scopes.filter((scope) => ceiling.has(scope));
-}
 
 
 export const SESSION_GRANT_VERSION = 1 as const;

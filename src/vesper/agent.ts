@@ -4,7 +4,7 @@ import type { MemoryStore } from "./memory/store.ts";
 import { attribute } from "./memory/scopes.ts";
 import { decideRemoteToolRequest, type RequestOrigin } from "./tools/remote.ts";
 import type { TrustState } from "./distributed/identity.ts";
-import type { ClientScope } from "./client/protocol.ts";
+import { capScopesForTrust, type ClientScope } from "./client/protocol.ts";
 import type { CapabilityManifest } from "./distributed/capabilities.ts";
 import type { KnowledgeIndex } from "./knowledge/rag.ts";
 import type { ModelRouter } from "./models/router.ts";
@@ -295,9 +295,10 @@ export class Agent {
       // rather than a rubber stamp on the first: the request cannot carry more than the
       // asker held, and it cannot gain more from whoever approves it.
       const requester = await this.resolveOrigin(confirmation.requestedBy);
+      const approver = origin ?? { kind: "local" as const };
       const checks = [
         decideRemoteToolRequest({ toolName: confirmation.toolName, origin: requester }),
-        decideRemoteToolRequest({ toolName: confirmation.toolName, origin: origin ?? { kind: "local" } }),
+        decideRemoteToolRequest({ toolName: confirmation.toolName, origin: approver }),
       ];
       const allowedForRequester = checks.find((check) => !check.allowed) ?? checks[0];
       if (!allowedForRequester.allowed) {
@@ -319,7 +320,7 @@ export class Agent {
       }
 
       const record = await this.deps.tools.invoke({
-        origin,
+        origin: approver,
         name: confirmation.toolName,
         args: confirmation.args,
         workspaceId: confirmation.workspaceId,
@@ -918,6 +919,28 @@ export class Agent {
    * confirmation was queued must lose the approval with it, and a record with no
    * readable origin resolves to the most restricted thing it could be.
    */
+  /**
+   * Re-read a remote origin's authority immediately before it is exercised.
+   *
+   * RequestOrigin is a snapshot taken when the gateway accepted the request, and a turn
+   * outlives that moment: a device revoked or demoted while its turn was still running
+   * kept the trust and scopes it had at entry, so a revoked phone's already-started
+   * conversation went on calling tools. Trust is a live property everywhere else in this
+   * system; it has to be live here too, or "revocation is immediate" is only true
+   * between turns.
+   */
+  private async liveOrigin(origin: RequestOrigin | undefined): Promise<RequestOrigin | undefined> {
+    if (!origin || origin.kind !== "remote" || !origin.deviceId || !this.deps.deviceTrust) {
+      return origin;
+    }
+    const trust = await this.deps.deviceTrust(origin.deviceId);
+    return {
+      ...origin,
+      trust,
+      scopes: capScopesForTrust(origin.scopes ?? [], trust),
+    };
+  }
+
   private async resolveOrigin(
     recorded: PendingConfirmation["requestedBy"],
   ): Promise<RequestOrigin> {
