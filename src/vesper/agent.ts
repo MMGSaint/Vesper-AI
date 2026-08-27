@@ -27,6 +27,12 @@ interface AgentDeps {
   log: Logger;
   memory: MemoryStore;
   knowledge: KnowledgeIndex;
+  /**
+   * One compact snapshot of the device ecosystem, folded into the prompt each turn.
+   * A callback rather than the objects themselves, so the agent does not grow a
+   * dependency on the registry, the task queue, and presence separately.
+   */
+  describeNow?: () => Promise<string> | string;
   models: ModelRouter;
   tools: ToolRegistry;
   workspaces: WorkspaceManager;
@@ -281,8 +287,10 @@ export class Agent {
     const snapshot = this.deps.hardware.snapshot();
     const optimizer = await this.deps.optimizer.getStatus().catch(() => null);
 
+    const nowContext = this.deps.describeNow ? await this.deps.describeNow() : null;
     const system = [
       VESPER_SYSTEM_PROMPT,
+      nowContext,
       `Active workspace: ${workspace.name} (${workspace.id}). ${workspace.description}`,
       `Hardware mode: ${snapshot.mode}. ${snapshot.notes.join(" ")}`,
       `CPU: ${snapshot.cpu.name} ${snapshot.cpu.utilizationPct}% ${snapshot.cpu.tempC ?? "n/a"}°C`,

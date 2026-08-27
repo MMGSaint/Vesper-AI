@@ -34,6 +34,11 @@ import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
 import { buildDiagnostics } from "./diagnostics.ts";
 import { createId } from "./id.ts";
 import { createObsClient, type ObsClient } from "./specialists/obs.ts";
+import { VESPER_VERSION } from "./version.ts";
+import { loadDeviceIdentity, type DeviceIdentity, type HostPosture } from "./distributed/identity.ts";
+import { DeviceRegistry } from "./distributed/registry.ts";
+import { TaskQueue } from "./distributed/tasks.ts";
+import { buildNow, renderNow } from "./distributed/now.ts";
 import { describeStartupRegistration } from "./windows/startup.ts";
 import type {
   AgentTurn,
@@ -54,6 +59,13 @@ export interface RuntimeOptions {
   xaiKey?: string;
   providers?: Parameters<typeof createModelRouter>[0]["providers"];
   skipDiscovery?: boolean;
+  /**
+   * Where the device keypair lives. Absent (as in tests) the identity is kept in the
+   * storage adapter instead, so a test never writes a key to the developer's disk.
+   */
+  dirs?: { data: string };
+  /** How much the machine underneath is trusted. Portable sessions pass `foreign`. */
+  hostPosture?: HostPosture;
 }
 
 export class VesperRuntime {
@@ -68,6 +80,10 @@ export class VesperRuntime {
   readonly hardware: SimulatedHardware;
   readonly optimizer: OptimizerAdapter;
   readonly obs: ObsClient;
+  readonly deviceIdentity: DeviceIdentity;
+  readonly devices: DeviceRegistry;
+  readonly taskQueue: TaskQueue;
+  readonly hostPosture: HostPosture;
   readonly tools: ToolRegistry;
   readonly models: ModelRouter;
   readonly agent: Agent;
@@ -96,6 +112,10 @@ export class VesperRuntime {
       hardware: SimulatedHardware;
       optimizer: OptimizerAdapter;
       obs: ObsClient;
+      deviceIdentity: DeviceIdentity;
+      devices: DeviceRegistry;
+      taskQueue: TaskQueue;
+      hostPosture: HostPosture;
       tools: ToolRegistry;
       models: ModelRouter;
       agent: Agent;
@@ -119,6 +139,10 @@ export class VesperRuntime {
     this.hardware = parts.hardware;
     this.optimizer = parts.optimizer;
     this.obs = parts.obs;
+    this.deviceIdentity = parts.deviceIdentity;
+    this.devices = parts.devices;
+    this.taskQueue = parts.taskQueue;
+    this.hostPosture = parts.hostPosture;
     this.tools = parts.tools;
     this.models = parts.models;
     this.agent = parts.agent;
@@ -456,6 +480,35 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     log.warn("lifecycle", "Config invalid; using defaults", { errors: parsed.errors.join("; ") });
   }
   const storage = options.storage ?? new MemoryStorage();
+
+  // Device identity, the registry, and the task queue are constructed before anything
+  // that might want to know which machine this is.
+  const identityIo = options.dirs
+    ? undefined
+    : {
+        // No dirs means no filesystem: keep the key in the storage adapter so tests and
+        // in-memory runs never leave a private key on disk.
+        read: async (key: string) => {
+          const value = await storage.get(key);
+          if (typeof value !== "string") {
+            throw Object.assign(new Error("not found"), { code: "ENOENT" });
+          }
+          return value;
+        },
+        write: async (key: string, contents: string) => {
+          await storage.set(key, contents);
+        },
+      };
+  const loadedIdentity = await loadDeviceIdentity({
+    dirs: options.dirs ?? { data: "identity" },
+    vesperVersion: VESPER_VERSION,
+    io: identityIo,
+  });
+  const deviceIdentity = loadedIdentity.identity;
+  const hostPosture: HostPosture = options.hostPosture ?? "owned";
+  const devices = new DeviceRegistry({ storage, self: deviceIdentity.publicIdentity() });
+  const taskQueue = new TaskQueue({ storage });
+
   const memory = new MemoryStore(storage);
   // The knowledge index is constructed before the model router, so the embedding
   // backend is resolved lazily through this reference rather than by reordering
@@ -590,6 +643,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   registerBuiltinTools({
     registry: tools,
     obs,
+    deviceRegistry: devices,
+    tasks: taskQueue,
+    selfDeviceId: deviceIdentity.deviceId,
     config,
     hardware,
     windows,
@@ -624,6 +680,30 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     confirmations,
     history,
     maxToolIterations: config.agent.maxToolIterations,
+    describeNow: async () => {
+      const [records, tasks] = await Promise.all([devices.list(), taskQueue.list()]);
+      const self =
+        records.find((record) => record.identity.deviceId === deviceIdentity.deviceId) ?? records[0];
+      if (!self) return "";
+      return renderNow(
+        buildNow({
+          self,
+          hostPosture,
+          workspace: workspaces.current().name,
+          devices: records,
+          tasks,
+          models: {
+            active: models.status().active,
+            available: models.status().available.map((item) => ({
+              id: item.id,
+              available: item.available,
+            })),
+          },
+          voice: voice.status().available ? "available" : "unavailable",
+          optimizer: config.optimizer.mode,
+        }),
+      );
+    },
   });
   const runtime = new VesperRuntime(config, {
     log,
@@ -636,6 +716,10 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     hardware,
     optimizer,
     obs,
+    deviceIdentity,
+    devices,
+    taskQueue,
+    hostPosture,
     tools,
     models,
     agent,
