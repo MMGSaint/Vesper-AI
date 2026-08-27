@@ -672,7 +672,8 @@ export function registerBuiltinTools(input: {
   registry.register(
     spec("mcp_status", "Read optional MCP bridge status. MCP is never required at runtime.", "read", {}),
     async () => {
-      const status = mcpBridgeStatus({ enabled: false });
+      // No config surface exists to attach a server, so this is not a user setting.
+      const status = mcpBridgeStatus({ enabled: false, configurable: false });
       return {
         ok: true,
         epistemic: "checked",

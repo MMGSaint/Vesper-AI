@@ -13,7 +13,11 @@
  * can do that.
  */
 
-import { NEVER_REMOTE, decideRemoteRequest, type Capability, type CapabilityManifest } from "../distributed/capabilities.ts";
+import {
+  decideRemoteRequest,
+  type Capability,
+  type CapabilityManifest,
+} from "../distributed/capabilities.ts";
 import type { TrustState } from "../distributed/identity.ts";
 
 /** Who is driving this turn. Absent means the person at this machine. */
@@ -99,9 +103,4 @@ export function decideRemoteToolRequest(input: {
     manifest: input.origin.manifest ?? null,
   });
   return { allowed: decision.allowed, reason: decision.reason };
-}
-
-/** Exposed so a caller can state the rule without importing the capability module. */
-export function neverRemoteCapabilities(): readonly Capability[] {
-  return NEVER_REMOTE;
 }

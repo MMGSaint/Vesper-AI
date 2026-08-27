@@ -321,19 +321,27 @@ export interface McpBridgeStatus {
   detail: string;
 }
 
-export function mcpBridgeStatus(input?: { enabled?: boolean; servers?: string[] }): McpBridgeStatus {
+export function mcpBridgeStatus(input?: {
+  enabled?: boolean;
+  servers?: string[];
+  /**
+   * Whether this build offers any way to turn MCP on. Reporting "disabled" for a
+   * feature that cannot be enabled reads as a setting the user chose, which is a
+   * different and untrue statement.
+   */
+  configurable?: boolean;
+}): McpBridgeStatus {
   const enabled = Boolean(input?.enabled);
   const servers = input?.servers ?? [];
-  return {
-    enabled,
-    required: false,
-    servers,
-    detail: enabled
+  const configurable = input?.configurable ?? true;
+  const detail = !configurable
+    ? "The MCP client is implemented and permission-gated, but this build has no configuration surface to attach a server, so none can be running. Spawning external processes named in a config file is a decision for the machine's owner."
+    : enabled
       ? servers.length
         ? `MCP is enabled with ${servers.length} configured server(s): ${servers.join(", ")}. Their tools pass the permission gate like any other.`
         : "MCP is enabled but no servers are configured."
-      : "MCP integrations are optional and disabled. Vesper stays local-first.",
-  };
+      : "MCP integrations are optional and disabled. Vesper stays local-first.";
+  return { enabled, required: false, servers, detail };
 }
 
 export function mcpToolPermission(_spec: ToolSpec): PermissionLevel {

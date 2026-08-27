@@ -39,7 +39,11 @@ import { loadDeviceIdentity, type DeviceIdentity, type HostPosture } from "./dis
 import { DeviceRegistry } from "./distributed/registry.ts";
 import { TaskQueue } from "./distributed/tasks.ts";
 import { buildNow, renderNow } from "./distributed/now.ts";
-import { discoverCapabilities, type CapabilityManifest } from "./distributed/capabilities.ts";
+import {
+  discoverCapabilities,
+  grantsRespectForbiddenPowers,
+  type CapabilityManifest,
+} from "./distributed/capabilities.ts";
 import { buildDiscoveryProbes } from "./distributed/discovery.ts";
 import type { RequestOrigin } from "./tools/remote.ts";
 import { describeStartupRegistration } from "./windows/startup.ts";
@@ -196,6 +200,21 @@ export class VesperRuntime {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+    // A grant table that names a forbidden power would hand remote devices exactly what
+    // the forbidden list exists to withhold. Checked at startup, not only in tests: the
+    // tables are edited by hand and this is the assertion that catches a bad edit on a
+    // real machine rather than in CI.
+    if (!grantsRespectForbiddenPowers()) {
+      this.log.error("permission", "A capability grant names a forbidden remote power", {});
+      this.events.emit({
+        type: "security.grant_table_invalid",
+        title: "Capability grants name a forbidden remote power",
+        detail:
+          "Remote capability grants overlap the forbidden-powers list. Remote requests are refused until this is corrected.",
+        severity: "error",
+      });
+    }
+
     // Record what this device can actually do. Until this runs, the registry holds a
     // device with no manifest, and routing correctly refuses to send it work — which
     // looks exactly like a machine that cannot do anything.
