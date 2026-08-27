@@ -91,7 +91,92 @@ async function loaded(toolName?: string, args: Record<string, unknown> = {}) {
 }
 
 describe("invariant: an unauthorized tool never executes", () => {
+  /**
+   * A never-tier tool whose handler would genuinely succeed, and says so on the disk.
+   *
+   * This exists because the never tier had no load-bearing coverage at all. Every test
+   * named for it exercised only `disk_wipe` and `credential_extract`, whose builtin
+   * handlers unconditionally return `{ ok: false, summary: "Refused." }`. Asserting
+   * `result.ok === false` on those is asserting what the stub does, not what the gate
+   * does — so both enforcement points (evaluatePermission's `level === "never"` branch
+   * and the registry's backstop) could be deleted together and all 609 tests stayed
+   * green while a never-tier tool ran and wrote to disk.
+   *
+   * The probe closes that: the only thing standing between it and the file is the gate.
+   *
+   * What mutation then showed, and worth writing down rather than implying otherwise:
+   * removing *both* named never branches is not enough to make a never-tier tool run.
+   * `level` is still "never", which is neither "read" nor "safe", so the function's
+   * final default-deny refuses it anyway. The never tier is held by default-deny; the
+   * two explicit branches are defence-in-depth that supply a better reason string. It
+   * takes removing all three — the two branches and the default-deny — before the
+   * handler runs, and that is the mutation these tests are proven against.
+   */
+  async function neverProbe(options: { modelCallsIt?: boolean } = {}) {
+    const { provider } = scripted(options.modelCallsIt ? "never_probe" : undefined);
+    const runtime = await testRuntime(options.modelCallsIt ? { providers: [provider] } : undefined);
+    const marker = join(await mkdtemp(join(tmpdir(), "vesper-never-")), "RAN");
+    runtime.tools.register(
+      {
+        name: "never_probe",
+        description: "A never-tier tool whose handler would really run.",
+        permission: "never",
+        parameters: { type: "object", properties: {}, required: [] },
+      },
+      async () => {
+        await writeFile(marker, "THE-HANDLER-RAN", "utf8");
+        return { ok: true, epistemic: "changed" as const, summary: "ran" };
+      },
+    );
+    return { runtime, marker };
+  }
+
+  async function ran(marker: string): Promise<boolean> {
+    return readFile(marker, "utf8").then(
+      (text) => text.includes("THE-HANDLER-RAN"),
+      () => false,
+    );
+  }
+
+  it("does not run a never-tier handler, even when the caller claims confirmation", async () => {
+    const { runtime, marker } = await neverProbe();
+    const record = await runtime.tools.invoke({
+      name: "never_probe",
+      args: {},
+      workspaceId: "general",
+      confirmed: true,
+    });
+    // The side effect first: this is the only assertion the stub handlers could not have
+    // satisfied on their own.
+    assert.equal(await ran(marker), false, "a never-tier handler ran and wrote to disk");
+    assert.equal(record.decision.allowed, false, "a never-tier tool was authorized");
+    assert.equal(record.decision.level, "never");
+    assert.equal(record.result?.ok, false);
+    await runtime.stop();
+  });
+
+  it("does not run one through the agent's own confirmation queue either", async () => {
+    // The other route in. A confirmation is an answer to a question the gate asked; it
+    // is never authority the gate did not already offer.
+    // The model is the attacker here and calls `never_probe` directly, so the turn
+    // genuinely reaches the tool. Without that the assertions below hold vacuously.
+    const { runtime, marker } = await neverProbe({ modelCallsIt: true });
+    const turn = await runtime.chat("do it");
+    assert.ok(
+      turn.toolCalls.some((call) => call.toolName === "never_probe"),
+      "the model never actually called the tool, so this proves nothing",
+    );
+    assert.equal(turn.pendingConfirmations.length, 0, "a never-tier tool was queued for confirmation");
+    for (const id of runtime.confirmations.keys()) {
+      await runtime.chat("yes", { confirmId: id, approve: true });
+    }
+    assert.equal(await ran(marker), false, "a never-tier handler ran via the confirmation queue");
+    await runtime.stop();
+  });
+
   it("a never-tier tool is refused even when the caller claims confirmation", async () => {
+    // The builtin canaries, kept — but now asserting on the *decision*, which the stub
+    // handler's return value cannot supply.
     const runtime = await testRuntime();
     for (const tool of ["disk_wipe", "credential_extract"]) {
       const record = await runtime.tools.invoke({
@@ -100,6 +185,8 @@ describe("invariant: an unauthorized tool never executes", () => {
         workspaceId: "general",
         confirmed: true,
       });
+      assert.equal(record.decision.allowed, false, `${tool} was authorized`);
+      assert.equal(record.decision.level, "never", `${tool} is no longer never-tier`);
       assert.equal(record.result?.ok, false, `${tool} ran`);
     }
     await runtime.stop();

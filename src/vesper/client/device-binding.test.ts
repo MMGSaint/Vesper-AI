@@ -202,3 +202,66 @@ describe("revocation is terminal, not merely guarded on one edge", () => {
     await runtime.stop();
   });
 });
+
+describe("the bearer token is the only authenticator, so it is compared exactly", () => {
+  /**
+   * A wrong token had no test anywhere.
+   *
+   * Every existing UNAUTHENTICATED assertion in this file and in gateway.test.ts is
+   * satisfied by a *different* mechanism: no token at all (the `if (!token)` guard), an
+   * unenrolled device (caught at issue time), a revoked device (caught by the registry
+   * re-check). Not one of them presented a wrong or truncated token to a live session,
+   * so the comparison itself — `safeEqual(item.token, token)` — was unexercised.
+   *
+   * Substituting `item.token.startsWith(token)`, which is the shape of any prefix or
+   * non-constant-time comparison slip, makes the token brute-forceable one character at
+   * a time and leaves the whole suite green. That is what this test is for.
+   */
+  async function liveSession(name = "phone") {
+    const runtime = await testRuntime();
+    const gateway = new VesperClientGateway(runtime);
+    const device = await peer(name);
+    await runtime.devices.enrol(device.publicIdentity());
+    await runtime.devices.setTrust(device.deviceId, "trusted");
+    const issued = await gateway.issueSession({ deviceId: device.deviceId, deviceLabel: name });
+    if ("ok" in issued) throw new Error(issued.detail);
+    return { runtime, gateway, token: issued.token };
+  }
+
+  it("refuses every near-miss token, including a prefix of the real one", async () => {
+    const { runtime, gateway, token } = await liveSession();
+    assert.ok(token.length > 8, "the token is too short for this test to mean anything");
+
+    const flipped = `${token.slice(0, -1)}${token.at(-1) === "a" ? "b" : "a"}`;
+    const wrong: [string, string][] = [
+      ["empty string", ""],
+      ["one character", token.slice(0, 1)],
+      ["a proper prefix", token.slice(0, token.length - 1)],
+      ["the token plus a character", `${token}x`],
+      ["one character flipped", flipped],
+      ["a prefix with the rest as whitespace", token.slice(0, 4).padEnd(token.length, " ")],
+      ["an unrelated token", "NOT-THE-TOKEN"],
+    ];
+    for (const [label, candidate] of wrong) {
+      const result = await gateway.status(candidate);
+      assert.ok("ok" in result && result.ok === false, `${label} authenticated`);
+      assert.equal(result.code, "UNAUTHENTICATED", `${label} failed for the wrong reason`);
+    }
+
+    // Narrowing, not severing: the real token must still work, in this same test, or a
+    // comparison that refused everything would pass the loop above.
+    const good = await gateway.status(token);
+    assert.equal("ok" in good, false, "the correct token stopped working");
+    await runtime.stop();
+  });
+
+  it("does not accept one device's token on another device's session", async () => {
+    const first = await liveSession("phone-a");
+    const second = await liveSession("phone-b");
+    const crossed = await first.gateway.status(second.token);
+    assert.ok("ok" in crossed && crossed.ok === false, "a token from another host authenticated");
+    assert.equal(crossed.code, "UNAUTHENTICATED");
+    await first.runtime.stop();
+    await second.runtime.stop();
+  });
+});
