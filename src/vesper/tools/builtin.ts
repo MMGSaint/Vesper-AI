@@ -251,10 +251,31 @@ export function registerBuiltinTools(input: {
     ),
     async (args, context) => {
       const category = (str(args, "category") || "fact") as MemoryCategory;
+      const key = str(args, "key");
+      const value = str(args, "value");
+
+      // Storing over an existing key destroys what was there, and destroying a memory is
+      // what memory_forget needs confirmation for. Leaving this at "safe" made that
+      // confirmation decorative: writing an empty value to an existing key deleted it
+      // outright, autonomously, and writing any other value replaced it just as
+      // permanently. A new key is a genuinely additive act and stays autonomous; a
+      // replacement has to go through the tier that governs destruction.
+      const existing = (await memory.search(key, { workspaceId: context.workspaceId, scope: "all" }))
+        .find((item) => item.key.toLowerCase() === key.toLowerCase());
+      if (existing && existing.value !== value) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary:
+            `'${key}' already holds a different value. Replacing a memory destroys what was there, ` +
+            `so forget it first — which asks you before it does anything.`,
+        };
+      }
+
       const entry = await memory.remember({
         category,
-        key: str(args, "key"),
-        value: str(args, "value"),
+        key,
+        value,
         workspaceId: context.workspaceId,
         source: "agent",
         provenance: { origin: "user-request", kind: "stated" },

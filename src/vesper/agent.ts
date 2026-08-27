@@ -501,9 +501,12 @@ export class Agent {
         });
         toolCalls.push(record);
         if (record.decision.requiresConfirmation && !record.result) {
-          const queued = [...this.deps.confirmations.values()].find(
-            (item) => item.toolName === call.name,
-          );
+          // Exactly the confirmation this call produced. Searching the queue by tool
+          // name surfaced whichever one happened to be first, so the prompt could
+          // describe one action while approving another.
+          const queued = record.confirmationId
+            ? this.deps.confirmations.get(record.confirmationId)
+            : undefined;
           if (queued) pending.push(queued);
         }
         if (record.result?.epistemic) epistemic.push(record.result.epistemic);
@@ -669,9 +672,11 @@ export class Agent {
       case "forget": {
         const record = await invoke("memory_forget", { key: intent.slots.key });
         if (record.decision.requiresConfirmation) {
-          const pending = [...this.deps.confirmations.values()].filter(
-            (item) => item.toolName === "memory_forget",
-          );
+          // The one this call queued, not every memory_forget anyone ever queued.
+          const queued = record.confirmationId
+            ? this.deps.confirmations.get(record.confirmationId)
+            : undefined;
+          const pending = queued ? [queued] : [];
           return this.turn(
             userText,
             `Forgetting '${intent.slots.key}' needs confirmation.`,
@@ -719,9 +724,11 @@ export class Agent {
           profile: intent.slots.profile || "",
         });
         if (request.decision.requiresConfirmation) {
-          const pending = [...this.deps.confirmations.values()].filter(
-            (item) => item.toolName === "optimizer_request",
-          );
+          // The one this call queued, not every optimizer_request anyone ever queued.
+          const queued = request.confirmationId
+            ? this.deps.confirmations.get(request.confirmationId)
+            : undefined;
+          const pending = queued ? [queued] : [];
           return this.turn(
             userText,
             `${analysis.result?.summary ?? ""} I requested an optimizer action and need your confirmation.`.trim(),

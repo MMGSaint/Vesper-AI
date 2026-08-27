@@ -9,6 +9,7 @@ import { enrolCompanion, testRuntime } from "./test-helpers.ts";
 import { createClientGateway } from "./client/gateway.ts";
 import { isClientError } from "./client/protocol.ts";
 import { decideRemoteToolRequest } from "./tools/remote.ts";
+import { isDangerousRoot } from "./security.ts";
 import { isBoundaryIntact, screenForInjection, wrapUntrusted } from "./untrusted.ts";
 import { decideRemoteRequest, manifestHas } from "./distributed/capabilities.ts";
 import type { CapabilityManifest } from "./distributed/capabilities.ts";
@@ -542,5 +543,75 @@ describe("invariant: the untrusted boundary contains, and does not claim more", 
     assert.ok(elapsedMs < 2_000, `screening a hostile input took ${elapsedMs.toFixed(0)}ms`);
     assert.ok(wrapped.text.length < 20_000, `envelope grew to ${wrapped.text.length} characters`);
     assert.ok(verdict.score >= 0 && verdict.score <= 100);
+  });
+});
+
+describe("invariant: a confirm-tier control cannot be reached by a safe-tier route", () => {
+  it("refuses to destroy a memory through the tool that only adds them", async () => {
+    // memory_forget is confirm-tier because destroying the user's stored knowledge needs
+    // their say-so. memory_remember was autonomous and overwrote the same key, so an
+    // empty value deleted a memory outright and any other value replaced it — the
+    // confirmation was decorative.
+    const runtime = await testRuntime();
+    await runtime.memory.remember({
+      category: "fact",
+      key: "mortis-boundary",
+      value: "Mortis is a separate project. Do not absorb its canon.",
+      source: "user",
+    });
+
+    for (const replacement of ["", "   ", "Mortis is now part of Vesper."]) {
+      const record = await runtime.tools.invoke({
+        name: "memory_remember",
+        args: { key: "mortis-boundary", value: replacement, category: "fact" },
+        workspaceId: "general",
+      });
+      assert.equal(record.result?.ok, false, `overwrote a memory with ${JSON.stringify(replacement)}`);
+    }
+
+    const stored = await runtime.memory.search("mortis-boundary", { scope: "all" });
+    assert.match(
+      stored.find((entry) => entry.key === "mortis-boundary")?.value ?? "",
+      /separate project/,
+      "the stored memory was destroyed",
+    );
+    await runtime.stop();
+  });
+
+  it("still stores a genuinely new memory without asking", async () => {
+    // Adding is additive. Only replacement is destruction.
+    const runtime = await testRuntime();
+    const record = await runtime.tools.invoke({
+      name: "memory_remember",
+      args: { key: "coffee", value: "oat flat white", category: "preference" },
+      workspaceId: "general",
+    });
+    assert.equal(record.result?.ok, true, record.result?.summary);
+    await runtime.stop();
+  });
+
+  it("host-state tools are refused to a device that is not trusted", async () => {
+    // workspace_switch moves the *owner's* active workspace, which decides their tool
+    // list and the scoping of their memory and knowledge retrieval.
+    const runtime = await testRuntime();
+    for (const trust of ["restricted", "pending", "revoked", "unknown"] as const) {
+      for (const tool of ["workspace_switch", "runtime_pause", "runtime_resume"]) {
+        const decision = decideRemoteToolRequest({
+          toolName: tool,
+          origin: { kind: "remote", trust, manifest: null, scopes: ["status", "conversation"] },
+        });
+        assert.equal(decision.allowed, false, `a '${trust}' device was allowed ${tool}`);
+      }
+    }
+    await runtime.stop();
+  });
+
+  it("a system directory stays refused however its separators are written", async () => {
+    // "//etc" resolves exactly like "/etc", and was not recognised as a system directory.
+    for (const path of ["/etc", "//etc", "///etc", "/home", "//home", "/", "//", "C:\\", "C:\\\\"]) {
+      assert.equal(isDangerousRoot(path), true, `${path} was not recognised as dangerous`);
+    }
+    // And an ordinary directory is still fine.
+    assert.equal(isDangerousRoot("/home/someone/notes"), false);
   });
 });

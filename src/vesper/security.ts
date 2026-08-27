@@ -48,9 +48,14 @@ export function isDangerousRoot(root: string): boolean {
   if (!trimmed) return true;
   if (containsTraversal(trimmed)) return true;
 
-  // Normalise separators and drop trailing slashes so "C:\\Users\\" and "C:/Users"
-  // are judged identically.
-  const unix = trimmed.replace(/\\/g, "/").replace(/\/+$/, "");
+  // Normalise separators, collapse repeated ones, and drop trailing slashes so
+  // "C:\\Users\\", "C:/Users" and "//etc" are all judged as what they actually address.
+  // Leaving repeats in place meant "//etc" and "//home" were not recognised as system
+  // directories at all, while the operating system resolves them exactly like "/etc".
+  const unix = trimmed
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(/\/+$/, "");
   if (unix === "" || unix === "/" || unix === ".") return true;
   // A bare drive: "C:", "C:\", "C:/".
   if (/^[a-zA-Z]:$/.test(unix)) return true;

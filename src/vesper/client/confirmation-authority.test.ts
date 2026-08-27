@@ -251,3 +251,55 @@ describe("a confirmation's recorded requester is re-checked when it is approved"
     await runtime.stop();
   });
 });
+
+describe("a confirmation is reachable only by the id of the call that made it", () => {
+  it("surfaces the confirmation each call produced, not the first one with a matching name", async () => {
+    // The agent re-found "the confirmation I just created" by searching the queue for a
+    // matching tool *name*, so an older unresolved confirmation for the same tool
+    // shadowed the new one: the prompt described one action while approving another.
+    // Confirmations outlive their turn and are restored from disk, so the shadowing
+    // entry could be arbitrarily old and attacker-chosen.
+    const root = await mkdtemp(join(tmpdir(), "vesper-bind-"));
+    let n = 0;
+    const provider = {
+      id: "scripted",
+      kind: "local" as const,
+      isAvailable: () => true,
+      async probe() {
+        return { available: true, detail: "scripted" };
+      },
+      async complete(request: CompletionRequest, model: string) {
+        n += 1;
+        const path = n === 1 ? join(root, "attacker.md") : join(root, "shopping.md");
+        const content = n === 1 ? "ATTACKER PAYLOAD" : "milk, eggs";
+        const toolCalls: ModelToolCall[] =
+          n <= 2 ? [{ id: `c${n}`, name: "fs_write", arguments: { path, content } as never }] : [];
+        return { text: toolCalls.length ? "" : "done", toolCalls, providerId: "scripted", model, role: request.role };
+      },
+    };
+    const runtime = await testRuntime({ providers: [provider], config: { approvedRoots: [root] } });
+    const turn = await runtime.chat("write both files");
+
+    const ids = turn.pendingConfirmations.map((item) => item.id);
+    assert.equal(new Set(ids).size, ids.length, "the same confirmation was surfaced twice");
+    assert.equal(runtime.confirmations.size, ids.length, "a queued confirmation was never surfaced");
+
+    // Approving the second prompt must run the second action, not the first.
+    const shopping = turn.pendingConfirmations.find((item) =>
+      JSON.stringify(item.args).includes("shopping.md"),
+    );
+    assert.ok(shopping, "the second action was never offered for approval");
+    await runtime.chat("yes", { confirmId: shopping.id, approve: true });
+
+    assert.equal(
+      await readFile(join(root, "shopping.md"), "utf8"),
+      "milk, eggs",
+      "approving the shopping prompt did not write the shopping file",
+    );
+    await assert.rejects(
+      () => readFile(join(root, "attacker.md"), "utf8"),
+      "approving one prompt executed a different held action",
+    );
+    await runtime.stop();
+  });
+});

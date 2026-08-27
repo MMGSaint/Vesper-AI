@@ -55,6 +55,25 @@ export const HOST_ONLY_TOOLS: readonly string[] = [
 ];
 
 /**
+ * Tools that change state belonging to the person at the machine.
+ *
+ * `workspace_switch` moves the *owner's* active workspace: their next local turn runs in
+ * whatever workspace a remote device chose, which decides the tool list, the scoping of
+ * memory and knowledge retrieval, and the default model role. A restricted device — the
+ * portable class, running on a host whose surroundings cannot be vouched for — was able
+ * to do that silently, because a tool with no capability mapping fell through to
+ * "allowed". Pausing and resuming the host's background runtime is the same shape.
+ *
+ * A trusted device may still do these: switching workspace from your own phone is the
+ * feature. What must not happen is a restricted one doing it.
+ */
+const TRUSTED_ONLY_TOOLS: readonly string[] = [
+  "workspace_switch",
+  "runtime_pause",
+  "runtime_resume",
+];
+
+/**
  * Tools that exercise a client scope.
  *
  * The gateway checks scopes on its own methods, but a conversation is a tool-calling
@@ -154,6 +173,13 @@ export function decideRemoteToolRequest(input: {
         reason: `'${input.toolName}' needs the '${scope}' scope, which this session does not hold.`,
       };
     }
+  }
+
+  if (TRUSTED_ONLY_TOOLS.includes(input.toolName) && trust !== "trusted") {
+    return {
+      allowed: false,
+      reason: `'${input.toolName}' changes state belonging to the machine's owner, so a '${trust}' device may not run it.`,
+    };
   }
 
   const capability = capabilityForTool(input.toolName);

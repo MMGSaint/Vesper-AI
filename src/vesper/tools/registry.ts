@@ -187,6 +187,7 @@ export class ToolRegistry {
         args: input.args,
         at: nowIso(),
         decision,
+        confirmationId: pending.id,
       };
     }
 

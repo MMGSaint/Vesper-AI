@@ -399,6 +399,16 @@ export interface ToolCallRecord {
   decision: PermissionDecision;
   result?: ToolExecutionResult;
   at: string;
+  /**
+   * The confirmation this call queued, when it queued one.
+   *
+   * Without it the agent had to re-find "the confirmation I just created" by searching
+   * the queue for a matching tool *name*, so any older unresolved confirmation for the
+   * same tool shadowed the new one — and the consent prompt described one action while
+   * approving a different one. A confirmation should only ever be reachable by the id of
+   * the call that produced it.
+   */
+  confirmationId?: string;
 }
 
 export interface AgentTurn {
