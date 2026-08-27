@@ -124,7 +124,11 @@ export class ToolRegistry {
     // access here but can never gain any. A conversation is a tool-calling loop, so
     // without this a device permitted to converse is permitted to call anything.
     const remote = decideRemoteToolRequest({
-      toolName: input.name,
+      // The *resolved* name, not the one the caller sent. Both layers must agree on
+      // which tool this is: today the lookup is an exact-match Map so they cannot
+      // disagree, but an alias or a namespace added later would open a differential
+      // where authorization inspects one name and execution runs another.
+      toolName: registered.spec.name,
       origin: input.origin ?? { kind: "local" },
     });
     if (!remote.allowed) {
@@ -186,7 +190,16 @@ export class ToolRegistry {
       };
     }
 
-    if (!decision.allowed && !input.confirmed) {
+    // `confirmed` answers a confirmation request. It is not a master key.
+    //
+    // Testing `!input.confirmed` alone let a confirmed call run a decision that had been
+    // refused for some entirely different reason — an unrecognised permission level, for
+    // instance, where the gate says in as many words "refusing rather than assuming it
+    // is safe" and the handler ran anyway. The gate's verdict is authoritative; the only
+    // thing confirmation settles is the confirmation.
+    const authorized =
+      decision.allowed || (decision.requiresConfirmation && input.confirmed === true);
+    if (!authorized) {
       this.log.warn("permission", decision.reason, { tool: input.name });
       return {
         id: createId("tool"),

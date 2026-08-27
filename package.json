@@ -9,11 +9,12 @@
     "test": "node scripts/run-vesper-tests.mjs",
     "start": "node --experimental-strip-types src/vesper/host/main.ts",
     "typecheck": "tsc --noEmit",
-    "security": "node --experimental-strip-types --test src/vesper/security.test.ts src/vesper/security-hostile.test.ts",
+    "security": "node scripts/run-security-suite.mjs",
     "hygiene": "node scripts/hygiene.mjs",
     "doctor": "node --experimental-strip-types src/vesper/host/main.ts --doctor --skip-discovery",
     "build": "tsc --noEmit",
-    "package": "node scripts/package.mjs"
+    "package": "node scripts/package.mjs",
+    "security:quick": "node scripts/run-security-suite.mjs"
   },
   "engines": {
     "node": ">=22"
