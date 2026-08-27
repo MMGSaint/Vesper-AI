@@ -24,6 +24,7 @@ import type { BenchmarkHarness } from "../models/benchmark.ts";
 import { listApproved, readApproved, writeApproved } from "./filesystem.ts";
 import { mcpBridgeStatus } from "../integrations/mcp.ts";
 import { detectApprovedApps } from "../windows/apps.ts";
+import { classifyDeviceIntent, resolveTarget } from "../distributed/intent.ts";
 
 function str(args: JsonObject, key: string): string {
   const value = args[key];
@@ -771,6 +772,10 @@ export function registerBuiltinTools(input: {
           description: "Capabilities the task needs, e.g. local_llm",
         },
         preferredDevice: { type: "string", description: "Device id to prefer" },
+        targetDevice: {
+          type: "string",
+          description: "The device the user named, e.g. 'my desktop'. Treated as a requirement.",
+        },
       },
       ["description"],
     ),
@@ -781,11 +786,37 @@ export function registerBuiltinTools(input: {
       const required = Array.isArray(args.requiredCapabilities)
         ? (args.requiredCapabilities.filter((item) => typeof item === "string") as never[])
         : [];
+
+      // Naming a device is a requirement, not a hint. `preferredDevice` is a soft
+      // preference by design: when the preferred machine is offline, routing picks
+      // another one. That is right for "run this somewhere sensible" and wrong for
+      // "prepare my desktop" — substituting a machine there lands the work on hardware
+      // the user did not ask about, and reports success for it.
+      const named = str(args, "targetDevice");
+      let eligibleDevices: string[] | undefined;
+      if (named) {
+        const resolved = resolveTarget({
+          intent: classifyDeviceIntent(named),
+          devices: await deviceRegistry.list(),
+          currentDeviceId: selfDeviceId ?? "unknown",
+          requiredCapabilities: required,
+        });
+        if (!resolved.ok || !resolved.device) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: resolved.problem ?? `Could not resolve "${named}" to a device.`,
+          };
+        }
+        eligibleDevices = [resolved.device.identity.deviceId];
+      }
+
       const created = await tasks.create({
         description: str(args, "description"),
         createdBy: selfDeviceId ?? "unknown",
         requiredCapabilities: required,
         preferredDevice: str(args, "preferredDevice") || undefined,
+        eligibleDevices,
       });
       // Route immediately so the reply says where it will run, or honestly that it will not yet.
       const scheduled = await tasks.schedule(await deviceRegistry.list());
