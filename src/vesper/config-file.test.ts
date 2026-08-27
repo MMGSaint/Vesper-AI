@@ -24,15 +24,36 @@ describe("config file", () => {
     assert.equal(loaded.config.models.allowOptionalCloud, false);
   });
 
-  it("falls back to defaults when JSON is corrupt", async () => {
+  it("locks down rather than falling back to defaults when JSON is corrupt", async () => {
+    // This test used to assert `source === "default"`, which was the defect written down
+    // as an expectation: the built-in defaults approve three filesystem roots and index
+    // two knowledge sources, so a truncated write *granted* authority to a user who had
+    // taken it away. Vesper still starts and still says who it is; it simply starts with
+    // nothing approved until the file is repaired.
     const dir = join(tmpdir(), `vesper-cfg-bad-${Date.now()}`);
     await mkdir(dir, { recursive: true });
     const path = join(dir, "vesper.json");
     await writeFile(path, "{not-json", "utf8");
     const loaded = await loadHostConfig(path);
     assert.equal(loaded.ok, false);
-    assert.equal(loaded.source, "default");
+    assert.equal(loaded.source, "locked-down");
     assert.equal(loaded.config.identity.name, "Vesper");
+    assert.deepEqual(loaded.config.approvedRoots, []);
+    assert.deepEqual(loaded.config.approvedApps, []);
+    assert.deepEqual(loaded.config.knowledgeSources, []);
+    assert.equal(loaded.config.permissions.lockedDown, true);
+  });
+
+  it("still reports a missing file as a clean default, which is a first boot", async () => {
+    // The two must stay distinguishable: "no file yet" and "file I cannot read" mean
+    // opposite things about what the user intended.
+    const dir = join(tmpdir(), `vesper-cfg-none-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+    const loaded = await loadHostConfig(join(dir, "vesper.json"));
+    assert.equal(loaded.ok, true);
+    assert.equal(loaded.source, "default");
+    assert.equal(loaded.config.permissions.lockedDown, false);
+    assert.ok(loaded.config.approvedRoots.length > 0, "a first boot lost its starter roots");
   });
 
   it("keeps default workspaces, apps, and knowledge sources when the file omits them", async () => {

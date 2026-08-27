@@ -1345,6 +1345,76 @@ describe("invariant: an unreadable setting yields less authority, not more", () 
   });
 });
 
+describe("invariant: a file Vesper cannot read at all yields the least authority", () => {
+  /**
+   * Distinct from a validation failure, which is handled setting by setting: this is the
+   * whole file being unparseable — a truncated write, a full disk, a power cut. No
+   * attacker is required.
+   *
+   * `loadHostConfig` returned `defaultConfig()`, the vendor's permissive starting point:
+   * three approved filesystem roots, two indexed knowledge sources, no tool overrides.
+   * A user who had hardened their file to no roots and `fs_read: "never"` came back from
+   * a corrupt write with `fs_read` autonomous over three directories. The failure of a
+   * parser was the thing that granted authority.
+   */
+  async function corruptConfigHost() {
+    const { loadHostConfig } = await import("./config-file.ts");
+    const base = await mkdtemp(join(tmpdir(), "vesper-corrupt-"));
+    const configPath = join(base, "vesper.json");
+    await writeFile(configPath, '{"approvedRoots": ["notes"], "permis', "utf8");
+    return { loaded: await loadHostConfig(configPath), base };
+  }
+
+  it("grants nothing on disk and nothing to index when the file cannot be parsed", async () => {
+    const { loaded } = await corruptConfigHost();
+    assert.equal(loaded.ok, false);
+    assert.equal(loaded.source, "locked-down", "an unparseable file was treated as a clean default");
+    assert.deepEqual(loaded.config.approvedRoots, [], "a corrupt file approved filesystem roots");
+    assert.deepEqual(loaded.config.approvedApps, [], "a corrupt file approved applications");
+    assert.deepEqual(loaded.config.knowledgeSources, [], "a corrupt file added knowledge sources");
+  });
+
+  it("leaves nothing autonomous, because it cannot know what the user allowed", async () => {
+    // `toolOverrides` names tools one at a time, so it cannot express "everything the
+    // user hardened". A user's `fs_read: "never"` is gone either way — what must not
+    // happen is the tool coming back *autonomous* at its own declared level.
+    const { loaded } = await corruptConfigHost();
+    assert.equal(loaded.config.permissions.lockedDown, true);
+
+    const runtime = await testRuntime({ config: loaded.config as never });
+    const record = await runtime.tools.invoke({
+      name: "fs_read",
+      args: { path: "notes/a.txt" },
+      workspaceId: "general",
+    });
+    assert.equal(record.decision.allowed, false, "a corrupt config left a read tool autonomous");
+    assert.equal(record.decision.requiresConfirmation, true, "it should ask, not silently fail");
+    assert.equal(record.result?.ok, undefined, "the tool ran despite not being authorized");
+    await runtime.stop();
+  });
+
+  it("says so at error level, where diagnostics can see it", async () => {
+    // `recentErrors` filters on level "error", so a warn line meant the one state where
+    // Vesper runs on a configuration the user did not write was the one state nothing
+    // surfaced.
+    const { loaded } = await corruptConfigHost();
+    assert.ok(loaded.errors.length > 0, "an unreadable config reported no error");
+    assert.match(loaded.errors.join(" "), /no approved roots/i);
+  });
+
+  it("still reads a good file exactly as written", async () => {
+    // Narrowing, not severing.
+    const { loadHostConfig } = await import("./config-file.ts");
+    const base = await mkdtemp(join(tmpdir(), "vesper-goodcfg-"));
+    const configPath = join(base, "vesper.json");
+    await writeFile(configPath, JSON.stringify({ approvedRoots: ["notes"] }), "utf8");
+    const loaded = await loadHostConfig(configPath);
+    assert.equal(loaded.source, "file", loaded.errors.join("; "));
+    assert.deepEqual(loaded.config.approvedRoots, ["notes"]);
+    assert.equal(loaded.config.permissions.lockedDown, false);
+  });
+});
+
 describe("invariant: Vesper's own files are not documents", () => {
   /**
    * An approved root is a statement about the user's documents. It is not a statement

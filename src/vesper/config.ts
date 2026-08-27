@@ -169,6 +169,18 @@ export const vesperConfigSchema = z.object({
     .default({ model: "nomic-embed-text", provider: "ollama", enabled: true }),
   permissions: z
     .object({
+      /**
+       * Nothing runs without asking.
+       *
+       * Set only by Vesper itself, when the configuration file could not be read at all
+       * and nothing is known about what the user authorised. `toolOverrides` cannot
+       * express "everything is stricter" — it names tools one at a time — so an
+       * unreadable file would otherwise lose a user's `fs_read: "never"` and leave the
+       * tool autonomous at its declared level. Under this flag every autonomous level
+       * becomes a confirmation instead, which is the honest answer to "I do not know
+       * what you allowed".
+       */
+      lockedDown: z.boolean().default(false),
       toolOverrides: z.record(z.string(), permissionLevel).default({}),
       neverAllowAutonomous: z.array(z.string()).default([
         "disk_wipe",
@@ -178,6 +190,7 @@ export const vesperConfigSchema = z.object({
       ]),
     })
     .default({
+      lockedDown: false,
       toolOverrides: {},
       neverAllowAutonomous: [
         "disk_wipe",
@@ -394,6 +407,30 @@ const LOCKED_DOWN: Record<string, unknown> = {
   approvedApps: [],
   knowledgeSources: [],
 };
+
+/**
+ * The configuration to run on when the file could not be read at all.
+ *
+ * Distinct from a *validation* failure, which `removeExact` handles section by section:
+ * this is the whole file being unparseable or unreadable, where nothing at all is known
+ * about what the user intended. `defaultConfig()` is the vendor's permissive starting
+ * point — it approves three filesystem roots, indexes two knowledge sources and carries
+ * no tool overrides — so booting on it after a truncated write silently *granted* more
+ * than the file it replaced. A user who had set `fs_read: "never"` and no approved roots
+ * came back from a power cut with `fs_read` autonomous over three directories.
+ *
+ * The failure of a parser must never be the thing that grants authority.
+ */
+export function lockedDownConfig(): VesperConfig {
+  const config = defaultConfig();
+  return {
+    ...config,
+    approvedRoots: [],
+    approvedApps: [],
+    knowledgeSources: [],
+    permissions: { ...config.permissions, lockedDown: true },
+  };
+}
 
 function isSecurityPath(path: string): boolean {
   return SECURITY_SECTIONS.some((section) => path === section || path.startsWith(`${section}.`));

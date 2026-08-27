@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { defaultConfig, parseConfig, type VesperConfig } from "./config.ts";
+import { defaultConfig, lockedDownConfig, parseConfig, type VesperConfig } from "./config.ts";
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -38,7 +38,15 @@ export function mergeOverDefaults(
 
 export interface LoadedHostConfig {
   config: VesperConfig;
-  source: "file" | "default";
+  /**
+   * Where the running configuration came from.
+   *
+   * `locked-down` means the file existed but could not be read or parsed, so Vesper is
+   * running on the *narrowest* configuration rather than on the vendor defaults. It is
+   * a distinct value from `default` (no file yet, a first boot) because the two mean
+   * opposite things about the user's intent.
+   */
+  source: "file" | "default" | "locked-down";
   ok: boolean;
   errors: string[];
   path: string;
@@ -51,11 +59,17 @@ export async function loadHostConfig(configPath: string): Promise<LoadedHostConf
     try {
       parsedJson = JSON.parse(raw);
     } catch {
+      // Locked down, not defaulted. See `lockedDownConfig`: the built-in defaults are
+      // broader than most real files, so booting on them after a truncated write is the
+      // parse failure granting authority the user had taken away.
       return {
-        config: defaultConfig(),
-        source: "default",
+        config: lockedDownConfig(),
+        source: "locked-down",
         ok: false,
-        errors: [`${configPath} is not valid JSON; using defaults`],
+        errors: [
+          `${configPath} is not valid JSON. Starting with no approved roots, no approved ` +
+            `applications and no knowledge sources until it is repaired.`,
+        ],
         path: configPath,
       };
     }
@@ -81,10 +95,13 @@ export async function loadHostConfig(configPath: string): Promise<LoadedHostConf
       };
     }
     return {
-      config: defaultConfig(),
-      source: "default",
+      config: lockedDownConfig(),
+      source: "locked-down",
       ok: false,
-      errors: [`Failed to read ${configPath}: ${error instanceof Error ? error.message : String(error)}`],
+      errors: [
+        `Failed to read ${configPath}: ${error instanceof Error ? error.message : String(error)}. ` +
+          `Starting with no approved roots, no approved applications and no knowledge sources.`,
+      ],
       path: configPath,
     };
   }

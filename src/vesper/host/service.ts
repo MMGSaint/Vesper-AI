@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { createRuntime, type RuntimeOptions, type VesperRuntime } from "../runtime.ts";
 import { FileStorage } from "../storage.ts";
 import { createLogger } from "../logging.ts";
-import { loadHostConfig, writeConfigIfMissing } from "../config-file.ts";
+import { loadHostConfig, writeConfigIfMissing, type LoadedHostConfig } from "../config-file.ts";
 import {
   auditLogFile,
   configFile,
@@ -52,7 +52,7 @@ export interface ProductionHost {
   runtime: VesperRuntime;
   gateway: VesperClientGateway;
   dirs: VesperDirs;
-  configSource: "file" | "default";
+  configSource: LoadedHostConfig["source"];
   lock: InstanceLock | null;
   lifecycle: LifecycleController;
   notifications: HostNotificationAdapter;
@@ -114,8 +114,13 @@ export async function createProductionHost(options?: {
       return createLogger({ sink: audit.sink });
     })();
   if (!loaded.ok) {
-    log.warn("lifecycle", "Host config invalid; using defaults", {
+    // At error level, not warn. `recentErrors` in diagnostics filters on `error`, so a
+    // warn line meant the one state where Vesper is running on a configuration the user
+    // did not write was the one state nothing surfaced — no event, no notification, no
+    // diagnostic, just a line in the audit file.
+    log.error("lifecycle", `Host config could not be read; running locked down: ${loaded.path}`, {
       errors: loaded.errors.join("; "),
+      source: loaded.source,
     });
   }
 
