@@ -1,6 +1,24 @@
 export const PERMISSION_LEVELS = ["read", "safe", "confirm", "never"] as const;
 export type PermissionLevel = (typeof PERMISSION_LEVELS)[number];
 
+/**
+ * Memory scope: which layer a fact belongs to.
+ *
+ * Scope decides two things that must never be confused - who can see a fact, and
+ * whether it leaves the device. The distinction matters most for `device`: "my desktop
+ * has a 7900 XT" is true of one machine, and syncing it as a user fact would make Vesper
+ * believe it of the laptop too.
+ *
+ *   session   - this conversation only. Never persisted, never synced.
+ *   device    - this machine. Persisted; syncs, but always carries its deviceId and is
+ *               never reinterpreted as a user fact.
+ *   workspace - tied to a workspace (Gaming, Development, Mortis...). Persisted; syncs.
+ *   user      - follows the user across every device. Persisted; syncs.
+ *   global    - assistant/system knowledge not tied to the user. Persisted; syncs.
+ */
+export const MEMORY_SCOPES = ["session", "device", "workspace", "user", "global"] as const;
+export type MemoryScopeLevel = (typeof MEMORY_SCOPES)[number];
+
 export const MEMORY_CATEGORIES = [
   "preference",
   "fact",
@@ -146,6 +164,18 @@ export interface MemoryEntry {
   source: "user" | "system" | "seed" | "agent";
   tags?: string[];
   provenance?: { origin: string; kind: "stated" | "observed" | "inferred" };
+  /** Which layer this fact belongs to. Decides visibility and whether it syncs. */
+  scope: MemoryScopeLevel;
+  /**
+   * The device a `device`-scoped fact describes. A device fact that loses this would
+   * become indistinguishable from a fact about the user, which is exactly the
+   * misattribution scope exists to prevent.
+   */
+  deviceId?: string;
+  /** Monotonic per-entry revision. Sync uses it to order writes deterministically. */
+  revision: number;
+  /** The device that last wrote this entry, for conflict attribution. */
+  originDevice?: string;
 }
 
 export interface KnowledgeSource {

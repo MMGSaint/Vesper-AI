@@ -1,5 +1,12 @@
 import { createId, nowIso } from "../id.ts";
-import { MEMORY_CATEGORIES, type MemoryCategory, type MemoryEntry } from "../types.ts";
+import {
+  MEMORY_CATEGORIES,
+  MEMORY_SCOPES,
+  type MemoryCategory,
+  type MemoryEntry,
+  type MemoryScopeLevel,
+} from "../types.ts";
+import { defaultScopeFor } from "./scopes.ts";
 
 export type CoercionResult =
   | { ok: true; entry: MemoryEntry; repaired: string[] }
@@ -65,6 +72,28 @@ export function coerceMemoryEntry(item: unknown, defaultOrigin: string): Coercio
     repaired.push("provenance");
   }
 
+  const deviceId = typeof rec.deviceId === "string" && rec.deviceId ? rec.deviceId : undefined;
+  let scope: MemoryScopeLevel;
+  if (MEMORY_SCOPES.includes(rec.scope as MemoryScopeLevel)) {
+    scope = rec.scope as MemoryScopeLevel;
+  } else {
+    // An entry written before scopes existed, or a corrupted one. Derive rather than
+    // discard: guessing conservatively keeps the fact, and never promotes a device fact.
+    scope = defaultScopeFor({
+      category,
+      workspaceId: typeof rec.workspaceId === "string" ? rec.workspaceId : undefined,
+      deviceId,
+    });
+    if (rec.scope !== undefined) repaired.push("scope");
+  }
+
+  let revision = 1;
+  if (typeof rec.revision === "number" && Number.isFinite(rec.revision) && rec.revision >= 1) {
+    revision = Math.floor(rec.revision);
+  } else if (rec.revision !== undefined) {
+    repaired.push("revision");
+  }
+
   const now = nowIso();
   return {
     ok: true,
@@ -80,6 +109,12 @@ export function coerceMemoryEntry(item: unknown, defaultOrigin: string): Coercio
       source,
       tags,
       provenance,
+      scope,
+      // Only a device-scoped entry keeps a deviceId; anything else carrying one was
+      // either corrupted or an attempt to smuggle attribution onto a user fact.
+      deviceId: scope === "device" ? deviceId : undefined,
+      revision,
+      originDevice: typeof rec.originDevice === "string" ? rec.originDevice : undefined,
     },
   };
 }

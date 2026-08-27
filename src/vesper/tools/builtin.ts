@@ -10,6 +10,8 @@ import { gpuConsumers, groundedConclusions } from "../specialists/gaming.ts";
 import type { ToolRegistry } from "./registry.ts";
 import { correlateAround, explainCorrelations } from "../correlate.ts";
 import type { ObsClient } from "../specialists/obs.ts";
+import type { DeviceRegistry } from "../distributed/registry.ts";
+import type { TaskQueue } from "../distributed/tasks.ts";
 import type { DiagnosticReport, JsonObject, MemoryCategory, ToolSpec } from "../types.ts";
 import type { WindowsHost } from "../windows/host.ts";
 import type { WorkspaceManager } from "../workspaces.ts";
@@ -22,6 +24,7 @@ import type { BenchmarkHarness } from "../models/benchmark.ts";
 import { listApproved, readApproved, writeApproved } from "./filesystem.ts";
 import { mcpBridgeStatus } from "../integrations/mcp.ts";
 import { detectApprovedApps } from "../windows/apps.ts";
+import { classifyDeviceIntent, resolveTarget } from "../distributed/intent.ts";
 
 function str(args: JsonObject, key: string): string {
   const value = args[key];
@@ -55,6 +58,9 @@ export function registerBuiltinTools(input: {
   events: EventBus;
   notifications: NotificationHub;
   obs?: ObsClient;
+  deviceRegistry?: DeviceRegistry;
+  tasks?: TaskQueue;
+  selfDeviceId?: string;
   voice?: VoiceModule;
   voiceSession?: VoiceSession;
   background?: BackgroundRuntime;
@@ -75,6 +81,9 @@ export function registerBuiltinTools(input: {
     events,
     notifications,
     obs,
+    deviceRegistry,
+    tasks,
+    selfDeviceId,
     voice,
     voiceSession,
     background,
@@ -692,6 +701,155 @@ export function registerBuiltinTools(input: {
       }
       await background.resume();
       return { ok: true, epistemic: "changed", summary: `Background state is ${background.state()}.` };
+    },
+  );
+
+  registry.register(
+    spec("devices_list", "List the Vesper devices enrolled for this user.", "read", {}),
+    async () => {
+      if (!deviceRegistry) {
+        return { ok: false, epistemic: "could_not_access", summary: "No device registry is attached." };
+      }
+      const records = await deviceRegistry.list();
+      const lines = records.map((record) => {
+        const presence =
+          record.presence.reachability === "online"
+            ? `online/${record.presence.activity}`
+            : "offline";
+        return `${record.identity.name} (${record.identity.deviceType}, ${record.trust}): ${presence}`;
+      });
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: lines.length ? lines.join("; ") : "No devices are enrolled yet.",
+        data: { devices: records } as unknown as JsonObject,
+      };
+    },
+  );
+
+  registry.register(
+    spec(
+      "device_trust",
+      "Change a device's trust state. Trusting a device grants it authority; revoking is permanent until the device is forgotten.",
+      "confirm",
+      {
+        deviceId: { type: "string", description: "The device to change" },
+        trust: {
+          type: "string",
+          description: "New trust state",
+          enum: ["trusted", "restricted", "revoked", "pending"],
+        },
+      },
+      ["deviceId", "trust"],
+    ),
+    async (args) => {
+      if (!deviceRegistry) {
+        return { ok: false, epistemic: "could_not_access", summary: "No device registry is attached." };
+      }
+      const result = await deviceRegistry.setTrust(
+        str(args, "deviceId"),
+        str(args, "trust") as "trusted",
+      );
+      return {
+        ok: result.ok,
+        epistemic: result.ok ? "changed" : "could_not_access",
+        summary: result.ok
+          ? `${result.record?.identity.name ?? "device"} is now '${result.record?.trust}'.`
+          : (result.reason ?? "The trust change was refused."),
+      };
+    },
+  );
+
+  registry.register(
+    spec(
+      "task_create",
+      "Queue a task. Vesper routes it to a device that has the capabilities it needs.",
+      "safe",
+      {
+        description: { type: "string", description: "What needs doing" },
+        requiredCapabilities: {
+          type: "array",
+          description: "Capabilities the task needs, e.g. local_llm",
+        },
+        preferredDevice: { type: "string", description: "Device id to prefer" },
+        targetDevice: {
+          type: "string",
+          description: "The device the user named, e.g. 'my desktop'. Treated as a requirement.",
+        },
+      },
+      ["description"],
+    ),
+    async (args) => {
+      if (!tasks || !deviceRegistry) {
+        return { ok: false, epistemic: "could_not_access", summary: "No task queue is attached." };
+      }
+      const required = Array.isArray(args.requiredCapabilities)
+        ? (args.requiredCapabilities.filter((item) => typeof item === "string") as never[])
+        : [];
+
+      // Naming a device is a requirement, not a hint. `preferredDevice` is a soft
+      // preference by design: when the preferred machine is offline, routing picks
+      // another one. That is right for "run this somewhere sensible" and wrong for
+      // "prepare my desktop" — substituting a machine there lands the work on hardware
+      // the user did not ask about, and reports success for it.
+      const named = str(args, "targetDevice");
+      let eligibleDevices: string[] | undefined;
+      if (named) {
+        const resolved = resolveTarget({
+          intent: classifyDeviceIntent(named),
+          devices: await deviceRegistry.list(),
+          currentDeviceId: selfDeviceId ?? "unknown",
+          requiredCapabilities: required,
+        });
+        if (!resolved.ok || !resolved.device) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: resolved.problem ?? `Could not resolve "${named}" to a device.`,
+          };
+        }
+        eligibleDevices = [resolved.device.identity.deviceId];
+      }
+
+      const created = await tasks.create({
+        description: str(args, "description"),
+        createdBy: selfDeviceId ?? "unknown",
+        requiredCapabilities: required,
+        preferredDevice: str(args, "preferredDevice") || undefined,
+        eligibleDevices,
+      });
+      // Route immediately so the reply says where it will run, or honestly that it will not yet.
+      const scheduled = await tasks.schedule(await deviceRegistry.list());
+      const outcome = scheduled.find((item) => item.task.id === created.id)?.outcome;
+      const where =
+        outcome?.kind === "assigned"
+          ? `Assigned to ${outcome.deviceId}.`
+          : `Not assigned yet: ${outcome?.reason ?? "no routing decision was made."}`;
+      return {
+        ok: true,
+        epistemic: "changed",
+        summary: `Queued "${created.description}". ${where}`,
+        data: { taskId: created.id } as unknown as JsonObject,
+      };
+    },
+  );
+
+  registry.register(
+    spec("task_list", "List queued and running Vesper tasks.", "read", {}),
+    async () => {
+      if (!tasks) {
+        return { ok: false, epistemic: "could_not_access", summary: "No task queue is attached." };
+      }
+      const all = await tasks.list();
+      const open = all.filter((task) => task.state !== "done" && task.state !== "cancelled");
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: open.length
+          ? open.map((task) => `${task.description} [${task.state}${task.assignedTo ? ` -> ${task.assignedTo}` : ""}]`).join("; ")
+          : "No open tasks.",
+        data: { tasks: all } as unknown as JsonObject,
+      };
     },
   );
 

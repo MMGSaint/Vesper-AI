@@ -10,6 +10,7 @@ import type {
   ToolHandler,
   ToolSpec,
 } from "../types.ts";
+import { decideRemoteToolRequest, type RequestOrigin } from "./remote.ts";
 
 export interface RegisteredTool {
   spec: ToolSpec;
@@ -57,6 +58,8 @@ export class ToolRegistry {
     workspaceId: string;
     confirmed?: boolean;
     dryRun?: boolean;
+    /** Who is driving this call. Absent means the person at this machine. */
+    origin?: RequestOrigin;
   }): Promise<ToolCallRecord> {
     const registered = this.tools.get(input.name);
     if (!registered) {
@@ -116,6 +119,32 @@ export class ToolRegistry {
     const args = validation.args;
 
     const decision = this.gate.evaluate(registered.spec, args, input.workspaceId);
+
+    // Narrowing only, and only after the gate has spoken: a remote device can lose
+    // access here but can never gain any. A conversation is a tool-calling loop, so
+    // without this a device permitted to converse is permitted to call anything.
+    const remote = decideRemoteToolRequest({
+      toolName: input.name,
+      origin: input.origin ?? { kind: "local" },
+    });
+    if (!remote.allowed) {
+      this.log.warn("permission", remote.reason, {
+        tool: input.name,
+        deviceId: input.origin?.deviceId ?? "unknown",
+      });
+      return {
+        id: createId("tool"),
+        toolName: input.name,
+        args: input.args,
+        at: nowIso(),
+        decision: { ...decision, allowed: false, requiresConfirmation: false, reason: remote.reason },
+        result: {
+          ok: false,
+          summary: remote.reason,
+          epistemic: "could_not_access",
+        },
+      };
+    }
 
     if (decision.level === "never") {
       this.log.warn("permission", decision.reason, { tool: input.name });

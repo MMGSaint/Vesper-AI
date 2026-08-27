@@ -1,6 +1,8 @@
 import { createId, nowIso } from "./id.ts";
 import type { Logger } from "./logging.ts";
 import type { MemoryStore } from "./memory/store.ts";
+import { attribute } from "./memory/scopes.ts";
+import type { RequestOrigin } from "./tools/remote.ts";
 import type { KnowledgeIndex } from "./knowledge/rag.ts";
 import type { ModelRouter } from "./models/router.ts";
 import type { NotificationHub } from "./notifications.ts";
@@ -12,6 +14,11 @@ import type { OptimizerAdapter } from "./specialists/optimizer.ts";
 import { VESPER_SYSTEM_PROMPT, composeStatusReply } from "./personality.ts";
 import { formatWorkloadContext, inspectWorkload } from "./specialists/context.ts";
 import { MEMORY_CATEGORIES } from "./types.ts";
+import {
+  decideUntrusted,
+  type UntrustedPolicyOptions,
+  type UntrustedProvenance,
+} from "./untrusted.ts";
 import type {
   AgentTurn,
   ChatMessage,
@@ -27,6 +34,18 @@ interface AgentDeps {
   log: Logger;
   memory: MemoryStore;
   knowledge: KnowledgeIndex;
+  /**
+   * One compact snapshot of the device ecosystem, folded into the prompt each turn.
+   * A callback rather than the objects themselves, so the agent does not grow a
+   * dependency on the registry, the task queue, and presence separately.
+   */
+  describeNow?: () => Promise<string> | string;
+  /**
+   * This machine's device id, used to attribute device-scoped memory. Optional because
+   * a Vesper that cannot identify itself must still run locally — it simply declines to
+   * claim which device a fact belongs to rather than guessing.
+   */
+  deviceId?: string;
   models: ModelRouter;
   tools: ToolRegistry;
   workspaces: WorkspaceManager;
@@ -76,6 +95,14 @@ const HISTORY_LIMIT = 40;
  */
 const MAX_TOOL_RESULT_CHARS = 3_000;
 const MAX_CONTEXT_CHARS = 24_000;
+/**
+ * Retrieved memory and knowledge are pasted into the system prompt, and `fitContext`
+ * treats the system prompt as untrimmable — it can only drop conversation. So an
+ * unbounded retrieval envelope does not merely crowd the history, it starves it with no
+ * way to recover. Tool results are already capped by `encodeToolResult`; these are the
+ * two paths where the text is arbitrary-length and caller-controlled.
+ */
+const MAX_RETRIEVAL_CHARS = 3_000;
 
 /**
  * Serialize a tool result for the model, keeping the parts that carry meaning.
@@ -178,6 +205,8 @@ export class Agent {
       approve?: boolean;
       signal?: AbortSignal;
       onDelta?: (delta: string) => void;
+      /** Who is driving this turn. Absent means the person at this machine. */
+      origin?: RequestOrigin;
     },
   ): Promise<AgentTurn> {
     const run = this.queue.then(
@@ -215,9 +244,12 @@ export class Agent {
       signal?: AbortSignal;
       /** Receives assistant text as it is generated, when the backend can stream. */
       onDelta?: (delta: string) => void;
+      /** Who is driving this turn. Absent means the person at this machine. */
+      origin?: RequestOrigin;
     },
   ): Promise<AgentTurn> {
     const at = nowIso();
+    const origin = options?.origin;
     const workspace = this.deps.workspaces.current();
     const epistemic: EpistemicTag[] = [];
     const toolCalls: ToolCallRecord[] = [];
@@ -242,6 +274,7 @@ export class Agent {
         );
       }
       const record = await this.deps.tools.invoke({
+        origin,
         name: confirmation.toolName,
         args: confirmation.args,
         workspaceId: confirmation.workspaceId,
@@ -264,7 +297,7 @@ export class Agent {
 
     const intent = classifyIntent(userText);
     if (intent && intent.confidence >= 0.85) {
-      const direct = await this.executeIntent(intent, userText);
+      const direct = await this.executeIntent(intent, userText, origin);
       this.deps.history.push({ role: "user", content: userText });
       this.deps.history.push({ role: "assistant", content: direct.reply });
       this.trimHistory();
@@ -281,8 +314,10 @@ export class Agent {
     const snapshot = this.deps.hardware.snapshot();
     const optimizer = await this.deps.optimizer.getStatus().catch(() => null);
 
+    const nowContext = this.deps.describeNow ? await this.deps.describeNow() : null;
     const system = [
       VESPER_SYSTEM_PROMPT,
+      nowContext,
       `Active workspace: ${workspace.name} (${workspace.id}). ${workspace.description}`,
       `Hardware mode: ${snapshot.mode}. ${snapshot.notes.join(" ")}`,
       `CPU: ${snapshot.cpu.name} ${snapshot.cpu.utilizationPct}% ${snapshot.cpu.tempC ?? "n/a"}°C`,
@@ -294,10 +329,27 @@ export class Agent {
         ? `Optimizer: ${optimizer.available ? optimizer.detail : "unavailable"}. Profile ${optimizer.currentProfile ?? "n/a"}.`
         : "Optimizer: could not query.",
       memories.length
-        ? `Relevant memory:\n${memories.map((entry) => `- [${entry.category}] ${entry.key}: ${entry.value}`).join("\n")}`
+        ? `Relevant memory:\n${
+            this.screenUntrusted(
+              memories
+                .map(
+                  (entry) =>
+                    `- [${entry.category}] ${entry.key}: ${attribute(entry, { deviceId: this.deps.deviceId })}`,
+                )
+                .join("\n"),
+              { source: "memory", origin: `${memories.length} stored memor(y|ies)` },
+              { maxChars: MAX_RETRIEVAL_CHARS },
+            )
+          }`
         : "No relevant memory hits.",
       knowledge.length
-        ? `Knowledge hits:\n${knowledge.map((hit) => `- ${hit.title}: ${hit.snippet}`).join("\n")}`
+        ? `Knowledge hits:\n${
+            this.screenUntrusted(
+              knowledge.map((hit) => `- ${hit.title}: ${hit.snippet}`).join("\n"),
+              { source: "knowledge", origin: `${knowledge.length} approved source hit(s)` },
+              { maxChars: MAX_RETRIEVAL_CHARS },
+            )
+          }`
         : "",
     ]
       .filter(Boolean)
@@ -367,6 +419,7 @@ export class Agent {
       const toolMessages: ChatMessage[] = [];
       for (const call of completion.toolCalls) {
         const record = await this.deps.tools.invoke({
+          origin,
           name: call.name,
           args: call.arguments,
           workspaceId: workspace.id,
@@ -383,8 +436,9 @@ export class Agent {
           role: "tool",
           name: call.name,
           toolCallId: call.id,
-          content: encodeToolResult(
-            record.result ?? { pending: true, reason: record.decision.reason },
+          content: this.screenUntrusted(
+            encodeToolResult(record.result ?? { pending: true, reason: record.decision.reason }),
+            { source: "tool", origin: call.name },
           ),
         });
       }
@@ -462,13 +516,18 @@ export class Agent {
     return this.turn(userText, reply, epistemic, toolCalls, pending, at, undefined, completion);
   }
 
-  private async executeIntent(intent: DirectIntent, userText: string): Promise<AgentTurn> {
+  private async executeIntent(
+    intent: DirectIntent,
+    userText: string,
+    origin?: RequestOrigin,
+  ): Promise<AgentTurn> {
     const at = nowIso();
     const workspace = this.deps.workspaces.current();
     const toolCalls: ToolCallRecord[] = [];
 
     const invoke = async (name: string, args: JsonObject, confirmed = false) => {
       const record = await this.deps.tools.invoke({
+        origin,
         name,
         args,
         workspaceId: workspace.id,
@@ -727,6 +786,47 @@ export class Agent {
       const kept = historyWindow(this.deps.history, HISTORY_LIMIT);
       this.deps.history.splice(0, this.deps.history.length, ...kept);
     }
+  }
+
+  /**
+   * The single door every byte of external text walks through before the model sees it.
+   *
+   * Screening is evidence, not enforcement: the boundary and the escaping are what
+   * actually contain an attack, and they apply to clean content too. What this adds is
+   * the decision — high-scoring content is withheld outright rather than merely sealed —
+   * and the disclosure, because content Vesper refused to read or silently truncated is
+   * something the user is owed a record of. Only Vesper-authored labels reach the event
+   * log; the attacker's own text never does.
+   */
+  private screenUntrusted(
+    content: string,
+    provenance: UntrustedProvenance,
+    options: UntrustedPolicyOptions = {},
+  ): string {
+    const decision = decideUntrusted(content, provenance, options);
+    const origin = provenance.origin ?? "an unnamed source";
+    const lostData = decision.action === "refuse" || decision.wrapped?.truncated === true;
+    if (decision.notice && (decision.action !== "wrap" || lostData)) {
+      this.deps.events.emit({
+        type: "security.untrusted_content",
+        title:
+          decision.action === "refuse"
+            ? `Withheld ${provenance.source} content from ${origin}`
+            : `Screened ${provenance.source} content from ${origin}`,
+        detail: decision.notice,
+        severity: decision.action === "wrap" ? "info" : "warn",
+        workspaceId: this.deps.workspaces.current().id,
+        data: {
+          action: decision.action,
+          source: provenance.source,
+          origin,
+          score: decision.verdict.score,
+          severity: decision.verdict.severity,
+          signals: decision.verdict.signals.map((signal) => signal.id),
+        },
+      });
+    }
+    return decision.text;
   }
 
   private turn(

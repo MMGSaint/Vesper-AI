@@ -1,8 +1,23 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { testRuntime } from "../test-helpers.ts";
+import { enrolCompanion, testRuntime } from "../test-helpers.ts";
 import { createClientGateway } from "./gateway.ts";
 import { CLIENT_PROTOCOL_ID, CLIENT_PROTOCOL_VERSION, isClientError } from "./protocol.ts";
+import type { VesperRuntime } from "../runtime.ts";
+import type { VesperClientGateway } from "./gateway.ts";
+import type { IssueSessionInput } from "./session.ts";
+
+/** An enrolled, approved companion holding a live session. */
+async function companion(
+  runtime: VesperRuntime,
+  gateway: VesperClientGateway,
+  input: Omit<IssueSessionInput, "deviceId"> = {},
+) {
+  const device = await enrolCompanion(runtime, { name: input.deviceLabel ?? "phone" });
+  const session = await gateway.issueSession({ ...input, deviceId: device.deviceId });
+  if (isClientError(session)) throw new Error(session.detail);
+  return session;
+}
 
 describe("client protocol gateway", () => {
   it("issues a versioned hello without exposing a network listener", async () => {
@@ -23,8 +38,8 @@ describe("client protocol gateway", () => {
     assert.equal(isClientError(missing), true);
     if (isClientError(missing)) assert.equal(missing.code, "UNAUTHENTICATED");
 
-    const session = gateway.issueSession({ deviceLabel: "phone", ttlMs: 30_000 });
-    const expired = gateway.sessions.authenticate(session.token, Date.now() + 60_000);
+    const session = await companion(runtime, gateway, { deviceLabel: "phone", ttlMs: 30_000 });
+    const expired = await gateway.sessions.authenticate(session.token, Date.now() + 60_000);
     assert.equal(isClientError(expired), true);
     if (isClientError(expired)) assert.equal(expired.code, "EXPIRED");
     await runtime.stop();
@@ -33,7 +48,7 @@ describe("client protocol gateway", () => {
   it("reports honest capability states instead of fake live specialists", async () => {
     const runtime = await testRuntime();
     const gateway = createClientGateway(runtime);
-    const session = gateway.issueSession({ deviceLabel: "phone" });
+    const session = await companion(runtime, gateway, { deviceLabel: "phone" });
     const status = await gateway.status(session.token);
     assert.equal(isClientError(status), false);
     if (isClientError(status)) throw new Error(status.detail);
@@ -49,7 +64,7 @@ describe("client protocol gateway", () => {
   it("does not allow conversation or memory writes without the matching scope", async () => {
     const runtime = await testRuntime();
     const gateway = createClientGateway(runtime);
-    const session = gateway.issueSession({
+    const session = await companion(runtime, gateway, {
       deviceLabel: "watch",
       scopes: ["status"],
     });
@@ -67,7 +82,7 @@ describe("client protocol gateway", () => {
       script: [{ text: "Understood. I will not invent live hardware." }],
     });
     const gateway = createClientGateway(runtime);
-    const session = gateway.issueSession({
+    const session = await companion(runtime, gateway, {
       deviceLabel: "android",
       scopes: ["status", "conversation", "memory.read", "memory.write"],
     });
@@ -91,7 +106,7 @@ describe("client protocol gateway", () => {
   it("keeps confirmation authority on the permission gate", async () => {
     const runtime = await testRuntime();
     const gateway = createClientGateway(runtime);
-    const session = gateway.issueSession({
+    const session = await companion(runtime, gateway, {
       deviceLabel: "android",
       scopes: ["status", "conversation", "operator.confirm"],
     });
@@ -103,8 +118,12 @@ describe("client protocol gateway", () => {
       createdAt: new Date().toISOString(),
       workspaceId: "general",
     });
+    const limited = await companion(runtime, gateway, {
+      deviceLabel: "limited",
+      scopes: ["status"],
+    });
     const deniedWithoutScope = await createClientGateway(runtime).confirm(
-      gateway.issueSession({ deviceLabel: "limited", scopes: ["status"] }).token,
+      limited.token,
       "confirm-test",
       true,
     );
