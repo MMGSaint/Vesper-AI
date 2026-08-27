@@ -1585,6 +1585,40 @@ describe("invariant: Vesper's own files are not documents", () => {
     await runtime.stop();
   });
 
+  it("covers the whole layout when the caller passes only the data directory", async () => {
+    // Every embedder, and the production host until this campaign, passed `{ data }`
+    // alone. `resolveVesperDirs` nests `data` inside the Vesper root and puts config,
+    // logs and models beside it, so registering only `data` left the config file and the
+    // audit log as ordinary readable documents. The root is derived from `data` rather
+    // than required, because requiring it would leave every existing caller unprotected.
+    const { resolveVesperDirs, configFile } = await import("./paths.ts");
+    const base = await mkdtemp(join(tmpdir(), "vesper-derived-"));
+    const dirs = resolveVesperDirs({ dataDir: join(base, "vesper") });
+    await mkdir(dirs.config, { recursive: true });
+    await mkdir(dirs.data, { recursive: true });
+    await writeFile(configFile(dirs), '{"obs":{"password":"CONFIG-SECRET"}}', "utf8");
+
+    const runtime = await createRuntime({
+      storage: new MemoryStorage(),
+      skipDiscovery: true,
+      dirs: { data: dirs.data },
+      config: { approvedRoots: [base] },
+    });
+    await runtime.start();
+    const record = await runtime.tools.invoke({
+      name: "fs_read",
+      args: { path: configFile(dirs) },
+      workspaceId: "general",
+    });
+    assert.equal(record.result?.ok, false, "the config file was readable");
+    assert.equal(
+      JSON.stringify(record.result ?? {}).includes("CONFIG-SECRET"),
+      false,
+      "the obs password reached the model",
+    );
+    await runtime.stop();
+  });
+
   it("still reads an ordinary document in the same approved root", async () => {
     // Narrowing, not severing. If this fails the defence has eaten the user's files.
     const { runtime, base } = await runtimeOwningDirs();

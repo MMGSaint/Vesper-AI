@@ -1,3 +1,4 @@
+import { dirname, join } from "node:path";
 import { defaultConfig, parseConfig, type VesperConfig } from "./config.ts";
 import { registerOwnPaths } from "./security.ts";
 import { createLogger, type Logger } from "./logging.ts";
@@ -645,6 +646,20 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     options.dirs?.logs,
     options.dirs?.models,
     options.dirs?.root,
+    // The siblings, derived when they were not given.
+    //
+    // `resolveVesperDirs` nests `data` inside the Vesper root and puts config, logs and
+    // models beside it, so a caller passing only `{ data }` — which every embedder and
+    // the production host did until this campaign — left the config file and the audit
+    // log as ordinary readable documents.
+    //
+    // The *names* are derived, not the parent itself. Registering `dirname(data)` would
+    // be simpler and wrong: a root that legitimately contains the user's notes next to
+    // `data/` would stop being readable at all. paths.ts owns this layout, so these are
+    // exactly the directories it creates and nothing else.
+    ...(options.dirs?.data && !options.dirs?.root
+      ? ["config", "logs", "models"].map((name) => join(dirname(options.dirs!.data), name))
+      : []),
   ]);
 
   // Device identity, the registry, and the task queue are constructed before anything
