@@ -14,9 +14,11 @@
  * missing line rather than as an absence nobody notices.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, globSync } from "node:fs";
+import { sep } from "node:path";
 
 const SUITE = [
+  ["src/vesper/permissions.test.ts", "the classifier itself, including the never-tier escalation"],
   ["src/vesper/security.test.ts", "path confinement, executable safety, secret detection"],
   ["src/vesper/security-hostile.test.ts", "hostile inputs against every boundary"],
   ["src/vesper/security-invariants.test.ts", "the cross-cutting properties, as properties"],
@@ -28,12 +30,50 @@ const SUITE = [
   ["src/vesper/tools/remote.test.ts", "remote authority limits at the tool gate"],
   ["src/vesper/tools/scope-enforcement.test.ts", "a scope governs its data on every route"],
   ["src/vesper/tools/filesystem-containment.test.ts", "writes and reads never escape an approved root"],
+  ["src/vesper/client/gateway.test.ts", "gateway method scopes and session authentication"],
   ["src/vesper/client/device-binding.test.ts", "device identity, trust, revocation"],
   ["src/vesper/client/confirmation-authority.test.ts", "the confirmation queue as a trust boundary"],
   ["src/vesper/memory/scopes.test.ts", "memory scope visibility and attribution"],
   ["src/vesper/distributed/discovery.test.ts", "capabilities are discovered, never assumed"],
+  ["src/vesper/logging.test.ts", "secret redaction on the audit path"],
   ["src/vesper/resource-bounds.test.ts", "nothing untrusted chooses how much the host allocates"],
 ];
+
+/**
+ * Files that must be in the suite, matched by what they are rather than by name.
+ *
+ * A vanished listed file already fails loudly below. The opposite gap had nothing
+ * watching it: `permissions.test.ts` is the only place the never-tier *escalation* is
+ * covered as a unit — the rule that stops a tool whose author declared it "safe" from
+ * running autonomously — and it was never listed, so deleting the escalation left the
+ * gate green. `gateway.test.ts` and `logging.test.ts` were in the same position.
+ *
+ * This is not a substitute for a real test: it only catches a security-relevant file
+ * being written and then forgotten.
+ */
+const MUST_BE_LISTED = [
+  /^src\/vesper\/security.*\.test\.ts$/,
+  /^src\/vesper\/permissions\.test\.ts$/,
+  /^src\/vesper\/untrusted.*\.test\.ts$/,
+  /^src\/vesper\/injection-.*\.test\.ts$/,
+  /^src\/vesper\/logging\.test\.ts$/,
+  /^src\/vesper\/resource-bounds\.test\.ts$/,
+  /^src\/vesper\/prompt-integrity\.test\.ts$/,
+  /^src\/vesper\/client\/.*\.test\.ts$/,
+  /^src\/vesper\/tools\/(remote|scope-enforcement|filesystem-containment)\.test\.ts$/,
+];
+
+const listed = new Set(SUITE.map(([file]) => file));
+const shouldBeListed = globSync("src/vesper/**/*.test.ts")
+  .map((file) => file.split(sep).join("/"))
+  .filter((file) => MUST_BE_LISTED.some((pattern) => pattern.test(file)))
+  .filter((file) => !listed.has(file));
+if (shouldBeListed.length > 0) {
+  console.error("Security-relevant test files exist but are not in the suite:");
+  for (const file of shouldBeListed) console.error(`  ${file}`);
+  console.error("Add them to SUITE, or narrow MUST_BE_LISTED and say why in a comment.");
+  process.exit(1);
+}
 
 const missing = SUITE.filter(([file]) => !existsSync(file));
 if (missing.length > 0) {

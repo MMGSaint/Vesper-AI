@@ -174,6 +174,72 @@ describe("invariant: an unauthorized tool never executes", () => {
     await runtime.stop();
   });
 
+  it("escalates a tool its own author declared safe, and stops the handler", async () => {
+    // The *escalation*, which is a different mechanism from the never tier itself: the
+    // rule that a tool whose author says "safe" is still never autonomous if its name
+    // matches NEVER_PATTERNS or the policy's neverAllowAutonomous list. That is what
+    // governs an MCP server's tools, a plugin's, and anything a config override renames
+    // — the cases where Vesper did not write the spec.
+    //
+    // The canary tools could never exercise it: they carry `permission: "never"` in
+    // their own specs, so removing the escalation changes nothing for them. Covered as a
+    // unit in permissions.test.ts, which was not in the security gate at all until now.
+    const runtime = await testRuntime();
+    const marker = join(await mkdtemp(join(tmpdir(), "vesper-escal-")), "RAN");
+    runtime.tools.register(
+      {
+        name: "credential_extract_v2",
+        description: "A tool whose author claims it is harmless.",
+        permission: "safe",
+        parameters: { type: "object", properties: {}, required: [] },
+      },
+      async () => {
+        await writeFile(marker, "THE-HANDLER-RAN", "utf8");
+        return { ok: true, epistemic: "changed" as const, summary: "ran" };
+      },
+    );
+    const record = await runtime.tools.invoke({
+      name: "credential_extract_v2",
+      args: {},
+      workspaceId: "general",
+      confirmed: true,
+    });
+    assert.equal(await ran(marker), false, "a tool declared safe ran despite matching a never pattern");
+    assert.equal(record.decision.level, "never", "the escalation did not reclassify it");
+    assert.equal(record.decision.allowed, false);
+    await runtime.stop();
+  });
+
+  it("escalates a tool the policy names, whatever the tool says about itself", async () => {
+    // The other half of the escalation: an explicit `neverAllowAutonomous` entry, which
+    // is how a user hardens a tool Vesper's own patterns do not describe.
+    const runtime = await testRuntime({
+      config: { permissions: { neverAllowAutonomous: ["harmless_probe"] } } as never,
+    });
+    const marker = join(await mkdtemp(join(tmpdir(), "vesper-escal2-")), "RAN");
+    runtime.tools.register(
+      {
+        name: "harmless_probe",
+        description: "Nothing to see here.",
+        permission: "safe",
+        parameters: { type: "object", properties: {}, required: [] },
+      },
+      async () => {
+        await writeFile(marker, "THE-HANDLER-RAN", "utf8");
+        return { ok: true, epistemic: "changed" as const, summary: "ran" };
+      },
+    );
+    const record = await runtime.tools.invoke({
+      name: "harmless_probe",
+      args: {},
+      workspaceId: "general",
+      confirmed: true,
+    });
+    assert.equal(await ran(marker), false, "a policy-named tool ran autonomously");
+    assert.equal(record.decision.level, "never");
+    await runtime.stop();
+  });
+
   it("a never-tier tool is refused even when the caller claims confirmation", async () => {
     // The builtin canaries, kept — but now asserting on the *decision*, which the stub
     // handler's return value cannot supply.
