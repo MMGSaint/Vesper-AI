@@ -39,6 +39,8 @@ import { loadDeviceIdentity, type DeviceIdentity, type HostPosture } from "./dis
 import { DeviceRegistry } from "./distributed/registry.ts";
 import { TaskQueue } from "./distributed/tasks.ts";
 import { buildNow, renderNow } from "./distributed/now.ts";
+import { discoverCapabilities, type CapabilityManifest } from "./distributed/capabilities.ts";
+import { buildDiscoveryProbes } from "./distributed/discovery.ts";
 import { describeStartupRegistration } from "./windows/startup.ts";
 import type {
   AgentTurn,
@@ -193,7 +195,41 @@ export class VesperRuntime {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+    // Record what this device can actually do. Until this runs, the registry holds a
+    // device with no manifest, and routing correctly refuses to send it work — which
+    // looks exactly like a machine that cannot do anything.
+    await this.refreshCapabilities();
     return this.capability;
+  }
+
+  /**
+   * Re-probe this device and store the result in the registry.
+   *
+   * Called at startup and again once backend discovery finishes, because a capability
+   * that depends on a reachable backend is not knowable before that backend answers.
+   * Never fatal: a device that cannot describe itself must still run locally.
+   */
+  async refreshCapabilities(): Promise<CapabilityManifest | null> {
+    try {
+      const manifest = await discoverCapabilities({
+        deviceId: this.deviceIdentity.deviceId,
+        probes: buildDiscoveryProbes({
+          models: this.models,
+          voice: this.voice,
+          optimizer: this.optimizer,
+          obs: this.obs,
+          tools: this.tools,
+          hostPosture: this.hostPosture,
+        }),
+      });
+      await this.devices.setCapabilities(this.deviceIdentity.deviceId, manifest);
+      return manifest;
+    } catch (error) {
+      this.log.warn("lifecycle", "Could not build this device's capability manifest", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
 
   private async discoverInBackground() {
@@ -203,6 +239,9 @@ export class VesperRuntime {
       });
       this.capability = this.firstBootReport.profile;
       await this.models.probeAll();
+      // The manifest built at startup predates this probe, so redo it now that the
+      // backends have actually answered.
+      await this.refreshCapabilities();
     } catch (error) {
       this.log.error("lifecycle", "First-boot discovery failed; continuing degraded", {
         error: error instanceof Error ? error.message : String(error),
