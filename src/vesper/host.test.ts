@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createProductionHost } from "./host/service.ts";
 import { parseCli } from "./cli.ts";
 import { VESPER_VERSION } from "./version.ts";
+import { CLIENT_PROTOCOL_ID, CLIENT_PROTOCOL_VERSION } from "./client/protocol.ts";
 
 describe("production host", () => {
   it("starts a background host, writes health, and shuts down", async () => {
@@ -23,8 +24,10 @@ describe("production host", () => {
     });
     assert.equal(host.runtime.started, true);
     assert.equal(host.runtime.background.state(), "running");
-    assert.equal(host.gateway.hello().protocol, "vesper.client");
-    assert.equal(host.gateway.hello().version, 1);
+    assert.equal(host.gateway.hello().protocol, CLIENT_PROTOCOL_ID);
+    // Against the constant, not a literal: a hardcoded version silently becomes a
+    // false assertion the moment the contract moves.
+    assert.equal(host.gateway.hello().version, CLIENT_PROTOCOL_VERSION);
     const healthPath = await host.writeHealth();
     const health = JSON.parse(await readFile(healthPath, "utf8")) as { version?: string };
     assert.equal(health.version, VESPER_VERSION);

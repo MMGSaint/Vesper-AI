@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { testRuntime } from "./test-helpers.ts";
+import { enrolCompanion, testRuntime } from "./test-helpers.ts";
 import { readApproved, writeApproved } from "./tools/filesystem.ts";
 import { KnowledgeIndex } from "./knowledge/rag.ts";
 import { evaluatePermission } from "./permissions.ts";
@@ -72,10 +72,13 @@ describe("hostile security review", () => {
   it("companion sessions cannot claim forbidden OS powers or leak tokens", async () => {
     const runtime = await testRuntime();
     const gateway = createClientGateway(runtime);
-    const session = gateway.issueSession({
+    const hostile = await enrolCompanion(runtime, { name: "hostile-phone" });
+    const session = await gateway.issueSession({
+      deviceId: hostile.deviceId,
       deviceLabel: "hostile-phone",
       scopes: ["status", "os.shell" as never, "permissions.relax" as never],
     });
+    if (isClientError(session)) throw new Error(session.detail);
     assert.equal(session.scopes.includes("status"), true);
     assert.equal(session.scopes.includes("os.shell" as never), false);
     const listed = gateway.sessions.list();

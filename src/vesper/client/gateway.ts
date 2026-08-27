@@ -21,14 +21,20 @@ export interface ClientStatus {
 }
 
 export class VesperClientGateway {
-  readonly sessions = new ClientSessionStore();
+  readonly sessions: ClientSessionStore;
   private readonly runtime: VesperRuntime;
 
   constructor(runtime: VesperRuntime) {
     this.runtime = runtime;
+    // The registry is the single source of truth for whether a device may talk to this
+    // Vesper, and it is asked on every request rather than copied into the session.
+    this.sessions = new ClientSessionStore(async (deviceId) => {
+      const record = await this.runtime.devices.get(deviceId);
+      return record?.trust ?? "unknown";
+    });
   }
 
-  issueSession(input: IssueSessionInput): ClientSession {
+  async issueSession(input: IssueSessionInput): Promise<ClientSession | ClientError> {
     return this.sessions.issue(input);
   }
 
@@ -38,12 +44,14 @@ export class VesperClientGateway {
       version: CLIENT_PROTOCOL_VERSION,
       core: VESPER_VERSION,
       instanceId: this.runtime.instanceId,
+      deviceId: this.runtime.deviceIdentity.deviceId,
+      hostPosture: this.runtime.hostPosture,
       started: this.runtime.started,
     };
   }
 
   async status(token?: string): Promise<ClientStatus | ClientError> {
-    const session = this.sessions.require(token, "status");
+    const session = await this.sessions.require(token, "status");
     if ("ok" in session) return session;
     const diagnostics = await this.runtime.diagnostics();
     const optimizerState =
@@ -106,7 +114,7 @@ export class VesperClientGateway {
   }
 
   async converse(token: string | undefined, text: string): Promise<AgentTurn | ClientError> {
-    const session = this.sessions.require(token, "conversation");
+    const session = await this.sessions.require(token, "conversation");
     if ("ok" in session) return session;
     const trimmed = text.trim();
     if (!trimmed) return clientError("INVALID", "Empty message.");
@@ -118,7 +126,7 @@ export class VesperClientGateway {
     confirmationId: string,
     approve: boolean,
   ): Promise<AgentTurn | ClientError> {
-    const session = this.sessions.require(token, "operator.confirm");
+    const session = await this.sessions.require(token, "operator.confirm");
     if ("ok" in session) return session;
     const pending = this.runtime.confirmations.get(confirmationId);
     if (!pending) return clientError("NOT_FOUND", "No pending confirmation with that id.");
@@ -133,7 +141,7 @@ export class VesperClientGateway {
   }
 
   async listMemory(token: string | undefined): Promise<{ entries: MemoryEntry[] } | ClientError> {
-    const session = this.sessions.require(token, "memory.read");
+    const session = await this.sessions.require(token, "memory.read");
     if ("ok" in session) return session;
     const entries = await this.runtime.memory.exportPersistent();
     return { entries };
@@ -143,7 +151,7 @@ export class VesperClientGateway {
     token: string | undefined,
     input: { key: string; value: string; category?: MemoryEntry["category"] },
   ): Promise<{ entry: MemoryEntry } | ClientError> {
-    const session = this.sessions.require(token, "memory.write");
+    const session = await this.sessions.require(token, "memory.write");
     if ("ok" in session) return session;
     if (!input.key.trim() || !input.value.trim()) {
       return clientError("INVALID", "Memory key and value are required.");
@@ -162,7 +170,7 @@ export class VesperClientGateway {
     token: string | undefined,
     query: string,
   ): Promise<{ hits: { path: string; snippet: string; score: number }[] } | ClientError> {
-    const session = this.sessions.require(token, "knowledge.read");
+    const session = await this.sessions.require(token, "knowledge.read");
     if ("ok" in session) return session;
     const hits = await this.runtime.knowledge.search(query, { limit: 8 });
     return {
@@ -171,13 +179,13 @@ export class VesperClientGateway {
   }
 
   async notifications(token: string | undefined): Promise<{ items: VesperNotification[] } | ClientError> {
-    const session = this.sessions.require(token, "notifications");
+    const session = await this.sessions.require(token, "notifications");
     if ("ok" in session) return session;
     return { items: this.runtime.notifications.recent(20) };
   }
 
-  pending(token: string | undefined): PendingConfirmation[] | ClientError {
-    const session = this.sessions.require(token, "operator.confirm");
+  async pending(token: string | undefined): Promise<PendingConfirmation[] | ClientError> {
+    const session = await this.sessions.require(token, "operator.confirm");
     if ("ok" in session) return session;
     return [...this.runtime.confirmations.values()];
   }
@@ -186,8 +194,8 @@ export class VesperClientGateway {
     return FORBIDDEN_REMOTE_POWERS;
   }
 
-  scopesOf(token: string | undefined): ClientScope[] | ClientError {
-    const session = this.sessions.authenticate(token);
+  async scopesOf(token: string | undefined): Promise<ClientScope[] | ClientError> {
+    const session = await this.sessions.authenticate(token);
     if ("ok" in session) return session;
     return session.scopes;
   }
