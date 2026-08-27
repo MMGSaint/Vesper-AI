@@ -5,6 +5,7 @@ import {
   assertWithinRoot,
   containsTraversal,
   isDangerousRoot,
+  isVesperOwnPath,
   resolveRealWithinRoot,
 } from "../security.ts";
 import type { JsonObject, ToolExecutionResult } from "../types.ts";
@@ -18,6 +19,12 @@ export function resolveApprovedPath(
   }
   if (isDangerousRoot(requested)) {
     return { ok: false, summary: "Refused a dangerous filesystem root." };
+  }
+  // Vesper's own data and configuration are not documents. They hold the device private
+  // key, the audit trail, the device registry and the memory store, and an approved root
+  // that happens to contain them must not turn any of that into a readable file.
+  if (isVesperOwnPath(requested)) {
+    return { ok: false, summary: "Refused to touch Vesper's own data or configuration." };
   }
   if (!approvedRoots.length) {
     return { ok: false, summary: "No approved filesystem roots are configured." };

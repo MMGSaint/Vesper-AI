@@ -1,4 +1,5 @@
 import { defaultConfig, parseConfig, type VesperConfig } from "./config.ts";
+import { registerOwnPaths } from "./security.ts";
 import { createLogger, type Logger } from "./logging.ts";
 import { MemoryStorage, type StorageAdapter } from "./storage.ts";
 import { createPermissionGate } from "./permissions.ts";
@@ -572,6 +573,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     log.warn("lifecycle", "Config invalid; using defaults", { errors: parsed.errors.join("; ") });
   }
   const storage = options.storage ?? new MemoryStorage();
+  // Declare where Vesper's own files live before anything can be asked to read them.
+  registerOwnPaths([options.dirs?.data]);
 
   // Device identity, the registry, and the task queue are constructed before anything
   // that might want to know which machine this is.

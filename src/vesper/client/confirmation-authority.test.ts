@@ -97,10 +97,18 @@ describe("approving a confirmation exercises the approver's own authority", () =
     ]);
     const turn = await gateway.confirm(session.token, id, true);
     if (isClientError(turn)) throw new Error(turn.detail);
+
+    // Asserted on the host's event bus, not on the envelope handed back to the phone:
+    // "the owner can see it" is a claim about the machine's own record. The turn a
+    // companion receives is deliberately stripped of host events, so asserting there
+    // would have been testing the wrong side of the boundary.
     assert.ok(
-      turn.events.some((event) => event.type === "security.remote_confirmation"),
+      runtime.events.recent({ limit: 20 }).some(
+        (event) => event.type === "security.remote_confirmation",
+      ),
       "a remote device approving a held action must be visible to the owner",
     );
+    assert.deepEqual(turn.events, [], "the companion was handed the host's event log");
     await runtime.stop();
   });
 

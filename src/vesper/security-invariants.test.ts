@@ -973,3 +973,112 @@ describe("invariant: the device private key stays in its own protected file", ()
     await host.runtime.stop();
   });
 });
+
+describe("invariant: a companion sees its own reply, not the host's business", () => {
+  it("keeps Vesper's own data and configuration out of every read path", async () => {
+    // The data directory holds the device private key, the audit trail, the registry and
+    // the memory store. Point a knowledge root at a parent of it — or approve a home
+    // directory that contains it — and the key came back as a search hit.
+    const { FileStorage } = await import("./storage.ts");
+    const root = await mkdtemp(join(tmpdir(), "vesper-own-"));
+    const data = join(root, "data");
+    await mkdir(data, { recursive: true });
+    await writeFile(join(root, "notes.md"), "ordinary notes about streaming", "utf8");
+
+    const runtime = await createRuntime({
+      storage: new FileStorage(join(data, "state.json")),
+      skipDiscovery: true,
+      dirs: { data },
+      config: { approvedRoots: [root] },
+    });
+    await runtime.start();
+    await runtime.memory.remember({
+      category: "fact",
+      key: "wifi password",
+      value: "hunter2-not-a-real-secret",
+      source: "user",
+    });
+    runtime.knowledge.registerSource({ id: "all", name: "all", roots: [root], enabled: true });
+    await runtime.knowledge.reindex();
+
+    for (const query of ["privateKey", "hunter2-not-a-real-secret", "wifi password"]) {
+      const hits = await runtime.knowledge.searchAsync(query, { limit: 5 });
+      const blob = JSON.stringify(hits);
+      assert.equal(blob.includes("privateKey"), false, `'${query}' surfaced the private key`);
+      assert.equal(blob.includes("hunter2-not-a-real-secret"), false, `'${query}' surfaced the store`);
+    }
+
+    const read = await runtime.tools.invoke({
+      name: "fs_read",
+      args: { path: join(data, "state.json") },
+      workspaceId: "general",
+    });
+    assert.equal(read.result?.ok, false, "fs_read reached Vesper's own state file");
+
+    // Narrowing, not severing: the user's actual notes are still indexed.
+    const ordinary = await runtime.knowledge.searchAsync("streaming", { limit: 5 });
+    assert.ok(ordinary.length > 0, "ordinary documents stopped being indexed");
+    await runtime.stop();
+  });
+
+  it("does not hand the host's notifications to a session refused that scope", async () => {
+    // The turn envelope carries them for a local UI, and converse returned the whole
+    // envelope — so a device refused the notifications *method* received them anyway,
+    // attached to its own reply.
+    const runtime = await testRuntime({ script: [{ text: "noted" }] });
+    const gateway = createClientGateway(runtime);
+    runtime.notifications.push({
+      title: "Private host notification",
+      body: "something only the owner should see",
+      kind: "info",
+    });
+    const phone = await enrolCompanion(runtime, { name: "phone" });
+    const session = await gateway.issueSession({
+      deviceId: phone.deviceId,
+      deviceLabel: "phone",
+      scopes: ["status", "conversation"],
+    });
+    if (isClientError(session)) throw new Error(session.detail);
+
+    assert.equal(isClientError(await gateway.notifications(session.token)), true, "the method leaked");
+    const turn = await gateway.converse(session.token, "hello");
+    if (isClientError(turn)) throw new Error(turn.detail);
+    assert.deepEqual(turn.notifications, [], "the reply envelope carried them instead");
+    assert.deepEqual(turn.events, [], "the reply envelope carried the host's event log");
+    await runtime.stop();
+  });
+
+  it("does not return the whole memory store to a companion", async () => {
+    // listMemory exported everything: every workspace, and anything credential-shaped.
+    const runtime = await testRuntime();
+    const gateway = createClientGateway(runtime);
+    await runtime.memory.remember({
+      category: "config",
+      key: "api key",
+      value: "sk-live-0123456789abcdefghijklmnop",
+      source: "user",
+    });
+    await runtime.memory.remember({
+      category: "fact",
+      key: "other workspace note",
+      value: "mortis campaign tone",
+      scopeLevel: "workspace",
+      workspaceId: "mortis",
+      source: "user",
+    });
+    const phone = await enrolCompanion(runtime, { name: "phone" });
+    const session = await gateway.issueSession({
+      deviceId: phone.deviceId,
+      deviceLabel: "phone",
+      scopes: ["status", "conversation", "memory.read"],
+    });
+    if (isClientError(session)) throw new Error(session.detail);
+
+    const listed = await gateway.listMemory(session.token);
+    if (isClientError(listed)) throw new Error(listed.detail);
+    const blob = JSON.stringify(listed.entries);
+    assert.equal(blob.includes("sk-live-0123456789abcdefghijklmnop"), false, "a credential was sent");
+    assert.equal(blob.includes("mortis campaign tone"), false, "another workspace's memory was sent");
+    await runtime.stop();
+  });
+});

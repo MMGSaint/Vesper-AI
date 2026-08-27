@@ -6,6 +6,7 @@ import {
   containsTraversal,
   isDangerousRoot,
   isPathInside,
+  isVesperOwnPath,
   resolveRealWithinRoot,
 } from "../security.ts";
 import { chunkText } from "./chunk.ts";
@@ -84,6 +85,7 @@ async function walk(
   filter: WalkFilter,
 ): Promise<void> {
   if (containsTraversal(root) || isDangerousRoot(root)) return;
+  if (isVesperOwnPath(root)) return;
   const resolvedRoot = resolve(root);
   if (approvedRoots.length && !approvedRoots.some((item) => isPathInside(item, resolvedRoot))) {
     return;
@@ -97,6 +99,9 @@ async function walk(
   for (const entry of entries) {
     const full = join(resolvedRoot, entry.name);
     if (!isPathInside(resolvedRoot, full)) continue;
+    // Checked per entry, not only per root: an approved root can legitimately sit above
+    // Vesper's own data directory, and only the entry says which is which.
+    if (isVesperOwnPath(full)) continue;
 
     // A symlink can point anywhere. `readdir` reports the link itself, so a link named
     // `notes.md` would otherwise be indexed by extension and read through to its real
@@ -170,6 +175,9 @@ export class KnowledgeIndex {
     }
     if (source.roots.some((root) => containsTraversal(root) || isDangerousRoot(root))) {
       return { ok: false, summary: "Refused to register a dangerous or traversing knowledge root." };
+    }
+    if (source.roots.some((root) => isVesperOwnPath(root))) {
+      return { ok: false, summary: "Refused to index Vesper's own data or configuration." };
     }
     if (this.approvedRoots.length) {
       // Compare *real* paths. A lexical check accepts a symlinked directory sitting

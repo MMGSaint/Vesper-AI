@@ -12,6 +12,7 @@ import {
   type ClientScope,
 } from "./protocol.ts";
 import { ClientSessionStore, type ClientSession, type IssueSessionInput } from "./session.ts";
+import { filterForSync } from "../distributed/sync.ts";
 import type { RequestOrigin } from "../tools/remote.ts";
 
 export interface ClientStatus {
@@ -138,6 +139,25 @@ export class VesperClientGateway {
     };
   }
 
+  /**
+   * Trim a turn to what this session is allowed to see.
+   *
+   * The envelope carries the host's recent notifications and events for the benefit of a
+   * local UI, and gateway.converse handed the whole thing to whoever was talking — so a
+   * device refused the `notifications` scope on the method of that name received them
+   * anyway, attached to its own reply.
+   */
+  private project(turn: AgentTurn, session: ClientSession): AgentTurn {
+    return {
+      ...turn,
+      notifications: session.scopes.includes("notifications") ? turn.notifications : [],
+      // Events describe what the host has been doing, which is the owner's business and
+      // not a companion's. `status` is the scope for "how is the machine", and it has
+      // its own method that decides what to say.
+      events: [],
+    };
+  }
+
   async converse(token: string | undefined, text: string): Promise<AgentTurn | ClientError> {
     const session = await this.sessions.require(token, "conversation");
     if ("ok" in session) return session;
@@ -146,9 +166,10 @@ export class VesperClientGateway {
     // A conversation is a tool-calling loop, so a remote turn must carry who is asking
     // all the way to the point tools run. Without this, "may converse" silently means
     // "may call anything the agent decides to call" on the host's own machine.
-    return this.runtime.chat(trimmed, {
+    const turn = await this.runtime.chat(trimmed, {
       origin: await this.remoteOrigin(session.deviceId, session.scopes),
     });
+    return this.project(turn, session);
   }
 
   async confirm(
@@ -175,7 +196,7 @@ export class VesperClientGateway {
         );
       }
       this.runtime.confirmations.delete(confirmationId);
-      return this.runtime.chat("Operator denied the pending action.");
+      return this.project(await this.runtime.chat("Operator denied the pending action."), session);
     }
 
     // The approval carries the approver's own authority into the deferred tool call.
@@ -193,18 +214,26 @@ export class VesperClientGateway {
       severity: "warn",
       workspaceId: pending.workspaceId,
     });
-    return this.runtime.chat("Operator approved the pending action.", {
+    const turn = await this.runtime.chat("Operator approved the pending action.", {
       confirmId: confirmationId,
       approve: true,
       origin,
     });
+    return this.project(turn, session);
   }
 
   async listMemory(token: string | undefined): Promise<{ entries: MemoryEntry[] } | ClientError> {
     const session = await this.sessions.require(token, "memory.read");
     if ("ok" in session) return session;
-    const entries = await this.runtime.memory.exportPersistent();
-    return { entries };
+    // The whole persistent store went over the wire: every workspace, and anything that
+    // looked like a credential. The agent's own retrieval is workspace-scoped and the
+    // sync path refuses credential-shaped values; this route had neither.
+    const scoped = await this.runtime.memory.search("", {
+      workspaceId: this.runtime.workspaces.current().id,
+      scope: "workspace",
+      limit: 200,
+    });
+    return { entries: filterForSync(scoped).send };
   }
 
   async remember(
