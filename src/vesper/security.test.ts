@@ -33,10 +33,20 @@ describe("security", () => {
   });
 
   it("does not log secrets from a remember turn", async () => {
+    // The log never carries user text, so asserting the secret's absence there passed
+    // whatever redaction did. Log something that genuinely contains it — the shape any
+    // handler takes when it reports what it was asked to do — and check redaction on the
+    // path that actually exists.
     const runtime = await testRuntime();
-    await runtime.chat("remember that api_key is sk-secret-value-123456789012");
+    const secret = "sk-secret-value-123456789012";
+    await runtime.chat(`remember that api_key is ${secret}`);
+    runtime.log.info("tool", "memory_remember called", { key: "api_key", value: secret });
+    runtime.log.warn("tool", "retry after failure", { authorization: `Bearer ${secret}` });
+
     const dump = JSON.stringify(runtime.log.recent(40));
-    assert.equal(dump.includes("sk-secret-value-123456789012"), false);
+    assert.ok(dump.includes("memory_remember called"), "the entries under test were recorded");
+    assert.equal(dump.includes(secret), false, "a credential reached the log");
+    assert.ok(dump.includes("[redacted]"), "redaction did not run on the entry that carried it");
   });
 
   it("denies command-like unapproved app names", async () => {

@@ -381,6 +381,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * What a security section becomes when it cannot be read.
+ *
+ * The least authority the section can express: no approved roots means no filesystem
+ * access, no approved applications means nothing may be launched, no knowledge sources
+ * means nothing is indexed. The assistant still starts and still says what happened; it
+ * simply cannot do the things the unreadable section was what authorised.
+ */
+const LOCKED_DOWN: Record<string, unknown> = {
+  approvedRoots: [],
+  approvedApps: [],
+  knowledgeSources: [],
+};
+
 function isSecurityPath(path: string): boolean {
   return SECURITY_SECTIONS.some((section) => path === section || path.startsWith(`${section}.`));
 }
@@ -426,6 +440,17 @@ function removeExact(
     !restored.has(key)
   ) {
     restored.add(key);
+    // A security section that failed validation is put back *locked down*, not put back
+    // to the vendor's starting point.
+    //
+    // DEFAULT_CONFIG_INPUT is a permissive place to begin — approvedRoots already lists
+    // notes, docs and knowledge — so restoring it silently widened a user who had
+    // narrowed their own settings. The safe reading of "this section is unreadable" is
+    // the least authority it could express, not the most convenient one.
+    if (isSecurityPath(key) && key in LOCKED_DOWN) {
+      parent[key] = structuredClone(LOCKED_DOWN[key]);
+      return true;
+    }
     parent[key] = structuredClone(DEFAULT_CONFIG_INPUT[key]);
     return true;
   }

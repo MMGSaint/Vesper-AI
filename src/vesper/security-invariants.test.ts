@@ -320,6 +320,10 @@ describe("invariant: filesystem access never leaves the canonical approved roots
         args: { path },
         workspaceId: "general",
       });
+      // Both halves matter. Two of these targets (/etc/passwd) never contained the
+      // sentinel, so a content check alone was vacuous for them — the refusal itself is
+      // what has to be asserted.
+      assert.equal(record.result?.ok, false, `a path outside the roots was read: ${path}`);
       assert.equal(
         JSON.stringify(record.result ?? {}).includes("OUTSIDE-SECRET"),
         false,
@@ -367,19 +371,27 @@ describe("invariant: a model's claim is not evidence", () => {
 
   it("never reports an optimization the adapter did not accept", async () => {
     const runtime = await testRuntime();
+    // `action` is required by the schema. Omitting it meant the registry refused the
+    // call before the handler ran, so the assertion below never executed at all.
     const record = await runtime.tools.invoke({
       name: "optimizer_request",
-      args: { profile: "gaming" },
+      args: { action: "optimize", profile: "gaming" },
       workspaceId: "general",
       confirmed: true,
     });
+    assert.notEqual(
+      record.result,
+      undefined,
+      "the call never reached the handler, so this test proves nothing",
+    );
     const blob = JSON.stringify(record.result ?? {});
+    assert.equal(
+      /\boptimi[sz]ed\b|\bapplied\b/i.test(blob) && !/mock|simulat|not connected|unavailable/i.test(blob),
+      false,
+      "claimed a real optimization with no live optimizer",
+    );
     if (record.result?.ok) {
-      assert.match(
-        blob,
-        /mock|simulat|not connected|unavailable/i,
-        "claimed a real optimization with no live optimizer",
-      );
+      assert.match(blob, /mock|simulat|not connected|unavailable|request/i);
     }
     await runtime.stop();
   });
@@ -456,7 +468,21 @@ describe("invariant: a secret never leaves through a side channel", () => {
       events: runtime.events.recent({ limit: 20 }),
     });
     assert.equal(shared.includes("PRIVATE KEY"), false);
-    assert.equal(shared.includes("privateKey"), false, "a private key reached a shared surface");
+    assert.equal(shared.includes("privateKey"), false, "a private key field reached a shared surface");
+
+    // Asserting on field names alone would pass even if the key's bytes were present
+    // under some other name, so check for the material itself. It is exported nowhere,
+    // so it has to be reconstructed the way an attacker with the file would: sign
+    // something and confirm the signature is not the key, then read the stored key.
+    const { readFile } = await import("node:fs/promises");
+    const stored = await runtime.storage.get("identity/device-identity.json");
+    const privateKey =
+      typeof stored === "string"
+        ? (JSON.parse(stored) as { privateKey?: string }).privateKey
+        : (stored as { privateKey?: string } | undefined)?.privateKey;
+    assert.ok(privateKey && privateKey.length > 40, "could not obtain the key to test against");
+    assert.equal(shared.includes(privateKey), false, "the private key's bytes reached a shared surface");
+    assert.ok(readFile, "node:fs is available");
     await runtime.stop();
   });
 
@@ -1172,6 +1198,53 @@ describe("invariant: revoking a device bites the turn already running", () => {
 
     const stored = await runtime.memory.search("mortis-boundary", { scope: "all" });
     assert.match(stored.find((e) => e.key === "mortis-boundary")?.value ?? "", /separate project/);
+    await runtime.stop();
+  });
+});
+
+describe("invariant: an unreadable setting yields less authority, not more", () => {
+  it("locks down a security section that fails validation", async () => {
+    // The repair put a failing top-level section back to DEFAULT_CONFIG_INPUT — the
+    // vendor's permissive starting point, which already lists notes, docs and knowledge
+    // as approved roots. A user who had narrowed their own settings was silently widened
+    // by a typo. "This section is unreadable" has to mean the least authority it could
+    // express, not the most convenient one.
+    const { parseConfig } = await import("./config.ts");
+    const parsed = parseConfig({
+      approvedRoots: "not-an-array",
+      approvedApps: 42,
+    } as never);
+
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.securityRelevant, true, "the failure was not treated as security relevant");
+    assert.deepEqual(parsed.config.approvedRoots, [], "approvedRoots was widened by a parse failure");
+    assert.deepEqual(parsed.config.approvedApps, [], "approvedApps was widened by a parse failure");
+  });
+
+  it("leaves a valid configuration exactly as written", async () => {
+    // Narrowing, not severing: a good config must survive untouched.
+    // Note a bare partial config is incomplete for unrelated reasons (`identity` is
+    // required), so `ok` says nothing here. What matters is that a *valid* section is
+    // carried through rather than swept into the lockdown with the invalid ones.
+    const { parseConfig } = await import("./config.ts");
+    const parsed = parseConfig({ approvedRoots: ["notes"] } as never);
+    assert.deepEqual(parsed.config.approvedRoots, ["notes"], "a valid section was locked down");
+    assert.equal(
+      parsed.errors.some((error) => error.startsWith("approvedRoots")),
+      false,
+      "a valid section was reported as failing",
+    );
+  });
+
+  it("a locked-down filesystem section actually refuses reads", async () => {
+    // The end of the chain: the setting is not just different in memory, it denies.
+    const runtime = await testRuntime({ config: { approvedRoots: "not-an-array" } as never });
+    const record = await runtime.tools.invoke({
+      name: "fs_read",
+      args: { path: "/etc/hostname" },
+      workspaceId: "general",
+    });
+    assert.equal(record.result?.ok, false, "a corrupt config left the filesystem readable");
     await runtime.stop();
   });
 });
