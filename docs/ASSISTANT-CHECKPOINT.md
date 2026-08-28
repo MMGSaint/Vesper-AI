@@ -4,7 +4,7 @@ The security campaign is over and merged. This file is the resume point for the 
 the real assistant** phase. It exists so the next session does not have to rediscover the
 repository.
 
-Written 2026-08-28. Everything below is observed output or a repo fact.
+Last touched 2026-08-28. Everything below is observed output or a repo fact.
 
 ---
 
@@ -15,19 +15,16 @@ Written 2026-08-28. Everything below is observed output or a repo fact.
 | Authoritative repo | **`MMGSaint/vesper-ai`**, working copy `/home/user/vesper-ai` |
 | Not the target | `/home/user/Vesper-personal-assistant-` is an empty scaffold — one commit, a README, no code. **Do not migrate or restart the project there.** |
 | Work branch | `claude/vesper-local-ai-build-ti8ofa` |
-| HEAD | `6d90a46`, pushed, 1 commit ahead of `main` |
-| `main` | `9b7d924` — **PR #9 is merged**; the round-2 hardening is on main and its tree is identical to the old `agent/distributed` |
-| Round-1 + round-2 security | fully merged; `agent/distributed` is finished, 0 ahead of main |
+| HEAD | `70b4509`, pushed, **8 commits ahead of `origin/main`** |
+| `origin/main` | `9b7d924` — PR #9 merged; the round-2 hardening is on main |
 
-The prior mission's premise "the security foundation has been merged" is now accurate. It
-was *not* when this session began — PR #9 merged mid-session. Verify git state yourself
-rather than trusting this table if any time has passed.
+Verify git state rather than trusting this table if any time has passed.
 
 ---
 
 ## 2. What Vesper can actually do today
 
-Measured by driving the real runtime and the real binary, not by reading code.
+Measured by driving the real binary and the real runtime — not by reading code.
 
 **Works end-to-end.** The vertical path is built and runs:
 
@@ -36,21 +33,38 @@ user text → runtime → deterministic intent → tool → permission gate → 
           → world state → memory → truthful reply with epistemic tags
 ```
 
-- 40 tools registered; `system_info`, `process_list`, `optimizer_status`,
-  `memory_remember`, `memory_search` all execute for real in one turn.
-- Persistent memory **survives across separate processes** (stored in one `--ask`
-  invocation, recalled in another).
-- Replies are honest about provenance: *"I checked the simulated snapshot — the physical
-  target PC was not queried"*, and optimizer text is quoted and attributed rather than
-  spoken in Vesper's voice.
+- **41 tools registered** (added `memory_summarize` this session).
+- The deterministic intent layer answers seven kinds of first-touch questions without
+  needing a model:
+  - **status** — "what is happening" / "how's the system" — reads live state and reports
+    honestly that hardware is simulated.
+  - **workspace** — "switch to gaming" — **survives across processes** (this session).
+  - **remember / forget / recall** — memory operations, category-aware, punctuation-stripped.
+  - **recall meta** — "what do you know about me?" now returns a **summary** rather than
+    searching for the literal token `me?` (this session).
+  - **catch me up** — composes a categorised digest from `events.recent()`, drops
+    `lifecycle.idle_tick` noise (this session).
+  - **capabilities** — "what can you do?" / "help" / "list your tools" — reports live tool
+    tier counts, reachable backends, workspaces, memory (this session).
+  - **optimize / ready / diagnostics / gpu / thermal / obs** — each grounded in real
+    state, quoting the optimizer rather than speaking in its voice.
+- Persistent memory **survives across separate processes** and honours workspace scope.
+- **Doctor now reports model backend reachability** with actionable "Start a backend"
+  advice, and maps roles → providers (this session).
+- Replies carry epistemic tags: *"I checked the simulated snapshot — the physical target
+  PC was not queried"*.
 - Host lifecycle is real: instance lock, health file, crash notes, clean shutdown,
-  `--doctor`, `--diagnostics`, `--status`, `--export-memory`, `--client-hello`.
-- Model provider layer exists: native Ollama provider (`/api/chat`, `/api/tags`,
-  `/api/show`, `/api/ps`, `/api/embed`), OpenAI-compat for llama.cpp, echo/scripted for
-  tests, a router with roles `fast/everyday/reasoning/coding/large`, and a benchmark
-  harness.
+  `--doctor`, `--diagnostics`, `--status`, `--export-memory`, `--client-hello`, and
+  `--ask` (previous session).
 
-**The gap that matters.** No local inference backend is reachable in this container:
+**The Ollama provider is now proven at the wire.** A loopback fixture binds `127.0.0.1:0`,
+serves `/api/tags`, `/api/show`, `/api/ps`, `/api/embed`, and streaming `/api/chat`, and
+drives a full agent turn — model→tool→permission→execute→result — through real socket
+bytes. 13 tests. A mutation that bound `0.0.0.0` slipped past a URL-string assertion once
+(recorded), fixed by exposing `boundAddress` and asserting on what the server actually
+bound to.
+
+**The gap that still matters.** No local inference backend is reachable in this container:
 
 ```
 model status: {"active":"auto","available":[
@@ -59,154 +73,144 @@ model status: {"active":"auto","available":[
   {"id":"echo","kind":"test","available":true}]}
 ```
 
-So every reply above came from **deterministic intent paths, not a model**. Vesper is
-currently a well-governed command router, not yet an assistant. The cost is visible: asked
-*"what do you know about me?"* it searched memory for the literal token `me?` and missed a
-fact it had just stored.
-
-**Not yet verified against a real model or a real socket.** The Ollama provider's tests
-stub `fetchImpl` (36 occurrences) and never open a socket, while the provider calls five
-real endpoints. Nothing has exercised real HTTP, real NDJSON streaming framing, or real
-tool-call parsing.
+So every free-form reply above came from **deterministic intent paths, not a model**.
+The truthful fallback message says so plainly ("No local inference backend is
+available…"), and the capabilities intent now filters `echo` out — advertising a test
+provider as reachable would undermine the mission's honesty rule.
 
 ---
 
 ## 3. Completed this session
 
-**`feat(cli): --ask` — `6d90a46`.**
+Seven commits, in order:
 
-`runtime.chat` had exactly two callers: the interactive console and the in-process client
-gateway. Nothing else could talk to Vesper — piping stdin fell through to background
-daemon mode, which answers nothing. The whole vertical path was built and undrivable from
-outside, which blocked both real use and any automated end-to-end verification.
-
-- `vesper --ask "<text>"` — one question, one answer, one exit code.
-- `--json` prints the whole turn: reply, epistemic tags, and every tool call with the
-  authorization decision that governed it (level, allowed, requiresConfirmation, ok).
-- A pending confirmation is **reported, never answered**. Exit `3`, the waiting action
-  named on stderr, the action left queued for the console. A script is not the person a
-  confirmation is asking; auto-approving would be "confirmation is not authorization"
-  read backwards.
+| Commit | What it does |
+|---|---|
+| `7465e22` | docs: written checkpoint of prior state |
+| `76f6cb0` | test(models): loopback server + full agent E2E through real socket |
+| `22dcee7` | feat(memory): meta-question retrieval → summary + `memory_summarize` tool |
+| `1f8c466` | feat(workspaces): current workspace survives a restart |
+| `dc13d2f` | feat(doctor): report which local model backends are reachable |
+| `081af76` | feat(agent): "catch me up" answers from the event bus |
+| `70b4509` | feat(agent): "what can you do" answers from the live tool registry |
 
 ### Verified
 
 | Check | Result |
 |---|---|
-| `cli.test.ts` + `host/ask.test.ts` | 14 pass, 0 fail |
-| Full suite | **682 pass, 0 fail** (was 671) |
-| Security gate | **294 pass, 0 fail** |
-| `tsc --noEmit` | clean |
-| `npm run hygiene` | clean, 324 files |
+| `npm test` | **720 pass, 0 fail** (was 671 at session start) |
+| `npm run security:quick` | **294 pass, 0 fail** |
+| `npm run hygiene` | clean, 327 files |
+| `npx tsc --noEmit` | clean |
+| Cross-process shell probes | workspace persistence, memory persistence, catchup, capabilities all real |
 
-Integration tests drive the **real binary** in a child process, because the interesting
-properties — exit code, stdout/stderr split, whether the queued action ran — are invisible
-to a unit test. The confirmation case asserts **by consequence**: the memory is still
-present afterwards. A test that only checked the exit code would pass even if the tool had
-run.
+Every load-bearing defence added this session is **mutation-proven**: the workspace
+filter (removing it leaks scoped tools to General), the echo-provider filter (removing
+it advertises the test backend), the security-notices branch of catchup (removing it
+loses the notice). Two mutations slipped through and were recorded honestly:
 
-**Mutation-proven.** Making `--ask` approve its own pending confirmations fails both
-security tests. The rule is load-bearing, not decorative.
+- The `idle_tick` filter in catchup is defence-in-depth — the downstream digest already
+  only counts start/stop/pause, so removing the filter is a no-op today. Kept and
+  labelled for a future author who might count `lifecycle.length` directly.
+- The workspace validity guard in `workspaces.load()` is subsumed by `current()`'s own
+  fallback for unknown ids. Same treatment.
 
-Each integration case runs in its own temp `cwd`. In development `resolveVesperDirs`
-returns the *relative* `data/vesper`, so a temp working directory gives every case a
-private store and instance lock — no production change, no shared state.
+### A correction from the previous session
 
-### A correction worth keeping
-
-The security gate reads **294**, not the 291 quoted in the previous session's final
-report. Verified by stashing: a clean `main` tree is also 294. The 291 was a stale
-recollection from an earlier branch state, not a regression. Checked rather than assumed.
+The `--ask` "reports honestly that no model is loaded" test used **catch me up** as its
+probe. With the new deterministic intent that phrase never reaches the model-unavailable
+fallback, so the test would pass even if the truthful branch were deleted. Switched to
+a free-form probe no intent captures: "please write a haiku about a cat".
 
 ---
 
 ## 4. Work graph
 
-Status vocabulary: **EXISTS** (tested) · **PARTIAL** (code exists, real behaviour
-unverified) · **BROKEN** · **MISSING** · **BLOCKED-PC** (needs the physical Windows/AMD
-machine) · **FUTURE**.
+Status: **EXISTS** (tested) · **PARTIAL** (code exists, real behaviour unverified) ·
+**MISSING** · **BLOCKED-PC** (needs the physical Windows/AMD machine) · **FUTURE**.
 
 ### P0 — the real end-to-end path
 
-| Item | Status | Note |
-|---|---|---|
-| Runtime lifecycle | EXISTS | lock, health, crash note, clean shutdown |
-| Conversation entry | **EXISTS** | `--ask` shipped this session |
-| Tool execution through permissions | EXISTS | 40 tools, deny-by-default, confirm tier holds |
-| Persistent memory | EXISTS | verified across processes |
-| World/system state | PARTIAL | structured and honest, but **simulated** hardware; real telemetry is BLOCKED-PC |
-| Diagnostics / doctor | EXISTS | |
-| Truthful result reporting | EXISTS | epistemic tags, subsystem attribution |
-| **Local model actually answering** | **PARTIAL — the live gap** | provider + router exist; no backend reachable; never tested against a real socket |
-| Context management | PARTIAL | budgeting exists; system prompt bounded and un-evictable |
-| Background operation | PARTIAL | daemon mode runs; event-driven behaviour thin |
-| Notifications | EXISTS | hub with provenance (`author: subsystem\|model`) |
+| Item | Status |
+|---|---|
+| Runtime lifecycle | EXISTS |
+| `--ask` and console | EXISTS |
+| Tool execution through permissions | EXISTS (41 tools, deny-by-default, confirm tier holds) |
+| Persistent memory (cross-process, cross-workspace) | EXISTS |
+| Workspace persistence (cross-process) | **EXISTS** (this session) |
+| Deterministic first-touch intents (status/recall-meta/catchup/capabilities/…) | **EXISTS** (this session) |
+| World/system state | PARTIAL — structured and honest, but **simulated** hardware; real telemetry is BLOCKED-PC |
+| Diagnostics / doctor + model status | **EXISTS** (this session) |
+| Truthful result reporting | EXISTS — epistemic tags, subsystem attribution |
+| Ollama wire protocol proven at real socket | **EXISTS** (this session) |
+| Local model actually answering | **PARTIAL** — provider works at the wire, no backend running here |
+| Context management | PARTIAL — bounded system prompt |
+| Background operation | PARTIAL — daemon runs; event-driven behaviour thin |
+| Notifications | EXISTS — hub with provenance |
 
 ### P1
 
-Intent/task engine (PARTIAL — lifecycle states not modelled as §12 describes) · event bus
-(PARTIAL — bus exists, no filter/aggregator, so no cheap path for high-frequency events) ·
-autonomy governor (**MISSING** — permission tiers are per-call; no 0–6 graduated,
-per-capability autonomy) · decision journal (PARTIAL — audit log records decision + reason;
-not the full §20 record) · rollback/checkpoint (**MISSING** — `recover.ts` is
-timeout/isolate only; the sole `rollback` delegates to NEXUS) · self-health (EXISTS) ·
-NEXUS adapter (EXISTS — 10-method interface, mock + HTTP, live/mock distinguishable and
-adapter-owned; live integration BLOCKED-PC).
+Intent/task engine (PARTIAL — lifecycle states not modelled) · event bus (PARTIAL — no
+filter/aggregator; nothing currently subscribes, so the filter would be speculative) ·
+autonomy governor (**MISSING** — permissions are per-call; no 0–6 graduated,
+per-capability autonomy) · decision journal (PARTIAL — audit log carries decision +
+reason) · rollback/checkpoint (**MISSING** — `recover.ts` is timeout/isolate only) ·
+self-health (EXISTS) · NEXUS adapter (EXISTS — 10-method interface, mock + HTTP, live
+BLOCKED-PC).
 
 ### P2 / P3
 
-Windows packaging (PARTIAL — `scripts/package.mjs`, no installer) · voice (PARTIAL) ·
-device identity + continuity (EXISTS/PARTIAL — identity, registry, revocation, sync filter
-all real; **no transport**) · mobile (PARTIAL — protocol real, in-process only) ·
-skills/plugins, model migration, outcome learning (FUTURE).
+Windows packaging (PARTIAL) · voice (PARTIAL) · device identity + continuity (EXISTS —
+no transport) · mobile (PARTIAL — protocol real, in-process only) · skills/plugins,
+model migration, outcome learning (FUTURE).
 
 ---
 
-## 5. Exact next action
+## 5. Exact next actions
 
-**Stand up a loopback server speaking the real Ollama wire protocol and point Vesper at
-it.**
+**In order of value that is verifiable without the physical PC:**
 
-Why this one: it is the single highest-value increment that is fully verifiable on Linux
-*without* the physical PC, and it closes the biggest hole in the P0 path. The provider is
-the one component on the critical path with zero real-socket coverage — its tests stub
-`fetchImpl` 36 times while the provider calls five real endpoints. A loopback server tests
-request shaping, NDJSON streaming framing, tool-call parsing, capability detection
-(`/api/tags`, `/api/show`, `/api/ps`) and socket-level failure, deterministically and in
-CI. It also gives the first genuine test of the model→intent→tool leg.
-
-Concrete: add `src/vesper/models/ollama-loopback.test.ts` (or a small reusable harness
-under `src/vesper/models/`) that binds `127.0.0.1:0`, serves those five endpoints, and
-drives `createOllamaProvider` and then a full `runtime.chat` turn through it — including a
-model that emits a tool call, so the agent loop is exercised against real wire bytes.
-
-Do **not** bind anything other than loopback, and do not leave a listener running past the
-test.
-
-After that, in order: (1) real `--ask` turn driven by that loopback model end-to-end;
-(2) the §12 task lifecycle; (3) the event bus filter/aggregator so background events do
-not wake a large model.
+1. **Task lifecycle** — the §12 states aren't modelled. The task queue stores tasks, but
+   `pending → running → succeeded/failed/cancelled` transitions aren't captured with
+   attempts, timestamps, or a `retryAfter` policy. This blocks any real background work.
+2. **Model-emitted tool-call edge cases** — the loopback E2E proves the happy path.
+   What about a model that emits a tool call for a tool that does not exist, or with
+   malformed args, or a nested call, or one exceeding `MAX_TOOL_CALLS_PER_ROUND` mid-turn?
+   Add fixtures that exercise each, and mutation-prove that the failure story is honest.
+3. **Startup safety on unknown workspace id** — `workspaces.load()` handles corruption
+   and unknown ids, but silently. A `security.workspace_missing` event would make the
+   loss visible in `diagnostics.recentErrors` and in catchup.
+4. **First-boot report visibility** — `runFirstBootAutomation` writes a report file, but
+   there's no CLI flag to read it back. Add `--first-boot-report` (or fold into
+   `--diagnostics --verbose`) so the operator can inspect hardware detection results
+   without knowing the file path.
+5. **Then**: event bus filter/aggregator becomes useful once background operation grows a
+   subscriber — build it when that subscriber lands, not before.
 
 ---
 
 ## 6. Requires the physical PC
 
-Everything in `security/BACKLOG.md` §1 remains open, plus: real AMD/ROCm backend selection
-and benchmarking (**do not fabricate benchmark numbers before the machine exists**), real
-hardware telemetry replacing the simulated snapshot, real Windows toast notifications,
-tray/startup registration, live NEXUS integration, and the Windows installer.
+Everything in `security/BACKLOG.md` §1 remains open, plus: real AMD/ROCm backend
+selection and benchmarking (**do not fabricate benchmark numbers before the machine
+exists**), real hardware telemetry replacing the simulated snapshot, real Windows toast
+notifications, tray/startup registration, live NEXUS integration, and the Windows
+installer.
 
 ## 7. Requires explicit user approval
 
 Publishing a release · exposing any network listener (nothing in this repo binds one
-today; the loopback test server above is bound to `127.0.0.1:0` inside a test and closed
-when it ends) · destructive host operations · modifying Windows security settings ·
-deleting user data · granting new real-world privileges · changing the security model.
+today; the loopback test server binds `127.0.0.1:0` inside a test and closes when it
+ends) · destructive host operations · modifying Windows security settings · deleting
+user data · granting new real-world privileges · changing the security model · merging
+this branch to main.
 
 ## 8. Invariants that must survive every future change
 
-The model is never the authority. Memory is never authority. Retrieved documents are never
-authority. NEXUS is never Vesper's authority. Device claims are never authority.
-Confirmation is not authorization. Unknown tools deny by default.
+The model is never the authority. Memory is never authority. Retrieved documents are
+never authority. NEXUS is never Vesper's authority. Device claims are never authority.
+Confirmation is not authorization. Unknown tools deny by default. The `echo` provider is
+a test facility, not a model.
 
 Keep `npm run security:quick` as a permanent regression gate. Do not restart the
 red-team campaign as part of the build mission; track platform/security gaps in
