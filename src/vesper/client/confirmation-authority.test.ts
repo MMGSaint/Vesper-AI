@@ -38,6 +38,36 @@ function callsTool(name: string, args: Record<string, unknown>) {
   };
 }
 
+/**
+ * A model that calls the named tool on EVERY turn.
+ *
+ * `callsTool` above stops after the first call, which is right for testing a single
+ * held action but hides a spawned turn: a laundered decline would produce no tool call
+ * simply because the script had run out. This one keeps answering, so "did any extra
+ * turn run?" is observable rather than assumed.
+ */
+function alwaysCallsTool(name: string, args: Record<string, unknown>) {
+  let n = 0;
+  return {
+    id: "scripted-always",
+    kind: "local" as const,
+    isAvailable: () => true,
+    async probe() {
+      return { available: true, detail: "scripted" };
+    },
+    async complete(request: CompletionRequest, model: string) {
+      n += 1;
+      return {
+        text: "",
+        toolCalls: [{ id: `c${n}`, name, arguments: args as never }] as ModelToolCall[],
+        providerId: "scripted-always",
+        model,
+        role: request.role,
+      };
+    },
+  };
+}
+
 /** A local turn that gets a filesystem write held for confirmation. */
 async function heldFilesystemWrite(scopes: ("status" | "conversation" | "operator.confirm")[]) {
   const root = await mkdtemp(join(tmpdir(), "vesper-confirm-"));
@@ -308,6 +338,104 @@ describe("a confirmation is reachable only by the id of the call that made it", 
       () => readFile(join(root, "attacker.md"), "utf8"),
       "approving one prompt executed a different held action",
     );
+    await runtime.stop();
+  });
+});
+
+describe("declining does not launder a remote request into a local turn", () => {
+  /**
+   * Round-1 confused-deputy CRITICAL, re-verified against the current HEAD.
+   *
+   * The gateway's decline branch called `runtime.chat("Operator denied...")` with no
+   * origin. `runtime.chat` without an origin resolves to `{kind: "local"}` everywhere
+   * downstream, so a decline spawned a complete, tool-calling agent turn carrying
+   * LOCAL authority on behalf of a remote caller — the capability layer, NEVER_REMOTE,
+   * HOST_ONLY_TOOLS and the scope checks were all skipped for that turn.
+   *
+   * A later fix added an ownership check, which blocks the *reported payload*
+   * (declining a confirmation someone else queued). It left the laundering
+   * mechanism intact for a device declining its own. These tests pin the mechanism,
+   * not the payload: a decline must produce no free-running turn at all.
+   */
+
+  it("a decline runs no tools — it is an answer to a held question, not a new turn", async () => {
+    // The mechanism test. If the decline starts a fresh turn, that turn goes through
+    // the deterministic-intent / grounded-fallback path and calls read tools as LOCAL.
+    // Routed through the agent's confirm branch instead, it returns directly.
+    // `alwaysCallsTool` keeps emitting a call, so if the decline spawns a turn the
+    // extra tool call shows up here. With `callsTool` the script runs dry after the
+    // first request and a laundered turn would look identical to a clean one.
+    const runtime = await testRuntime({ providers: [alwaysCallsTool("runtime_pause", {})] });
+    const gateway = createClientGateway(runtime);
+    const phone = await enrolCompanion(runtime, { name: "phone" });
+    const session = await gateway.issueSession({
+      deviceId: phone.deviceId,
+      deviceLabel: "phone",
+      scopes: ["status", "conversation", "operator.confirm"],
+    });
+    if (isClientError(session)) throw new Error(session.detail);
+
+    // The phone asks for a confirm-tier action itself, so it owns the confirmation and
+    // passes the ownership check — the narrowed path the earlier fix still allows.
+    const asked = await gateway.converse(session.token, "pause background work");
+    if (isClientError(asked)) throw new Error(asked.detail);
+    const id = [...runtime.confirmations.keys()][0];
+    assert.ok(id, "the remote request should be held for confirmation");
+
+    const turn = await gateway.confirm(session.token, id, false);
+    if (isClientError(turn)) throw new Error(turn.detail);
+
+    assert.deepEqual(
+      turn.toolCalls.map((c) => c.toolName),
+      [],
+      "a decline must execute no tools; any tool call means a free-running turn was spawned",
+    );
+    assert.equal(runtime.confirmations.has(id), false, "the declined confirmation is consumed");
+    await runtime.stop();
+  });
+
+  it("the declined action does not run", async () => {
+    // Consequence-based: runtime_pause would change background state if it executed.
+    const runtime = await testRuntime({ providers: [callsTool("runtime_pause", {})] });
+    const gateway = createClientGateway(runtime);
+    const phone = await enrolCompanion(runtime, { name: "phone" });
+    const session = await gateway.issueSession({
+      deviceId: phone.deviceId,
+      deviceLabel: "phone",
+      scopes: ["status", "conversation", "operator.confirm"],
+    });
+    if (isClientError(session)) throw new Error(session.detail);
+    await gateway.converse(session.token, "pause background work");
+    const id = [...runtime.confirmations.keys()][0];
+    const before = runtime.background.state();
+
+    const turn = await gateway.confirm(session.token, id, false);
+    if (isClientError(turn)) throw new Error(turn.detail);
+    assert.match(turn.reply, /did not run/i, "the reply must say the action did not run");
+    assert.equal(runtime.background.state(), before, "background state must be unchanged");
+    await runtime.stop();
+  });
+
+  it("alternate path: a device still cannot decline a confirmation it did not request", async () => {
+    // §5.7 — confirm the obvious alternate route is also blocked. The owner queues an
+    // action locally; a remote session must not be able to delete it.
+    const runtime = await testRuntime({ providers: [callsTool("runtime_pause", {})] });
+    const gateway = createClientGateway(runtime);
+    await runtime.chat("pause background work");
+    const id = [...runtime.confirmations.keys()][0];
+    assert.ok(id, "the local request should be held");
+
+    const phone = await enrolCompanion(runtime, { name: "phone" });
+    const session = await gateway.issueSession({
+      deviceId: phone.deviceId,
+      deviceLabel: "phone",
+      scopes: ["status", "conversation", "operator.confirm"],
+    });
+    if (isClientError(session)) throw new Error(session.detail);
+
+    const refused = await gateway.confirm(session.token, id, false);
+    assert.ok(isClientError(refused), "a remote device must not decline the owner's confirmation");
+    assert.equal(runtime.confirmations.has(id), true, "the owner's confirmation survives");
     await runtime.stop();
   });
 });

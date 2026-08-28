@@ -37,6 +37,22 @@ async function ask(args: string[], cwd: string): Promise<{ code: number; stdout:
   });
 }
 
+/**
+ * Full evidence for a child-process assertion.
+ *
+ * These tests failed on windows-latest for a month with the message "answered
+ * nothing" and nothing else — no exit code, no stderr, no hint. A failure message on
+ * a platform the author cannot run locally is the only diagnostic available, so it
+ * carries everything.
+ */
+function describe_(r: { code: number; stdout: string; stderr: string }): string {
+  return [
+    `exit=${r.code}`,
+    `stdout(${r.stdout.length})=${JSON.stringify(r.stdout.slice(0, 400))}`,
+    `stderr(${r.stderr.length})=${JSON.stringify(r.stderr.slice(0, 800))}`,
+  ].join(" ");
+}
+
 async function sandbox(): Promise<string> {
   return mkdtemp(join(tmpdir(), "vesper-ask-"));
 }
@@ -45,8 +61,8 @@ describe("--ask answers one question and exits", () => {
   it("answers, prints to stdout, and exits 0", async () => {
     const cwd = await sandbox();
     const result = await ask(["--ask", "what is happening?"], cwd);
-    assert.equal(result.code, 0, `exited ${result.code}: ${result.stderr}`);
-    assert.ok(result.stdout.trim().length > 0, "answered nothing");
+    assert.equal(result.code, 0, describe_(result));
+    assert.ok(result.stdout.trim().length > 0, `answered nothing. ${describe_(result)}`);
   });
 
   it("reports honestly that no model is loaded rather than inventing an answer", async () => {
@@ -57,13 +73,14 @@ describe("--ask answers one question and exits", () => {
     // is not the branch that answered.
     const cwd = await sandbox();
     const result = await ask(["--ask", "please write a haiku about a cat"], cwd);
-    assert.equal(result.code, 0);
-    assert.match(result.stdout, /no local inference backend|not available/i);
+    assert.equal(result.code, 0, describe_(result));
+    assert.match(result.stdout, /no local inference backend|not available/i, describe_(result));
   });
 
   it("serialises the whole turn with --json, including what each tool was allowed to do", async () => {
     const cwd = await sandbox();
     const result = await ask(["--ask", "what is happening?", "--json"], cwd);
+    assert.ok(result.stdout.trim().length > 0, `no JSON emitted. ${describe_(result)}`);
     const turn = JSON.parse(result.stdout);
     assert.ok(typeof turn.reply === "string" && turn.reply.length > 0);
     assert.ok(Array.isArray(turn.epistemic), "epistemic tags missing");

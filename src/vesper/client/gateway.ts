@@ -218,8 +218,33 @@ export class VesperClientGateway {
           "Only the device that requested an action, or the person at the machine, can decline it.",
         );
       }
-      this.runtime.confirmations.delete(confirmationId);
-      return this.project(await this.runtime.chat("Operator denied the pending action."), session);
+      // Route the decline through the agent's own confirm branch instead of starting a
+      // fresh turn.
+      //
+      // `runtime.chat(text)` with no origin resolves to `{kind: "local"}` everywhere
+      // downstream, so the decline was spawning a complete, tool-calling agent turn
+      // carrying LOCAL authority on behalf of a remote caller — the origin-laundering
+      // mechanism the round-1 confused-deputy CRITICAL described. The ownership check
+      // above blocks the reported payload (declining someone else's confirmation), but
+      // it leaves the laundering primitive in place for a device declining its own.
+      // Today the turn text is a fixed string and the attacker controls no tool call,
+      // so the reachable damage is small; that is a property of this message, not of
+      // the boundary, and it stops being true the moment the text changes or a
+      // subscriber acts on the turn.
+      //
+      // The agent's `approve === false` branch deletes the confirmation and returns
+      // directly — no model call, no tool loop — so there is no free-running turn at
+      // all, and the origin travels with it. Deletion moves there too: deleting here
+      // first would make the agent report "no longer pending".
+      const declineOrigin = await this.remoteOrigin(session.deviceId, session.scopes);
+      return this.project(
+        await this.runtime.chat("Operator denied the pending action.", {
+          confirmId: confirmationId,
+          approve: false,
+          origin: declineOrigin,
+        }),
+        session,
+      );
     }
 
     // The approval carries the approver's own authority into the deferred tool call.
