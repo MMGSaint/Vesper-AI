@@ -103,16 +103,38 @@ each costs.
 ### A note on adversarial verification itself
 
 The phase-2 workflow's verifier agents "REFUTED" all 12 session-capsule findings
-on the grounds that `session-capsule.ts` does not exist. They were reading the
-wrong repository — the session's working directory is an empty scaffold and the
-real tree is elsewhere. Every one of those findings was re-verified by hand and
+on the grounds that `session-capsule.ts` does not exist and the findings were
+"fabricated against non-existent code". Every one was re-verified by hand and
 most were real, including a CRITICAL identity-spoofing bug that let any party
 impersonate any enrolled device.
 
-**A refutation is only as good as the directory it was run in.** Any future
-adversarial pass should have its agents state which repository root they read,
-and a refutation citing "the file does not exist" should be treated as a signal
-about the harness rather than about the code.
+**The mechanism is worth stating precisely, because the obvious diagnosis is
+wrong.** The verifiers were not reading an empty or unrelated directory. They
+were reading `/home/user/Vesper-personal-assistant-`, which is a second working
+copy of *this same repository* — checked out at a **detached HEAD pinned to
+`3ee5d2b`**, several commits behind the branch tip.
+
+That explains the split in the results exactly:
+
+- `checkpoint.ts` landed *in* `3ee5d2b`, so it was present in that checkout and
+  every checkpoint finding verified normally.
+- `session-capsule.ts` landed in `849d629`, *after* the pinned commit, so it was
+  genuinely absent. The verifiers' greps were accurate; their conclusion was not.
+
+An agent that finds a file missing cannot distinguish "this code does not exist"
+from "this code does not exist *yet, at the commit I am standing on*". Both
+produce the same empty grep, and only one of them means the finding is false.
+
+Consequences for any future adversarial pass:
+
+1. Have agents report the absolute repository root **and `git rev-parse HEAD`**
+   they read, and check both against the tree under review before accepting a
+   verdict.
+2. Treat "the file does not exist" as a claim about the *harness* until the
+   commit is confirmed — never as a refutation on its own.
+3. Prefer passing an explicit, verified path into agent prompts over relying on
+   an inherited working directory, especially when more than one checkout of the
+   same repository is present on disk.
 
 ## 5. Defences that exist but are not mutation-proven
 

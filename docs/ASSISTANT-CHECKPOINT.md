@@ -14,7 +14,7 @@ Last touched 2026-08-28. Everything below is observed output or a repo fact.
 | | |
 |---|---|
 | Authoritative repo | **`MMGSaint/vesper-ai`**, working copy `/home/user/vesper-ai` |
-| Not the target | `/home/user/Vesper-personal-assistant-` is an empty scaffold — one commit, a README, no code. **Do not migrate or restart the project there.** |
+| Not the target | `/home/user/Vesper-personal-assistant-` is a **second working copy of this same repository**, sitting on a detached HEAD several commits behind the tip. It is not an empty scaffold — earlier checkpoints said so and were wrong. **Do all work in `/home/user/vesper-ai`.** A stale second checkout is an active hazard: it made four adversarial verifier agents report real code as "non-existent" (see `security/BACKLOG.md` §4b). |
 | Work branch | `claude/vesper-local-ai-build-ti8ofa` |
 | HEAD | `dba22dd`, pushed, **29 commits ahead of `origin/main`** |
 | `origin/main` | `9b7d924` — the round-2 security campaign is merged there |
@@ -81,7 +81,7 @@ user text → deterministic intent OR model → autonomy governor → permission
 |---|---|
 | `npm test` | **880 pass, 0 fail** (was 671 at session-start of Phase 1) |
 | `npm run security:quick` | **294 pass, 0 fail** |
-| `npm run hygiene` | clean, 341 files |
+| `npm run hygiene` | clean, 344 files |
 | `npx tsc --noEmit` | clean |
 | Journal adversarial workflow | 30 CONFIRMED findings — all HIGH fixed with regression tests |
 | Phase-2 attack suite | 28 CONFIRMED (1 CRITICAL, 10 HIGH) across scheduler / governor / checkpoint, **plus 12 capsule findings the verifiers wrongly refuted** — all fixed, 37 regression tests |
@@ -230,12 +230,18 @@ retry-eligible failure is not a final failure. Loss must be loud.
   item landed. Never conflate them.
 
 **On adversarial verification.** The phase-2 workflow's verifier agents refuted
-all 12 capsule findings because they read the wrong repository — the session cwd
-is an empty scaffold, not the source tree. A CRITICAL identity-spoofing bug was
-nearly dismissed on that basis. Any future adversarial pass should have its
-agents state which repository root they read, and a refutation of the form "the
-file does not exist" should be read as a signal about the harness, not the code.
-Recorded in `security/BACKLOG.md` §4b.
+all 12 capsule findings as "fabricated against non-existent code". They were
+reading the second checkout at `/home/user/Vesper-personal-assistant-`, pinned to
+`3ee5d2b` — a commit at which `checkpoint.ts` existed but `session-capsule.ts`
+had not yet landed. So checkpoint findings verified normally and every capsule
+finding came back false. A CRITICAL identity-spoofing bug was nearly dismissed
+on that basis.
+
+An agent that finds a file missing cannot tell "this does not exist" from "this
+does not exist *at the commit I am standing on*". Future passes should have
+agents report their repo root **and `git rev-parse HEAD`**, and should treat a
+"file does not exist" refutation as a claim about the harness until the commit
+is confirmed. Full write-up in `security/BACKLOG.md` §4b.
 
 Keep `npm run security:quick` as a permanent regression gate. Do not restart
 the red-team campaign as part of the build mission; track platform/security
