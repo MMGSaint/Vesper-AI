@@ -111,7 +111,7 @@ describe("attack #3: retentionDays and maxPerDay cannot be silently disabled", (
     await journal.flush();
     const raw = await storage.get("events.journal.2026-06-15");
     assert.ok(Array.isArray(raw));
-    assert.ok((raw as VesperEvent[]).length <= 50_000, "maxPerDay ceiling holds");
+    assert.ok((raw as unknown as VesperEvent[]).length <= 50_000, "maxPerDay ceiling holds");
   });
 });
 
@@ -123,7 +123,7 @@ describe("attack #4: oversized event.data cannot inflate a partition", () => {
     const huge = "x".repeat(1_000_000);
     journal.admit(evt("task.completed", "2026-06-15T00:00:00Z", { data: { blob: huge } as never }));
     await journal.flush();
-    const raw = (await storage.get("events.journal.2026-06-15")) as VesperEvent[];
+    const raw = (await storage.get("events.journal.2026-06-15")) as unknown as VesperEvent[];
     const encoded = JSON.stringify(raw);
     assert.ok(encoded.length < 100_000, `truncation should keep serialised size small, got ${encoded.length}`);
     assert.equal((raw[0].data as { truncated?: boolean })?.truncated, true, "truncation marker recorded");
