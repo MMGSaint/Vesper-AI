@@ -75,6 +75,20 @@ export interface VesperTask {
    * survive a restart via the same JSON persistence the rest of the queue uses.
    */
   args?: import("../types.ts").JsonObject;
+  /**
+   * Optimistic-concurrency claim, written by `start()`.
+   *
+   * The StorageAdapter interface is get/set/delete/keys — it has no compare-and-swap,
+   * so a read-modify-write across two processes sharing one store is not atomic: both
+   * can refresh, both see `assigned`, both write `running`. `start()` therefore writes
+   * a unique claim, re-reads, and only reports success if its own claim survived. The
+   * loser sees a different claim and backs off without executing.
+   *
+   * This narrows the race to "two writers, one winner" rather than eliminating the
+   * window — a genuine CAS at the storage layer would be needed for that, and is
+   * recorded as a limitation rather than claimed as solved.
+   */
+  claim?: string;
 }
 
 export interface CreateTaskInput {
@@ -233,6 +247,60 @@ export class TaskQueue {
     return next;
   }
 
+  /**
+   * Parse one persisted row into a task, or null if the row is not shaped like one.
+   *
+   * `requeueInFlight` is true only on the first load of a process: a task caught
+   * `running` or `assigned` by a crash is requeued rather than assumed finished. On a
+   * mid-session refresh it must be FALSE — coercing a live `running` task back to
+   * `queued` on every mutation would undo the state another runtime just committed.
+   */
+  private parseStoredTask(item: unknown, requeueInFlight = false): VesperTask | null {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
+    const task = item as Partial<VesperTask>;
+    if (typeof task.id !== "string" || typeof task.description !== "string") return null;
+    const state = (TASK_STATES as readonly string[]).includes(String(task.state))
+      ? (task.state as TaskState)
+      : "queued";
+    return {
+      id: task.id,
+      description: task.description,
+      state: requeueInFlight && (state === "running" || state === "assigned") ? "queued" : state,
+      priority: (TASK_PRIORITIES as readonly string[]).includes(String(task.priority))
+        ? (task.priority as TaskPriority)
+        : "normal",
+      createdAt: typeof task.createdAt === "string" ? task.createdAt : this.now(),
+      updatedAt: typeof task.updatedAt === "string" ? task.updatedAt : this.now(),
+      createdBy: typeof task.createdBy === "string" ? task.createdBy : "unknown",
+      requiredCapabilities: Array.isArray(task.requiredCapabilities)
+        ? (task.requiredCapabilities.filter((c) => typeof c === "string") as Capability[])
+        : [],
+      preferredDevice: typeof task.preferredDevice === "string" ? task.preferredDevice : undefined,
+      eligibleDevices: Array.isArray(task.eligibleDevices)
+        ? task.eligibleDevices.filter((d): d is string => typeof d === "string")
+        : undefined,
+      dependsOn: Array.isArray(task.dependsOn)
+        ? task.dependsOn.filter((d): d is string => typeof d === "string")
+        : [],
+      assignedTo: typeof task.assignedTo === "string" ? task.assignedTo : null,
+      result: typeof task.result === "string" ? task.result : null,
+      error: typeof task.error === "string" ? task.error : null,
+      retry: {
+        maxAttempts:
+          typeof task.retry?.maxAttempts === "number" && task.retry.maxAttempts > 0
+            ? Math.floor(task.retry.maxAttempts)
+            : 3,
+        attempts: typeof task.retry?.attempts === "number" ? Math.max(0, Math.floor(task.retry.attempts)) : 0,
+      },
+      private: task.private !== false,
+      kind: typeof task.kind === "string" ? task.kind : undefined,
+      args: (task.args && typeof task.args === "object" && !Array.isArray(task.args))
+        ? (task.args as import("../types.ts").JsonObject)
+        : undefined,
+      claim: typeof task.claim === "string" ? task.claim : undefined,
+    };
+  }
+
   private async load(): Promise<void> {
     if (this.loaded) return;
     this.loaded = true;
@@ -240,48 +308,10 @@ export class TaskQueue {
       const raw = await this.storage.get(KEY);
       if (!Array.isArray(raw)) return;
       for (const item of raw) {
-        const task = item as Partial<VesperTask>;
-        if (typeof task.id !== "string" || typeof task.description !== "string") continue;
-        const state = (TASK_STATES as readonly string[]).includes(String(task.state))
-          ? (task.state as TaskState)
-          : "queued";
-        this.tasks.set(task.id, {
-          id: task.id,
-          description: task.description,
-          // A task caught mid-flight by a restart is requeued, not assumed finished.
-          state: state === "running" || state === "assigned" ? "queued" : state,
-          priority: (TASK_PRIORITIES as readonly string[]).includes(String(task.priority))
-            ? (task.priority as TaskPriority)
-            : "normal",
-          createdAt: typeof task.createdAt === "string" ? task.createdAt : this.now(),
-          updatedAt: typeof task.updatedAt === "string" ? task.updatedAt : this.now(),
-          createdBy: typeof task.createdBy === "string" ? task.createdBy : "unknown",
-          requiredCapabilities: Array.isArray(task.requiredCapabilities)
-            ? (task.requiredCapabilities.filter((c) => typeof c === "string") as Capability[])
-            : [],
-          preferredDevice: typeof task.preferredDevice === "string" ? task.preferredDevice : undefined,
-          eligibleDevices: Array.isArray(task.eligibleDevices)
-            ? task.eligibleDevices.filter((d): d is string => typeof d === "string")
-            : undefined,
-          dependsOn: Array.isArray(task.dependsOn)
-            ? task.dependsOn.filter((d): d is string => typeof d === "string")
-            : [],
-          assignedTo: typeof task.assignedTo === "string" ? task.assignedTo : null,
-          result: typeof task.result === "string" ? task.result : null,
-          error: typeof task.error === "string" ? task.error : null,
-          retry: {
-            maxAttempts:
-              typeof task.retry?.maxAttempts === "number" && task.retry.maxAttempts > 0
-                ? Math.floor(task.retry.maxAttempts)
-                : 3,
-            attempts: typeof task.retry?.attempts === "number" ? Math.max(0, Math.floor(task.retry.attempts)) : 0,
-          },
-          private: task.private !== false,
-          kind: typeof task.kind === "string" ? task.kind : undefined,
-          args: (task.args && typeof task.args === "object" && !Array.isArray(task.args))
-            ? (task.args as import("../types.ts").JsonObject)
-            : undefined,
-        });
+        // requeueInFlight=true: this is process start, so a task caught mid-flight by
+        // a crash is requeued rather than assumed finished.
+        const parsed = this.parseStoredTask(item, true);
+        if (parsed) this.tasks.set(parsed.id, parsed);
       }
     } catch {
       // A corrupt queue costs pending work, not the ability to accept new work.
@@ -336,9 +366,21 @@ export class TaskQueue {
     return found ? { ...found } : undefined;
   }
 
+  /**
+   * Apply a mutation under the exclusive queue, re-reading persisted state first.
+   *
+   * The re-read is what makes state guards mean anything when two runtimes share one
+   * storage adapter. Without it, `load()`'s one-shot `if (this.loaded) return` leaves
+   * each instance operating on a snapshot taken at its own first read: a second
+   * runtime would see a task as `assigned` long after the first had driven it to
+   * `done`, re-run the executor, and overwrite the committed result. The exclusive
+   * queue serialises mutations within a process; the refresh is what extends the
+   * guarantee across processes sharing a store.
+   */
   private async mutate(id: string, apply: (task: VesperTask) => void): Promise<VesperTask | undefined> {
     return this.runExclusive(async () => {
       await this.load();
+      await this.refreshFromStorage();
       const task = this.tasks.get(id);
       if (!task) return undefined;
       apply(task);
@@ -346,6 +388,27 @@ export class TaskQueue {
       await this.persist();
       return { ...task };
     });
+  }
+
+  /**
+   * Re-read the persisted queue into the in-memory map. Called inside the exclusive
+   * section of every mutation. Best-effort: a read failure keeps the current
+   * in-memory view rather than dropping the queue, matching `load()`'s policy that a
+   * corrupt store costs pending work, never availability.
+   */
+  private async refreshFromStorage(): Promise<void> {
+    try {
+      const raw = await this.storage.get(KEY);
+      if (!Array.isArray(raw)) return;
+      const fresh = new Map<string, VesperTask>();
+      for (const item of raw) {
+        const parsed = this.parseStoredTask(item);
+        if (parsed) fresh.set(parsed.id, parsed);
+      }
+      this.tasks = fresh;
+    } catch {
+      // Keep the current view. The next mutation retries.
+    }
   }
 
   /** Route every routable task and record the outcome. */
@@ -379,32 +442,94 @@ export class TaskQueue {
     return results;
   }
 
+  /**
+   * Transition a task to `running`.
+   *
+   * Refuses unless the task is currently `assigned` or `queued`. Without this guard a
+   * stale caller (a second runtime whose in-memory map predates a cancel, or a
+   * scheduler holding an old snapshot) could re-drive a task that is already done,
+   * failed, cancelled, or running — silently un-cancelling it and double-executing.
+   * Returns undefined when the transition is refused, which every caller already
+   * treats as "did not start".
+   */
   async start(id: string): Promise<VesperTask | undefined> {
+    const claim = `claim_${randomUUID()}`;
+    let refusedFrom: TaskState | null = null;
     const updated = await this.mutate(id, (task) => {
+      if (task.state !== "assigned" && task.state !== "queued") {
+        refusedFrom = task.state;
+        return;
+      }
       task.state = "running";
       task.retry.attempts += 1;
+      task.claim = claim;
     });
-    if (updated) this.emit({ kind: "started", task: updated });
+    if (refusedFrom) return undefined;
+    if (!updated) return undefined;
+
+    // Claim verification. Two runtimes sharing a store can both pass the state guard
+    // above (each refreshed before the other persisted), so the write alone does not
+    // establish ownership. Re-read and check that OUR claim is the one on disk; the
+    // loser backs off without executing.
+    await this.runExclusive(async () => this.refreshFromStorage());
+    const settled = this.tasks.get(id);
+    if (!settled || settled.claim !== claim) {
+      return undefined;
+    }
+    this.emit({ kind: "started", task: updated });
     return updated;
   }
 
+  /**
+   * Drop an assignment without terminating the task — used when the assigned device
+   * turns out not to be authorized any more, so the router can place the work
+   * somewhere it is allowed to run. Refuses on a terminal or running task.
+   */
+  async releaseAssignment(id: string): Promise<VesperTask | undefined> {
+    return this.mutate(id, (task) => {
+      if (task.state !== "assigned" && task.state !== "blocked") return;
+      task.assignedTo = null;
+      task.state = "queued";
+    });
+  }
+
+  /**
+   * Mark a task done. Refuses if the task is already terminal — a stale caller must
+   * not overwrite a result that is already committed, and must never un-cancel.
+   */
   async complete(id: string, result: string): Promise<VesperTask | undefined> {
+    let refused = false;
     const updated = await this.mutate(id, (task) => {
+      if (task.state === "done" || task.state === "failed" || task.state === "cancelled") {
+        refused = true;
+        return;
+      }
       task.state = "done";
       task.result = result;
       task.error = null;
     });
+    if (refused) return undefined;
     if (updated) this.emit({ kind: "completed", task: updated });
     return updated;
   }
 
-  /** A failure retries until the policy is exhausted, then stops and says why. */
+  /**
+   * A failure retries until the policy is exhausted, then stops and says why.
+   * Refuses if the task is already terminal — the same "no overwriting committed
+   * work" rule that guards complete().
+   */
   async fail(id: string, error: string): Promise<VesperTask | undefined> {
+    let refused = false;
     const updated = await this.mutate(id, (task) => {
+      if (task.state === "done" || task.state === "failed" || task.state === "cancelled") {
+        refused = true;
+        return;
+      }
       task.error = error;
       task.assignedTo = null;
       task.state = task.retry.attempts >= task.retry.maxAttempts ? "failed" : "queued";
     });
+    if (refused) return undefined;
     if (updated) {
       const final = updated.state === "failed";
       this.emit({ kind: "failed", task: updated, error, final });

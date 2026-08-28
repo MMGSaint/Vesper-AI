@@ -397,10 +397,16 @@ export function registerBuiltinTools(input: {
       ["name"],
     ),
     async (args) => {
-      // Pre-image is the previous workspace id — enough to reverse the switch.
+      // CHECKPOINT before APPLY — the documented order in checkpoint.ts. Capturing
+      // after the switch left a window where the change had landed but nothing could
+      // reverse it: if snapshot() threw, the workspace had already moved with no
+      // pre-image recorded. Resolve the target first (without switching), snapshot,
+      // then apply.
       const previous = workspaces.current();
-      const ws = workspaces.switchTo(str(args, "name"));
-      if (!ws) {
+      const target = workspaces.get(str(args, "name")) ?? workspaces.list().find(
+        (w) => w.name.toLowerCase() === str(args, "name").toLowerCase(),
+      );
+      if (!target) {
         return {
           ok: false,
           epistemic: "could_not_access",
@@ -410,11 +416,19 @@ export function registerBuiltinTools(input: {
       const checkpoint = checkpointStore
         ? await checkpointStore.snapshot({
             tool: "workspace_switch",
-            target: ws.id,
+            target: target.id,
             before: previous.id,
             absentBefore: false,
           })
         : null;
+      const ws = workspaces.switchTo(str(args, "name"));
+      if (!ws) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary: `Unknown workspace '${str(args, "name")}'.`,
+        };
+      }
       if (checkpoint && checkpointStore) {
         await checkpointStore.verify(checkpoint.id, ws.id);
       }

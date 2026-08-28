@@ -69,9 +69,30 @@ const LEVEL_RANK: Record<AutonomyLevel, number> = {
   FULL: 6,
 };
 
-/** Pick the stricter of two levels — mirrors `stricterPermission` on the gate side. */
+/** All valid AutonomyLevel strings, for validation of policy inputs. */
+export const AUTONOMY_LEVELS: readonly AutonomyLevel[] = Object.keys(LEVEL_RANK) as readonly AutonomyLevel[];
+
+function isAutonomyLevel(value: unknown): value is AutonomyLevel {
+  return typeof value === "string" && Object.hasOwn(LEVEL_RANK, value);
+}
+
+/**
+ * Rank lookup that fails CLOSED. An unknown level defaults to OBSERVE (0), the
+ * strictest — so an attacker or a bug that plants a string outside the enum cannot
+ * silently bypass tightening. CRITICAL finding in the phase-2 attack workflow.
+ */
+function rankOf(level: AutonomyLevel): number {
+  const rank = LEVEL_RANK[level];
+  return typeof rank === "number" ? rank : 0;
+}
+
+/**
+ * Pick the stricter of two levels — mirrors `stricterPermission` on the gate side.
+ * Unknown levels are treated as OBSERVE, so any comparison with a bogus level yields
+ * the strictest outcome.
+ */
 export function stricterAutonomy(a: AutonomyLevel, b: AutonomyLevel): AutonomyLevel {
-  return LEVEL_RANK[a] < LEVEL_RANK[b] ? a : b;
+  return rankOf(a) < rankOf(b) ? a : b;
 }
 
 export interface AutonomyBudget {
@@ -147,9 +168,22 @@ export function evaluateAutonomy(
 ): GovernorDecision {
   const gateDecision = input.gateDecision;
 
-  // `never` is already refused; anything on top is a no-op.
-  if (gateDecision.level === "never") {
-    return { decision: gateDecision, level: "OBSERVE", tightened: false, tightenReason: "" };
+  // `never` is already refused; anything on top is a no-op. Also refuse when the
+  // TOOL declares itself never — a caller who passes a mismatched gateDecision cannot
+  // relax the tool's own declaration.
+  if (gateDecision.level === "never" || input.tool.permission === "never") {
+    return {
+      decision: gateDecision.level === "never" ? gateDecision : {
+        allowed: false,
+        level: "never",
+        requiresConfirmation: false,
+        toolName: input.tool.name,
+        reason: `Tool '${input.tool.name}' declares 'never'; the governor refuses regardless of the gate decision.`,
+      },
+      level: "OBSERVE",
+      tightened: gateDecision.level !== "never",
+      tightenReason: gateDecision.level !== "never" ? "tool.permission is 'never'" : "",
+    };
   }
   // The gate already refused — the governor's role is only to *tighten*, so a refusal
   // passes through unchanged. Recording it stays the caller's responsibility.
@@ -159,30 +193,41 @@ export function evaluateAutonomy(
 
   // Resolve the tool's autonomy level: start from default, then apply category and
   // per-tool overrides; the strictest wins at every step.
-  let level: AutonomyLevel = policy.default;
+  let level: AutonomyLevel = isAutonomyLevel(policy.default) ? policy.default : "OBSERVE";
   if (policy.perCategory) {
+    // Object.entries walks own-properties only, so prototype pollution does NOT reach
+    // here. Still validate the level so a malformed entry cannot relax tightening.
     for (const [prefix, categoryLevel] of Object.entries(policy.perCategory)) {
-      if (input.tool.name.startsWith(prefix)) {
+      if (input.tool.name.startsWith(prefix) && isAutonomyLevel(categoryLevel)) {
         level = stricterAutonomy(level, categoryLevel);
       }
     }
   }
-  if (policy.perTool && policy.perTool[input.tool.name]) {
-    level = stricterAutonomy(level, policy.perTool[input.tool.name]);
+  if (policy.perTool && Object.hasOwn(policy.perTool, input.tool.name)) {
+    const override = policy.perTool[input.tool.name];
+    // Unknown level strings from a poisoned prototype OR a malformed policy fall back
+    // to OBSERVE via stricterAutonomy — they cannot relax tightening.
+    if (isAutonomyLevel(override)) {
+      level = stricterAutonomy(level, override);
+    }
   }
   // Argument gates can tighten further based on args shape.
   const argMatches: ArgumentGate[] = [];
   if (policy.argumentGates) {
+    // Freeze a shallow copy so a hostile predicate cannot mutate the args that will
+    // reach the tool handler. Not deep-frozen (deep clone of arbitrary JsonObject is
+    // costly per-call); the predicate contract is "read, don't write".
+    const frozenArgs = Object.freeze({ ...input.args });
     for (const gate of policy.argumentGates) {
       if (!gate.toolPattern.test(input.tool.name)) continue;
       let matched = false;
       try {
-        matched = gate.when(input.args);
+        matched = gate.when(frozenArgs);
       } catch {
         // A predicate that throws should not fail-open. Treat as matched and tighten.
         matched = true;
       }
-      if (matched) {
+      if (matched && isAutonomyLevel(gate.tightenedTo)) {
         level = stricterAutonomy(level, gate.tightenedTo);
         argMatches.push(gate);
       }
@@ -223,11 +268,15 @@ export function evaluateAutonomy(
   let tightened = false;
 
   const refuseFromLevel = level === "OBSERVE" || level === "INFORM" || level === "RECOMMEND";
+  // Preserve the gate's requiresConfirmation:true — the governor can raise it, never
+  // clear it. All refuse branches use `keepConfirm` so an already-required confirmation
+  // survives a governor refusal.
+  const keepConfirm = gateDecision.requiresConfirmation;
   if (refuseFromLevel && gateDecision.allowed) {
     final = {
       ...gateDecision,
       allowed: false,
-      requiresConfirmation: false,
+      requiresConfirmation: keepConfirm,
       reason: `Autonomy '${level}' does not permit executing '${input.tool.name}'.` +
         (tightenReasons.length ? " " + tightenReasons.join(" ") : ""),
     };
@@ -246,7 +295,7 @@ export function evaluateAutonomy(
     final = {
       ...gateDecision,
       allowed: false,
-      requiresConfirmation: false,
+      requiresConfirmation: keepConfirm,
       reason: tightenReasons.join(" "),
     };
     tightened = true;
@@ -300,6 +349,38 @@ export class BudgetState {
   }
 }
 
+/**
+ * Throws if any entry in the policy carries a level string outside the AutonomyLevel
+ * enum. Called from setPolicy to keep untrusted config from silently bypassing the
+ * governor's tightening rules.
+ */
+export function validateAutonomyPolicy(policy: AutonomyPolicy): void {
+  if (!isAutonomyLevel(policy.default)) {
+    throw new Error(`Autonomy policy: default '${String(policy.default)}' is not a valid AutonomyLevel.`);
+  }
+  if (policy.perTool) {
+    for (const [tool, level] of Object.entries(policy.perTool)) {
+      if (!isAutonomyLevel(level)) {
+        throw new Error(`Autonomy policy: perTool['${tool}'] = '${String(level)}' is not a valid AutonomyLevel.`);
+      }
+    }
+  }
+  if (policy.perCategory) {
+    for (const [prefix, level] of Object.entries(policy.perCategory)) {
+      if (!isAutonomyLevel(level)) {
+        throw new Error(`Autonomy policy: perCategory['${prefix}'] = '${String(level)}' is not a valid AutonomyLevel.`);
+      }
+    }
+  }
+  if (policy.argumentGates) {
+    for (const gate of policy.argumentGates) {
+      if (!isAutonomyLevel(gate.tightenedTo)) {
+        throw new Error(`Autonomy policy: argumentGate.tightenedTo '${String(gate.tightenedTo)}' is not a valid AutonomyLevel.`);
+      }
+    }
+  }
+}
+
 export interface AutonomyGovernorOptions {
   policy: AutonomyPolicy;
   events: EventBus;
@@ -321,9 +402,28 @@ export class AutonomyGovernor {
     this.clock = options.now ?? (() => Date.now());
   }
 
-  /** Replace the policy. Load-bearing tests must still hold after an update. */
+  /**
+   * Replace the policy after construction. The policy is validated: any entry with a
+   * level string outside AUTONOMY_LEVELS is rejected with a throw, so a caller cannot
+   * silently install a policy that relaxes the mission's rules. A policy change also
+   * emits a durable `autonomy.policy_changed` event on the bus, so a caller who
+   * replaces the mission rules cannot do so quietly.
+   */
   setPolicy(policy: AutonomyPolicy): void {
+    validateAutonomyPolicy(policy);
     this.policy = policy;
+    this.events.emit({
+      type: "autonomy.policy_changed",
+      title: "Autonomy policy replaced",
+      detail: `default=${policy.default}; ${Object.keys(policy.perTool ?? {}).length} per-tool; ${Object.keys(policy.perCategory ?? {}).length} per-category; ${(policy.budgets ?? []).length} budgets`,
+      severity: "warn",
+      retention: "durable",
+      provenance: { author: "subsystem", source: "autonomy-governor" },
+    });
+    this.log.warn("autonomy", "Autonomy policy replaced", {
+      default: policy.default,
+      toolCount: Object.keys(policy.perTool ?? {}).length,
+    });
   }
 
   /** For diagnostics. Never returns the internal windows themselves. */
@@ -363,23 +463,37 @@ export class AutonomyGovernor {
    * assertion this method makes true. Records the reason on the bus so catchup shows
    * it, but does not touch the budget.
    */
+  private noopBudget: number[] = [];
+
   observeNoop(input: {
     action: string;
     reason: string;
     correlationId?: string;
     workspaceId?: string;
   }): void {
+    // Bound the caller's strings so a hostile action/reason cannot bloat one event.
+    const action = String(input.action ?? "").slice(0, 200);
+    const reason = String(input.reason ?? "").slice(0, 1000);
+    // Rate-limit: no more than 30 no-ops per rolling minute. A caller flooding this to
+    // hide a real action in the audit trail hits the cap.
+    const now = this.clock();
+    this.noopBudget = this.noopBudget.filter((t) => now - t < 60_000);
+    if (this.noopBudget.length >= 30) {
+      this.log.warn("autonomy", "observeNoop rate-limited; audit-flood attempt suppressed");
+      return;
+    }
+    this.noopBudget.push(now);
     this.events.emit({
       type: "autonomy.no_action",
-      title: `No action required: ${input.action}`,
-      detail: input.reason,
+      title: `No action required: ${action}`,
+      detail: reason,
       severity: "info",
       workspaceId: input.workspaceId,
       correlationId: input.correlationId,
       retention: "durable",
       provenance: { author: "subsystem", source: "autonomy-governor" },
     });
-    this.log.info("permission", "autonomy no-op", { action: input.action, reason: input.reason });
+    this.log.info("autonomy", "autonomy no-op", { action, reason });
   }
 
   private emitDecision(
@@ -389,6 +503,11 @@ export class AutonomyGovernor {
     // The decision is an audit signal — it lands as a `durable` event so the journal
     // keeps it beyond the ring. The event does NOT carry the raw args (they may
     // contain user text or secrets). Callers that need arg detail add it themselves.
+    // Defensive: an origin passed as null/undefined would throw on `.deviceId` access.
+    // The decision itself already happened; losing the audit event to a NPE would be
+    // the mission's "loss must be loud" failure — silent hides the decision.
+    const originKind = input.origin?.kind ?? "unknown";
+    const originDeviceId = input.origin?.deviceId;
     this.events.emit({
       type: "autonomy.decision",
       title: `${input.tool.name} → ${result.decision.allowed ? "allowed" : "refused"}${
@@ -402,7 +521,7 @@ export class AutonomyGovernor {
       provenance: {
         author: "subsystem",
         source: "autonomy-governor",
-        deviceId: input.origin.deviceId,
+        deviceId: originDeviceId,
       },
       data: {
         tool: input.tool.name,
@@ -412,7 +531,7 @@ export class AutonomyGovernor {
         governorLevel: result.level,
         governorAllowed: result.decision.allowed,
         governorConfirm: result.decision.requiresConfirmation,
-        originKind: input.origin.kind,
+        originKind,
         tightened: result.tightened,
       } as unknown as JsonObject,
     });

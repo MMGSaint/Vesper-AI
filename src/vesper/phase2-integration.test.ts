@@ -82,9 +82,8 @@ describe("Phase 2 runtime wiring — the whole stack together", () => {
   it("the autonomy governor's default policy keeps memory_search FULL and admin.* PREPARE", async () => {
     // Assert against the actually-attached policy on the running runtime, not the
     // module's `defaultAutonomyPolicy()` in isolation.
-    const status = runtime => runtime.autonomy.status();
     const runtime = await testRuntime();
-    const policy = status(runtime).policy;
+    const policy = runtime.autonomy.status().policy;
     assert.equal(policy.perTool?.memory_search, "FULL");
     assert.equal(policy.perTool?.fs_read, "FULL");
     assert.equal(policy.perCategory?.["security."], "PREPARE");

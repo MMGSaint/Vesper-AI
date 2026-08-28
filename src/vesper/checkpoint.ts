@@ -52,6 +52,8 @@ import type { JsonObject, JsonValue } from "./types.ts";
 const STORAGE_KEY = "rollback.checkpoints";
 const DEFAULT_MAX_RETAINED = 100;
 const DEFAULT_TTL_MS = 7 * 24 * 3600 * 1000;
+/** Ceiling on a persisted TTL — a hostile blob cannot make a checkpoint immortal. */
+const MAX_TTL_MS = 30 * 24 * 3600 * 1000;
 
 export interface CheckpointRecord {
   id: string;
@@ -102,6 +104,7 @@ export class CheckpointStore {
   private readonly clock: () => Date;
   private records: CheckpointRecord[] = [];
   private reversers = new Map<string, Reverser>();
+  private rollbacksInFlight = new Set<string>();
   private loaded = false;
   private saving: Promise<void> = Promise.resolve();
   private saveQueued = false;
@@ -179,6 +182,25 @@ export class CheckpointStore {
     | { applied: true; record: CheckpointRecord }
     | { applied: false; reason: string; record?: CheckpointRecord }
   > {
+    // Claim the id synchronously, before any await. `rolledBackAt` alone cannot
+    // serialise concurrent rollbacks because it is set after two awaits — both callers
+    // would pass the check and both would invoke reverser.restore, which is not
+    // required to be idempotent.
+    if (this.rollbacksInFlight.has(id)) {
+      return { applied: false, reason: `Rollback for '${id}' is already in progress.` };
+    }
+    this.rollbacksInFlight.add(id);
+    try {
+      return await this.rollbackInner(id, opts);
+    } finally {
+      this.rollbacksInFlight.delete(id);
+    }
+  }
+
+  private async rollbackInner(id: string, opts: { correlationId?: string }): Promise<
+    | { applied: true; record: CheckpointRecord }
+    | { applied: false; reason: string; record?: CheckpointRecord }
+  > {
     await this.load();
     const record = this.records.find((r) => r.id === id);
     if (!record) return this.refuseRollback(undefined, "unknown", `No checkpoint with id '${id}'`, opts);
@@ -220,6 +242,10 @@ export class CheckpointStore {
     }
     record.rolledBackAt = this.clock().toISOString();
     this.schedulePersist();
+    // Await the persist before reporting success: a fire-and-forget write that fails
+    // would leave `rolledBackAt` only in memory, so the same checkpoint could be
+    // rolled back a second time after a restart — applying the reverser twice.
+    await this.flush();
     this.emit("rollback.applied", record, "Rollback applied.", opts);
     return { applied: true, record: { ...record } };
   }
@@ -247,9 +273,30 @@ export class CheckpointStore {
     await this.saving;
   }
 
+  private loadPromise: Promise<void> | null = null;
+
+  /**
+   * Load persisted checkpoints exactly once, and make every concurrent caller wait for
+   * the SAME load to finish.
+   *
+   * The previous version flipped `this.loaded = true` before awaiting storage.get, so
+   * the flag meant "someone started loading" rather than "load has finished". A second
+   * caller arriving during the await returned immediately and operated on an empty
+   * records array — losing checkpoints on a concurrent snapshot, or failing to find one
+   * on a concurrent rollback. Caching the promise is what makes the guard mean what its
+   * name says.
+   */
   private async load(): Promise<void> {
     if (this.loaded) return;
-    this.loaded = true;
+    if (this.loadPromise) return this.loadPromise;
+    this.loadPromise = this.loadOnce().finally(() => {
+      this.loaded = true;
+      this.loadPromise = null;
+    });
+    return this.loadPromise;
+  }
+
+  private async loadOnce(): Promise<void> {
     try {
       const raw = await this.storage.get(STORAGE_KEY);
       if (!Array.isArray(raw)) return;
@@ -259,6 +306,17 @@ export class CheckpointStore {
         const c = item as Partial<CheckpointRecord>;
         if (typeof c.id !== "string" || typeof c.tool !== "string" || typeof c.target !== "string") continue;
         if (typeof c.at !== "string" || typeof c.ttlMs !== "number") continue;
+        // Sanity-bound the persisted TTL and timestamp. A hostile or corrupted blob
+        // could otherwise carry ttlMs: 9e15 (never expires) or a far-future `at`
+        // (expiry arithmetic never fires), defeating the retention ceiling. Both are
+        // clamped on read rather than trusted.
+        const at = Number.isNaN(new Date(c.at).getTime()) ? this.clock().toISOString() : c.at;
+        const atMs = new Date(at).getTime();
+        const nowMs = this.clock().getTime();
+        const safeAt = atMs > nowMs + 60_000 ? new Date(nowMs).toISOString() : at;
+        const ttlMs = Number.isFinite(c.ttlMs)
+          ? Math.max(1000, Math.min(MAX_TTL_MS, Math.floor(c.ttlMs)))
+          : DEFAULT_TTL_MS;
         restored.push({
           id: c.id,
           tool: c.tool,
@@ -266,10 +324,10 @@ export class CheckpointStore {
           before: (c.before ?? null) as JsonValue | null,
           absentBefore: !!c.absentBefore,
           after: c.after as JsonValue | undefined,
-          at: c.at,
+          at: safeAt,
           workspaceId: typeof c.workspaceId === "string" ? c.workspaceId : undefined,
           correlationId: typeof c.correlationId === "string" ? c.correlationId : undefined,
-          ttlMs: c.ttlMs,
+          ttlMs,
           rolledBackAt: typeof c.rolledBackAt === "string" ? c.rolledBackAt : undefined,
         });
       }

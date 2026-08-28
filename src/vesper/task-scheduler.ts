@@ -34,6 +34,7 @@
 
 import type { TaskQueue, VesperTask } from "./distributed/tasks.ts";
 import type { DeviceRecord } from "./distributed/registry.ts";
+import { manifestHas } from "./distributed/capabilities.ts";
 import type { EventBus } from "./events.ts";
 import type { Logger } from "./logging.ts";
 import type { JsonObject } from "./types.ts";
@@ -176,7 +177,7 @@ export class TaskScheduler {
         reasons.push(`per-tick cap ${cap} reached`);
         break;
       }
-      const outcome = await this.tryStart(task);
+      const outcome = await this.tryStart(task, devices);
       reasons.push(`${task.id.slice(-8)}:${outcome}`);
       if (outcome === "started") started += 1;
     }
@@ -188,7 +189,34 @@ export class TaskScheduler {
     };
   }
 
-  private async tryStart(task: VesperTask): Promise<string> {
+  /**
+   * Re-verify that THIS device is still authorized to run the task, right now.
+   *
+   * An assignment made by routeTask() while the device was trusted, online, and
+   * capable is a snapshot — it does not expire when the device is revoked, loses a
+   * capability, or goes offline. `schedule()` only re-routes tasks in `queued` or
+   * `blocked` state, so an `assigned` task keeps its stale assignment forever.
+   * Without this check, a revoked device still executes work the router would now
+   * refuse. Mirrors the runtime's "trust is read live, never cached into a session"
+   * invariant.
+   */
+  private authorizedNow(task: VesperTask, devices: DeviceRecord[]): { ok: boolean; reason: string } {
+    const self = devices.find((d) => d.identity.deviceId === this.opts.deviceId);
+    if (!self) return { ok: false, reason: "self-not-in-roster" };
+    if (self.trust !== "trusted") return { ok: false, reason: `trust-is-${self.trust}` };
+    if (self.presence.reachability !== "online") return { ok: false, reason: "self-offline" };
+    if (task.eligibleDevices?.length && !task.eligibleDevices.includes(this.opts.deviceId)) {
+      return { ok: false, reason: "not-in-eligible-devices" };
+    }
+    for (const capability of task.requiredCapabilities) {
+      if (!manifestHas(self.capabilities, capability)) {
+        return { ok: false, reason: `missing-capability:${capability}` };
+      }
+    }
+    return { ok: true, reason: "" };
+  }
+
+  private async tryStart(task: VesperTask, devices: DeviceRecord[]): Promise<string> {
     // Concurrency guard: a second tick that fires while a task is running must not
     // start it twice. The check-then-add MUST be atomic against parallel ticks —
     // JavaScript's single-threaded event loop guarantees synchronous code is atomic,
@@ -199,6 +227,25 @@ export class TaskScheduler {
 
     let handoff = false;
     try {
+      // Authorization is re-checked HERE, not only at routing time. The router's
+      // decision is a snapshot; this device may have been revoked, gone offline, or
+      // lost a capability since the assignment was made.
+      const authorized = this.authorizedNow(task, devices);
+      if (!authorized.ok) {
+        this.opts.events.emit({
+          type: "task.authorization_revoked",
+          title: `Task '${task.description}' is assigned here but this device is no longer authorized (${authorized.reason})`,
+          severity: "warn",
+          retention: "durable",
+          provenance: { author: "subsystem", source: "task-scheduler" },
+          data: { taskId: task.id, reason: authorized.reason } as JsonObject,
+        });
+        // Release the assignment so a re-route can place it on a device that IS
+        // authorized. Leaving it `assigned` here would strand the work forever.
+        await this.opts.taskQueue.releaseAssignment(task.id);
+        return `unauthorized:${authorized.reason}`;
+      }
+
       // Executor kind must be registered. A task with an unknown kind stays assigned
       // and emits a visible event so an operator can see the shortfall.
       if (!task.kind || !this.opts.registry.has(task.kind)) {

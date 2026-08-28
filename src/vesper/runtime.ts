@@ -53,6 +53,7 @@ import {
 import { buildDiscoveryProbes } from "./distributed/discovery.ts";
 import type { RequestOrigin } from "./tools/remote.ts";
 import { describeStartupRegistration } from "./windows/startup.ts";
+import { MEMORY_CATEGORIES } from "./types.ts";
 import type {
   AgentTurn,
   CapabilityProfile,
@@ -999,26 +1000,58 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   // internals, only how to ask it to restore a value it once had.
   checkpoints.registerReverser("memory_remember", {
     async verify(record) {
-      // If the stored `after` matches the current key's value, no drift.
+      // An absent post-image means the write never completed its verify() step — the
+      // process crashed between snapshot and verify, or apply threw. We do NOT know
+      // what the state should look like, so we cannot tell whether it has drifted.
+      // The safe reading of "unknown" is REFUSE, not "no drift": treating an unknown
+      // post-image as a match would let a rollback overwrite whatever the user did
+      // since. (Attack finding: drift detection was a no-op on every un-verified
+      // checkpoint.)
+      const after = record.after as { value?: string } | undefined;
+      if (!after || typeof after.value !== "string") return false;
       const results = await memory.search(record.target, { workspaceId: record.workspaceId, scope: "all" });
       const current = results.find((entry) => entry.key === record.target);
-      const after = record.after as { value?: string } | undefined;
-      if (!after) return true; // No post-image recorded — best effort.
       return !!current && current.value === after.value;
     },
     async restore(record) {
       if (record.absentBefore) {
-        // The key did not exist before; forget any current entry with that key.
-        await memory.forget(record.target, { workspaceId: record.workspaceId });
+        // The key did not exist before; forget the entry we created. `forget` returns
+        // false when nothing matched — reporting success then would claim a reversal
+        // that did not happen, which the mission's honesty rule forbids.
+        const forgotten = await memory.forget(record.target, { workspaceId: record.workspaceId });
+        if (!forgotten) {
+          throw new Error(`Nothing to forget for '${record.target}'; the memory was already gone.`);
+        }
         return;
       }
-      const before = record.before as { key: string; category: string; value: string; workspaceId: string | null } | null;
-      if (!before) throw new Error("memory_remember checkpoint has no `before` value");
+      const before = record.before as
+        | { key?: unknown; category?: unknown; value?: unknown; workspaceId?: unknown }
+        | null;
+      if (!before || typeof before !== "object") {
+        throw new Error("memory_remember checkpoint has no `before` value");
+      }
+      // Validate the pre-image before feeding it back into the store. A hostile or
+      // corrupted `rollback.checkpoints` blob could otherwise plant an arbitrary
+      // key/value pair and have restore() write it as if Vesper had recorded it.
+      // The key must match the checkpoint's own target — a rollback restores the
+      // thing it snapshotted, nothing else.
+      if (typeof before.key !== "string" || typeof before.value !== "string" || typeof before.category !== "string") {
+        throw new Error("memory_remember checkpoint `before` is malformed; refusing to restore");
+      }
+      if (before.key !== record.target) {
+        throw new Error(
+          `memory_remember checkpoint targets '${record.target}' but its pre-image names '${before.key}'; refusing to restore`,
+        );
+      }
+      if (!(MEMORY_CATEGORIES as readonly string[]).includes(before.category)) {
+        throw new Error(`memory_remember checkpoint has an unknown category '${before.category}'; refusing to restore`);
+      }
+      const workspaceId = typeof before.workspaceId === "string" ? before.workspaceId : undefined;
       await memory.remember({
         category: before.category as never,
         key: before.key,
         value: before.value,
-        workspaceId: before.workspaceId ?? undefined,
+        workspaceId,
         source: "agent",
         provenance: { origin: "agent", kind: "inferred" },
       });
@@ -1026,9 +1059,10 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   });
   checkpoints.registerReverser("workspace_switch", {
     async verify(record) {
-      // Drift detection: is the current workspace still the id we switched to?
+      // Same rule as memory_remember: an absent post-image means we cannot know
+      // whether the state drifted, so refuse rather than assume it matches.
       const after = typeof record.after === "string" ? record.after : null;
-      if (!after) return true;
+      if (!after) return false;
       return workspaces.current().id === after;
     },
     async restore(record) {

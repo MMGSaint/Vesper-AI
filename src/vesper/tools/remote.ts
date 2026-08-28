@@ -87,6 +87,15 @@ const TRUSTED_ONLY_TOOLS: readonly string[] = [
   // restricted one, on a host Vesper cannot vouch for, is disclosure.
   "task_list",
   "task_create",
+  // A rollback reverses a change Vesper made to the owner's own state — a workspace
+  // switch, a memory write. `workspace_switch` is trusted-only above, so reaching the
+  // same effect through `rollback_apply` must not be an easier path: a restricted
+  // device that could reverse a workspace switch has moved the owner's state without
+  // ever holding the authority to move it forward. `rollback_list` is here for the
+  // same reason `task_list` is — the target names and pre-image summaries it returns
+  // describe the owner's private activity.
+  "rollback_apply",
+  "rollback_list",
 ];
 
 /**
