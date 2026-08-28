@@ -174,7 +174,7 @@ describe("EventJournal — durable events survive past the ring", () => {
     await journal.flush();
     const raw = await storage.get("events.journal.2026-08-28");
     assert.ok(Array.isArray(raw));
-    assert.equal((raw as VesperEvent[]).length, 50, "partition capped at 50");
+    assert.equal((raw as unknown as VesperEvent[]).length, 50, "partition capped at 50");
   });
 
   it("filters by type, correlationId, and time window", async () => {

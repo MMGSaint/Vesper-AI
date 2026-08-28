@@ -64,6 +64,17 @@ export interface VesperTask {
   retry: RetryPolicy;
   /** Private work stays on the user's own devices, even if that means queuing. */
   private: boolean;
+  /**
+   * Names the executor that should run this task. Optional for backwards
+   * compatibility — a task without a kind is a description-only reminder that no
+   * scheduler will start on its own. The kind resolves through TaskExecutorRegistry.
+   */
+  kind?: string;
+  /**
+   * Free-form arguments the executor consumes. Kept as JsonObject so a task can
+   * survive a restart via the same JSON persistence the rest of the queue uses.
+   */
+  args?: import("../types.ts").JsonObject;
 }
 
 export interface CreateTaskInput {
@@ -76,6 +87,8 @@ export interface CreateTaskInput {
   dependsOn?: string[];
   maxAttempts?: number;
   private?: boolean;
+  kind?: string;
+  args?: import("../types.ts").JsonObject;
 }
 
 export type RoutingOutcome =
@@ -264,6 +277,10 @@ export class TaskQueue {
             attempts: typeof task.retry?.attempts === "number" ? Math.max(0, Math.floor(task.retry.attempts)) : 0,
           },
           private: task.private !== false,
+          kind: typeof task.kind === "string" ? task.kind : undefined,
+          args: (task.args && typeof task.args === "object" && !Array.isArray(task.args))
+            ? (task.args as import("../types.ts").JsonObject)
+            : undefined,
         });
       }
     } catch {
@@ -298,6 +315,8 @@ export class TaskQueue {
         retry: { maxAttempts: Math.max(1, input.maxAttempts ?? 3), attempts: 0 },
         // Private by default: work is assumed personal unless stated otherwise.
         private: input.private !== false,
+        kind: input.kind,
+        args: input.args,
       };
       this.tasks.set(task.id, task);
       await this.persist();

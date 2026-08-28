@@ -16,6 +16,7 @@ import {
 import { WorkspaceManager } from "./workspaces.ts";
 import { EventBus } from "./events.ts";
 import { EventJournal } from "./event-journal.ts";
+import { TaskExecutorRegistry, TaskScheduler, registerBuiltinExecutors } from "./task-scheduler.ts";
 import { NotificationHub } from "./notifications.ts";
 import { createSimulatedHardware, type SimulatedHardware } from "./hardware/simulated.ts";
 import {
@@ -99,6 +100,8 @@ export class VesperRuntime {
   readonly workspaces: WorkspaceManager;
   readonly events: EventBus;
   readonly journal: EventJournal;
+  readonly taskExecutors: TaskExecutorRegistry;
+  readonly taskScheduler: TaskScheduler;
   readonly notifications: NotificationHub;
   readonly hardware: SimulatedHardware;
   readonly optimizer: OptimizerAdapter;
@@ -133,6 +136,8 @@ export class VesperRuntime {
       workspaces: WorkspaceManager;
       events: EventBus;
       journal: EventJournal;
+      taskExecutors: TaskExecutorRegistry;
+      taskScheduler: TaskScheduler;
       notifications: NotificationHub;
       hardware: SimulatedHardware;
       optimizer: OptimizerAdapter;
@@ -161,6 +166,8 @@ export class VesperRuntime {
     this.workspaces = parts.workspaces;
     this.events = parts.events;
     this.journal = parts.journal;
+    this.taskExecutors = parts.taskExecutors;
+    this.taskScheduler = parts.taskScheduler;
     this.notifications = parts.notifications;
     this.hardware = parts.hardware;
     this.optimizer = parts.optimizer;
@@ -905,6 +912,19 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     log,
     startOnLogin: config.windows.startOnLogin,
   });
+  const taskExecutors = new TaskExecutorRegistry();
+  registerBuiltinExecutors(taskExecutors);
+  const taskScheduler = new TaskScheduler({
+    taskQueue,
+    registry: taskExecutors,
+    events,
+    log,
+    deviceId: deviceIdentity.deviceId,
+    devices: () => devices.list(),
+    enabled: config.agent.driveTasksOnIdle,
+    maxPerTick: config.agent.tasksPerTick,
+  });
+
   const scheduler = createIdleScheduler({
     events,
     log,
@@ -926,6 +946,18 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
         title: "Idle maintenance tick",
         severity: "info",
       });
+      // The task scheduler runs BELOW the idle tick's own gating (gaming throttle,
+      // background paused). Its .tick() is a no-op when disabled — the flag guards
+      // the whole feature so a runtime with no executors registered stays silent.
+      try {
+        await taskScheduler.tick();
+      } catch (error) {
+        // A scheduler failure must not crash the idle loop. The scheduler emits its
+        // own events for executor errors; a throw from tick() itself is unexpected.
+        log.warn("lifecycle", "task scheduler tick threw", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     },
   });
   const gate = createPermissionGate(config.permissions, log);
@@ -1022,6 +1054,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     workspaces,
     events,
     journal,
+    taskExecutors,
+    taskScheduler,
     notifications,
     hardware,
     optimizer,
