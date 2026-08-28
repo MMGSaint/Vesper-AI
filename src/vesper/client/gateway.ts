@@ -12,6 +12,8 @@ import {
   type ClientScope,
 } from "./protocol.ts";
 import { ClientSessionStore, type ClientSession, type IssueSessionInput } from "./session.ts";
+import { filterForSync } from "../distributed/sync.ts";
+import type { RequestOrigin } from "../tools/remote.ts";
 
 export interface ClientStatus {
   hello: ClientHello;
@@ -19,6 +21,21 @@ export interface ClientStatus {
   workspaceId: string;
   pendingConfirmations: number;
 }
+
+/**
+ * The longest message another device may send.
+ *
+ * Vesper is single-threaded, and a conversation turn does retrieval over the whole
+ * message: memory search and knowledge search both score every stored item against
+ * every query token. There was no bound at all, so a single 10.9 MiB message from a
+ * *restricted* companion — the class the code itself describes as one whose
+ * surroundings Vesper cannot vouch for, holding neither memory nor write scope —
+ * blocked the entire host for 84 seconds. A larger corpus makes that minutes.
+ *
+ * 32k characters is far longer than anything a person types and far shorter than
+ * anything that hurts.
+ */
+export const MAX_REMOTE_MESSAGE_CHARS = 32_000;
 
 export class VesperClientGateway {
   readonly sessions: ClientSessionStore;
@@ -36,6 +53,30 @@ export class VesperClientGateway {
 
   async issueSession(input: IssueSessionInput): Promise<ClientSession | ClientError> {
     return this.sessions.issue(input);
+  }
+
+  /**
+   * The authority a remote device is exercising, read fresh.
+   *
+   * Trust is the requester's; the manifest is this device's. The question being asked
+   * is "may a device of that trust class ask *this* machine to do X", so the capability
+   * has to be looked up on the machine that would perform the work.
+   */
+  private async remoteOrigin(
+    deviceId: string,
+    scopes: readonly ClientScope[],
+  ): Promise<RequestOrigin> {
+    const [requester, self] = await Promise.all([
+      this.runtime.devices.get(deviceId),
+      this.runtime.devices.get(this.runtime.deviceIdentity.deviceId),
+    ]);
+    return {
+      kind: "remote",
+      deviceId,
+      trust: requester?.trust ?? "unknown",
+      manifest: self?.capabilities ?? null,
+      scopes,
+    };
   }
 
   hello(): ClientHello {
@@ -113,29 +154,45 @@ export class VesperClientGateway {
     };
   }
 
+  /**
+   * Trim a turn to what this session is allowed to see.
+   *
+   * The envelope carries the host's recent notifications and events for the benefit of a
+   * local UI, and gateway.converse handed the whole thing to whoever was talking — so a
+   * device refused the `notifications` scope on the method of that name received them
+   * anyway, attached to its own reply.
+   */
+  private project(turn: AgentTurn, session: ClientSession): AgentTurn {
+    return {
+      ...turn,
+      notifications: session.scopes.includes("notifications") ? turn.notifications : [],
+      // Events describe what the host has been doing, which is the owner's business and
+      // not a companion's. `status` is the scope for "how is the machine", and it has
+      // its own method that decides what to say.
+      events: [],
+    };
+  }
+
   async converse(token: string | undefined, text: string): Promise<AgentTurn | ClientError> {
     const session = await this.sessions.require(token, "conversation");
     if ("ok" in session) return session;
     const trimmed = text.trim();
     if (!trimmed) return clientError("INVALID", "Empty message.");
+    if (trimmed.length > MAX_REMOTE_MESSAGE_CHARS) {
+      // Refused at the boundary rather than truncated, so the sender knows Vesper did
+      // not read what they sent. See MAX_REMOTE_MESSAGE_CHARS for why there is a bound.
+      return clientError(
+        "INVALID",
+        `Message is ${trimmed.length} characters; the limit is ${MAX_REMOTE_MESSAGE_CHARS}.`,
+      );
+    }
     // A conversation is a tool-calling loop, so a remote turn must carry who is asking
     // all the way to the point tools run. Without this, "may converse" silently means
     // "may call anything the agent decides to call" on the host's own machine.
-    // Trust is the requester's; the manifest is this device's. The question being
-    // asked is "may a device of that trust class ask *this* machine to do X", so the
-    // capability has to be looked up on the machine that would perform it.
-    const [requester, self] = await Promise.all([
-      this.runtime.devices.get(session.deviceId),
-      this.runtime.devices.get(this.runtime.deviceIdentity.deviceId),
-    ]);
-    return this.runtime.chat(trimmed, {
-      origin: {
-        kind: "remote",
-        deviceId: session.deviceId,
-        trust: requester?.trust ?? "unknown",
-        manifest: self?.capabilities ?? null,
-      },
+    const turn = await this.runtime.chat(trimmed, {
+      origin: await this.remoteOrigin(session.deviceId, session.scopes),
     });
+    return this.project(turn, session);
   }
 
   async confirm(
@@ -148,20 +205,58 @@ export class VesperClientGateway {
     const pending = this.runtime.confirmations.get(confirmationId);
     if (!pending) return clientError("NOT_FOUND", "No pending confirmation with that id.");
     if (!approve) {
+      // Declining is the safe direction for the *action*, but it is not a safe act
+      // against the person waiting on it: any session holding operator.confirm could
+      // delete a confirmation the owner had queued and was about to approve, silently
+      // and repeatedly. Deciding the fate of a held request is authority over it either
+      // way, so a remote device may only decline what its own device asked for.
+      const requester = pending.requestedBy;
+      const ownsIt = requester?.kind === "remote" && requester.deviceId === session.deviceId;
+      if (!ownsIt) {
+        return clientError(
+          "PERMISSION_DENIED",
+          "Only the device that requested an action, or the person at the machine, can decline it.",
+        );
+      }
       this.runtime.confirmations.delete(confirmationId);
-      return this.runtime.chat("Operator denied the pending action.");
+      return this.project(await this.runtime.chat("Operator denied the pending action."), session);
     }
-    return this.runtime.chat("Operator approved the pending action.", {
+
+    // The approval carries the approver's own authority into the deferred tool call.
+    //
+    // Without this the confirmation queue was an authority launderer: a device that is
+    // absolutely forbidden the filesystem could approve a held fs_write and it would
+    // execute as though the person at the machine had run it. Approving is exercising
+    // authority, not merely acknowledging a prompt, so the same limits apply to it as
+    // to asking directly.
+    const origin = await this.remoteOrigin(session.deviceId, session.scopes);
+    this.runtime.events.emit({
+      type: "security.remote_confirmation",
+      title: `Remote device approved ${pending.toolName}`,
+      detail: `Device ${session.deviceId} approved a held ${pending.toolName} requested by ${pending.requestedBy?.kind ?? "an unrecorded origin"}.`,
+      severity: "warn",
+      workspaceId: pending.workspaceId,
+    });
+    const turn = await this.runtime.chat("Operator approved the pending action.", {
       confirmId: confirmationId,
       approve: true,
+      origin,
     });
+    return this.project(turn, session);
   }
 
   async listMemory(token: string | undefined): Promise<{ entries: MemoryEntry[] } | ClientError> {
     const session = await this.sessions.require(token, "memory.read");
     if ("ok" in session) return session;
-    const entries = await this.runtime.memory.exportPersistent();
-    return { entries };
+    // The whole persistent store went over the wire: every workspace, and anything that
+    // looked like a credential. The agent's own retrieval is workspace-scoped and the
+    // sync path refuses credential-shaped values; this route had neither.
+    const scoped = await this.runtime.memory.search("", {
+      workspaceId: this.runtime.workspaces.current().id,
+      scope: "workspace",
+      limit: 200,
+    });
+    return { entries: filterForSync(scoped).send };
   }
 
   async remember(
@@ -173,12 +268,32 @@ export class VesperClientGateway {
     if (!input.key.trim() || !input.value.trim()) {
       return clientError("INVALID", "Memory key and value are required.");
     }
+    // The same destructive-overwrite rule the tool path has. Replacing a memory destroys
+    // what was there, which is what memory_forget's confirmation exists to govern —
+    // and this route reaches the store directly, so guarding only the tool left the
+    // gateway as a way around it.
+    const workspaceId = this.runtime.workspaces.current().id;
+    const existing = (await this.runtime.memory.search(input.key.trim(), { workspaceId, scope: "all" }))
+      .find((item) => item.key.toLowerCase() === input.key.trim().toLowerCase());
+    if (existing && existing.value !== input.value.trim()) {
+      return clientError(
+        "PERMISSION_DENIED",
+        `'${input.key.trim()}' already holds a different value. Forgetting it first requires confirmation at the machine.`,
+      );
+    }
+
+    // Recorded as what it is: a companion device asserting something, not the person at
+    // the machine saying it. Labelling it "user" gave a remote write the store's most
+    // protected eviction rank, so a flood of them pushed out the owner's own memories
+    // instead of being pruned first — and it told any UI reading the store back that the
+    // owner had said it.
     const entry = await this.runtime.memory.remember({
       category: input.category ?? "preference",
       key: input.key.trim(),
       value: input.value.trim(),
-      source: "user",
-      provenance: { origin: "client", kind: "stated" },
+      workspaceId,
+      source: "agent",
+      provenance: { origin: `client:${session.deviceId}`, kind: "stated" },
     });
     return { entry };
   }
@@ -189,7 +304,14 @@ export class VesperClientGateway {
   ): Promise<{ hits: { path: string; snippet: string; score: number }[] } | ClientError> {
     const session = await this.sessions.require(token, "knowledge.read");
     if ("ok" in session) return session;
-    const hits = await this.runtime.knowledge.search(query, { limit: 8 });
+    // Workspace scoping is enforced by rank() only when it is given a workspaceId, and
+    // this was the one retrieval path that passed none — so a companion read documents
+    // belonging to workspaces it was not in, while the agent and the knowledge_search
+    // tool both scoped correctly.
+    const hits = await this.runtime.knowledge.search(query, {
+      limit: 8,
+      workspaceId: this.runtime.workspaces.current().id,
+    });
     return {
       hits: hits.map((hit) => ({ path: hit.path, snippet: hit.snippet, score: hit.score })),
     };

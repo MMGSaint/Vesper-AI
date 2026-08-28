@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
 import type { KnowledgeHit, KnowledgeSource } from "../types.ts";
@@ -5,6 +6,7 @@ import {
   containsTraversal,
   isDangerousRoot,
   isPathInside,
+  isVesperOwnPath,
   resolveRealWithinRoot,
 } from "../security.ts";
 import { chunkText } from "./chunk.ts";
@@ -15,6 +17,28 @@ import {
 } from "./embeddings.ts";
 import { excludesDirectory, includesFile, normalizeRelPath } from "./glob.ts";
 import { bm25, buildLexicalIndex, tokenize, type LexicalIndex } from "./lexical.ts";
+
+/**
+ * The real path of a directory, or null when it cannot be resolved.
+ *
+ * Used everywhere a knowledge root is checked. A root that does not resolve — because it
+ * does not exist, or is a dangling link — is treated as outside the approved set rather
+ * than as "probably fine": a path we cannot resolve is a path we cannot confine.
+ */
+function realPathOrNull(target: string): string | null {
+  try {
+    // Plain realpathSync, not `.native`. The native form asks the OS, and on Windows the
+    // OS answers with the extended-length form (`\\?\C:\Users\...`) — which then fails
+    // every containment comparison against an ordinary `C:\Users\...` approved root, so
+    // a correct root looked like an escaping one and nothing was indexed at all. The
+    // prefix is stripped as well, because a UNC-mapped drive can still produce it.
+    const real = realpathSync(resolve(target));
+    return real.startsWith("\\\\?\\") ? real.slice(4) : real;
+  } catch {
+    return null;
+  }
+}
+
 
 const TEXT_EXT = new Set([".md", ".txt", ".json", ".ts", ".js", ".cs", ".yml", ".yaml"]);
 
@@ -67,6 +91,7 @@ async function walk(
   filter: WalkFilter,
 ): Promise<void> {
   if (containsTraversal(root) || isDangerousRoot(root)) return;
+  if (isVesperOwnPath(root)) return;
   const resolvedRoot = resolve(root);
   if (approvedRoots.length && !approvedRoots.some((item) => isPathInside(item, resolvedRoot))) {
     return;
@@ -80,6 +105,9 @@ async function walk(
   for (const entry of entries) {
     const full = join(resolvedRoot, entry.name);
     if (!isPathInside(resolvedRoot, full)) continue;
+    // Checked per entry, not only per root: an approved root can legitimately sit above
+    // Vesper's own data directory, and only the entry says which is which.
+    if (isVesperOwnPath(full)) continue;
 
     // A symlink can point anywhere. `readdir` reports the link itself, so a link named
     // `notes.md` would otherwise be indexed by extension and read through to its real
@@ -154,10 +182,22 @@ export class KnowledgeIndex {
     if (source.roots.some((root) => containsTraversal(root) || isDangerousRoot(root))) {
       return { ok: false, summary: "Refused to register a dangerous or traversing knowledge root." };
     }
+    if (source.roots.some((root) => isVesperOwnPath(root))) {
+      return { ok: false, summary: "Refused to index Vesper's own data or configuration." };
+    }
     if (this.approvedRoots.length) {
-      const allowed = source.roots.every((root) =>
-        this.approvedRoots.some((item) => isPathInside(item, resolve(root))),
-      );
+      // Compare *real* paths. A lexical check accepts a symlinked directory sitting
+      // inside an approved root, and the indexer then reads and exposes everything the
+      // link points at — the containment reads as satisfied while the files come from
+      // somewhere the user never approved.
+      const allowed = source.roots.every((root) => {
+        const real = realPathOrNull(root);
+        if (real === null) return false;
+        return this.approvedRoots.some((item) => {
+          const realApproved = realPathOrNull(item) ?? resolve(item);
+          return isPathInside(realApproved, real);
+        });
+      });
       if (!allowed) {
         return { ok: false, summary: "Knowledge roots must stay inside approved directories." };
       }
@@ -211,9 +251,14 @@ export class KnowledgeIndex {
     let filesReused = 0;
     for (const source of this.sources.filter((item) => item.enabled)) {
       for (const root of source.roots) {
+        // Walk the resolved root, so cache keys and relative paths stay stable when a
+        // root is itself a link. Containment of what is *read* is `walk`'s own per-entry
+        // check against approvedRoots — an explicit skip here was tried and removed, as
+        // no test could distinguish it from walk already doing the work.
+        const realRoot = realPathOrNull(root) ?? resolve(root);
         const files: WalkedFile[] = [];
-        await walk(root, files, this.approvedRoots, {
-          base: resolve(root),
+        await walk(realRoot, files, this.approvedRoots, {
+          base: realRoot,
           include: source.include,
           exclude: source.exclude,
         });
@@ -221,7 +266,7 @@ export class KnowledgeIndex {
         // dense vectors are addressed by document index.
         files.sort((a, b) => a.path.localeCompare(b.path));
         for (const file of files) {
-          const cacheKey = cacheKeyFor(source.id, root, file.path);
+          const cacheKey = cacheKeyFor(source.id, realRoot, file.path);
           seen.add(cacheKey);
           const cached = this.fileCache.get(cacheKey);
           if (cached && cached.mtimeMs === file.mtimeMs && cached.size === file.size) {
@@ -231,7 +276,7 @@ export class KnowledgeIndex {
           }
           try {
             const text = await readFile(file.path, "utf8");
-            const rel = relative(root, file.path) || file.path;
+            const rel = relative(realRoot, file.path) || file.path;
             const title = file.path.split(/[\\/]/).at(-1) ?? file.path;
             const built = chunkText(text).map((chunk) => ({
               sourceId: source.id,
@@ -368,12 +413,14 @@ export class KnowledgeIndex {
     );
     const lexicalIndex = this.lexicalIndex();
     const queryTokens = tokenize(query);
+    // Built once for the whole ranking pass, not once per document.
+    const queryTerms = new Set(queryTokens);
     const phrase = query.trim().toLowerCase();
     const scored = this.documents
       .map((doc, index) => ({ doc, index }))
       .filter((row) => allowedSources.has(row.doc.sourceId))
       .map((row) => {
-        const lexical = queryTokens.length ? bm25(queryTokens, lexicalIndex, row.index) : 0;
+        const lexical = queryTerms.size ? bm25(queryTerms, lexicalIndex, row.index) : 0;
         const docVec = this.vectors?.[row.index];
         const dense = queryVec && docVec ? cosineSimilarity(queryVec, docVec) : 0;
         const idx = phrase ? row.doc.text.toLowerCase().indexOf(phrase) : -1;

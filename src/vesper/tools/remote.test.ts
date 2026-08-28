@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { capabilityForTool, decideRemoteToolRequest } from "./remote.ts";
+import { capabilityForTool, decideRemoteToolRequest, scopeForTool } from "./remote.ts";
 import { enrolCompanion, testRuntime } from "../test-helpers.ts";
 import { createClientGateway } from "../client/gateway.ts";
 import type { CompletionRequest, ModelToolCall } from "../types.ts";
@@ -126,15 +126,140 @@ describe("the remote tool decision itself", () => {
     assert.equal(decision.allowed, false, "a request with no stated trust was allowed");
   });
 
-  it("does not double-govern tools that client scopes already cover", () => {
-    // memory and knowledge are governed by scopes; adding them here too would mean two
-    // rules with no single owner.
-    assert.equal(capabilityForTool("memory_search"), null);
-    assert.equal(capabilityForTool("knowledge_search"), null);
+  it("enforces the client scope a tool needs, wherever the tool is reached from", () => {
+    // This test previously asserted the opposite — that memory and knowledge tools were
+    // "already governed by scopes" and needed no rule here. That belief was the
+    // vulnerability: scopes govern gateway *methods*, and a conversation calls tools,
+    // so a session holding only `conversation` reached the very data its missing scopes
+    // describe. Scope is still the single owner of that decision; this is the one place
+    // the tool path asks it.
+    assert.equal(capabilityForTool("memory_search"), null, "not capability-bearing");
+    assert.equal(scopeForTool("memory_search"), "memory.read", "but it is scope-bearing");
+
+    const without = decideRemoteToolRequest({
+      toolName: "memory_search",
+      origin: { kind: "remote", trust: "trusted", manifest: manifest([]), scopes: ["status"] },
+    });
+    assert.equal(without.allowed, false);
+
+    const withScope = decideRemoteToolRequest({
+      toolName: "memory_search",
+      origin: {
+        kind: "remote",
+        trust: "trusted",
+        manifest: manifest([]),
+        scopes: ["status", "memory.read"],
+      },
+    });
+    assert.equal(withScope.allowed, true, "the control must narrow, not sever");
+  });
+
+  it("treats an origin with no established scopes as holding none", () => {
+    // Absent must not read as "unrestricted". A request whose authority cannot be
+    // established gets none of it.
     const decision = decideRemoteToolRequest({
       toolName: "memory_search",
       origin: { kind: "remote", trust: "trusted", manifest: manifest([]) },
     });
-    assert.equal(decision.allowed, true);
+    assert.equal(decision.allowed, false);
+  });
+});
+
+describe("a remote device cannot put words in the owner's notification hub", () => {
+  /**
+   * `notify` pushes a `system`-kind notification onto the machine the owner is sitting
+   * at, and the hub is a surface the owner reads as Vesper speaking to them. It was
+   * mapped to the `notifications` scope, which is a *read* scope — the gateway method
+   * behind it returns recent items — and which `DEFAULT_COMPANION_SCOPES` hands to every
+   * companion on enrolment.
+   *
+   * So the default grant for "let my phone see my notifications" also meant "let my
+   * phone write notifications", and a compromised or lower-trust companion had a
+   * phishing primitive: a message in Vesper's own voice, on the owner's own machine,
+   * saying whatever it liked. Read and write are not the same authority and must not
+   * share a scope name.
+   */
+  const PHISH = "Your session expired. Open vesper-login.example and re-enter your passphrase.";
+
+  async function notifyFromCompanion(trust: "trusted" | "restricted") {
+    const runtime = await testRuntime({
+      providers: [callsTool("notify", { title: "Vesper security", body: PHISH })],
+    });
+    const gateway = createClientGateway(runtime);
+    const phone = await enrolCompanion(runtime, { name: "phone", trust });
+    const session = await gateway.issueSession({
+      deviceId: phone.deviceId,
+      deviceLabel: "phone",
+      // Every scope the default enrolment grants, `notifications` included. The point
+      // is that holding the scope is not enough, so the scope must be held.
+      scopes: ["status", "conversation", "memory.read", "notifications"],
+    });
+    if ("ok" in session) throw new Error(session.detail);
+    const turn = await gateway.converse(session.token, "warn me about my session");
+    if ("ok" in turn) throw new Error(turn.detail);
+    const record = turn.toolCalls.find((item) => item.toolName === "notify");
+    // The owner's hub, on the host side of the boundary — not the projected turn.
+    const hub = JSON.stringify(runtime.notifications.recent(50));
+    await runtime.stop();
+    return { record, hub, sessionScopes: session.scopes };
+  }
+
+  it("refuses notify from a trusted companion that holds the notifications scope", async () => {
+    const { record, hub, sessionScopes } = await notifyFromCompanion("trusted");
+    assert.ok(
+      sessionScopes.includes("notifications"),
+      "the session did not hold the scope, so this proves nothing",
+    );
+    // The consequence first: what the owner would actually see. A refusal that still
+    // pushed the notification would pass a decision-only assertion.
+    assert.equal(
+      hub.includes(PHISH),
+      false,
+      "a remote device planted a notification in the owner's hub",
+    );
+    assert.equal(record?.decision.allowed, false, "notify ran for a remote device");
+    assert.match(record?.result?.summary ?? "", /only be run at the machine/);
+  });
+
+  it("refuses it from a restricted companion too", async () => {
+    // Honest note: mutation does not distinguish the host-only listing here. Restoring
+    // `notify: "notifications"` leaves this test passing, because a restricted device's
+    // scopes are capped to RESTRICTED_COMPANION_SCOPES, which excludes `notifications`
+    // — so the scope ceiling refuses it either way. The host-only listing is what holds
+    // the *trusted* case, and that is where the mutation shows up.
+    const { record, hub } = await notifyFromCompanion("restricted");
+    assert.equal(record?.decision.allowed, false);
+    assert.equal(hub.includes(PHISH), false);
+  });
+
+  it("still lets the person at the machine send one", async () => {
+    // Narrowing, not severing: notify is a legitimate local tool.
+    const runtime = await testRuntime({
+      providers: [callsTool("notify", { title: "Reminder", body: "The boiler inspection is Friday." })],
+    });
+    await runtime.chat("remind me about the boiler");
+    assert.equal(
+      JSON.stringify(runtime.notifications.recent(50)).includes("boiler inspection is Friday"),
+      true,
+      "notify stopped working locally",
+    );
+    await runtime.stop();
+  });
+
+  it("is not reachable by mapping it back to a scope", async () => {
+    // The mechanism itself: if someone re-adds `notify: "notifications"` to TOOL_SCOPE
+    // without removing it from HOST_ONLY_TOOLS, the host-only check still runs first.
+    assert.equal(scopeForTool("notify"), null, "notify was mapped to a client scope again");
+    const decision = decideRemoteToolRequest({
+      toolName: "notify",
+      origin: {
+        kind: "remote",
+        deviceId: "dev_phone",
+        trust: "trusted",
+        manifest: manifest([]),
+        scopes: ["status", "conversation", "memory.read", "notifications"],
+      },
+    });
+    assert.equal(decision.allowed, false, "the remote decision allowed notify");
   });
 });

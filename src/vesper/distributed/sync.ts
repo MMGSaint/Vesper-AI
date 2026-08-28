@@ -13,6 +13,7 @@
 
 import type { MemoryEntry } from "../types.ts";
 import { isSyncable } from "../memory/scopes.ts";
+import { looksLikeSecretValue } from "../security.ts";
 
 /** Keys whose presence means a payload must never leave the device. */
 const SECRET_KEY = /(pass(word)?|secret|token|api[_-]?key|authorization|credential|cookie|private[_-]?key)/i;
@@ -97,7 +98,16 @@ export function filterForSync(entries: MemoryEntry[]): SyncFilterResult {
       withheld.push({ key: entry.key, reason: `scope '${entry.scope}' never leaves the device` });
       continue;
     }
-    if (SECRET_KEY.test(entry.key) || SECRET_KEY.test(entry.value)) {
+    // Two different questions, and both have to be asked. SECRET_KEY recognises a
+    // credential by what it is *called* ("api_key", "password"); looksLikeSecretValue
+    // recognises one by what it looks *like* (an issuer prefix, a JWT). Testing only the
+    // first sent `{ key: "api key", value: "sk-live-..." }` off the device, because the
+    // name had a space in it.
+    if (
+      SECRET_KEY.test(entry.key) ||
+      SECRET_KEY.test(entry.value) ||
+      looksLikeSecretValue(entry.value)
+    ) {
       withheld.push({ key: entry.key, reason: "looks like a credential" });
       continue;
     }

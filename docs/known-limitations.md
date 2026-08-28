@@ -58,3 +58,22 @@ all of this work. Nothing below has been observed on it.
 Run the host, read the first-boot report, and treat every hardware-dependent item above
 as unfinished until it has actually succeeded on that machine. See
 `docs/first-boot.md`.
+
+## Windows filesystem containment is unverified on a real machine
+
+The containment work in this campaign is POSIX-first, and two parts of it have never run
+on Windows hardware:
+
+- **`O_NOFOLLOW` does not exist on Windows.** It is what makes the symlink check part of
+  the `open` itself, so there is no window to race. On Windows the explicit `lstat` is
+  the whole defence, and it is racy — a link swapped in between the check and the open
+  would be followed. Reparse points and junctions behave differently from POSIX symlinks
+  and have not been exercised at all.
+- **The device private key's file mode is asserted only on POSIX.** Windows has no POSIX
+  permission bits; `stat().mode` there reports a synthesised value that says nothing
+  about the ACL actually protecting the file. The platform-independent half — that the
+  key is not in the shared `state.json` — is asserted everywhere. Whether the key's file
+  carries a restrictive ACL on Windows is unverified.
+
+Both are stated here rather than implied by a green Windows CI run, which exercises the
+code but not these properties.

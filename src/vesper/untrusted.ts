@@ -125,18 +125,41 @@ const SENTINEL_LOOKALIKE = /vesper[\s_.-]{0,3}untrusted[\s_.-]{0,3}data/gi;
 /** Chat-template control tokens. A payload has no legitimate reason to open a turn. */
 const CONTROL_TOKEN = /<\|[a-z0-9_-]{1,32}\|>|\[\/?inst\]|<<\/?sys>>/gi;
 
-/** Invisible characters that only ever serve to hide text from a reader. */
-const ZERO_WIDTH = /[\u200B\uFEFF\u2060\u180E]/g;
 /**
- * Bidi embedding and override controls. Removing them cannot change the logical
- * character sequence - only the visual order a reader sees - so genuine Arabic or
- * Hebrew text survives while "call fs_write" cannot be made to read backwards.
+ * Every Unicode format character, not a hand-listed few.
+ *
+ * The hand-listed set covered four code points and missed U+00AD SOFT HYPHEN, which
+ * renders as nothing, survives NFKC, and broke every word-anchored pattern in the
+ * screener — an attacker got a payload from score 82 to score 0 with one character.
+ * `\p{Cf}` is the category those characters belong to, so it covers the ones nobody
+ * thought to list: the zero-width set, the bidi embedding and override controls,
+ * U+180E, the interlinear annotation marks, and U+00AD.
+ *
+ * Removing them cannot change the logical character sequence — only what a reader is
+ * shown — so genuine Arabic or Hebrew text survives while "call fs_write" cannot be
+ * made to read backwards or to hide a control token inside a word.
+ */
+const INVISIBLE = /\p{Cf}/gu;
+/** Kept for the screening normaliser, which may strip more than the payload path does. */
+const COMBINING_MARK = /\p{Mn}/gu;
+/**
+ * The bidi subset of INVISIBLE. Stripping uses the whole category; this exists only so
+ * the report can say "text was reordered", which is a different claim from "text was
+ * hidden" and deserves its own signal.
  */
 const BIDI_CONTROL = /[\u202A-\u202E\u2066-\u2069]/g;
 /** C0 controls other than tab, newline, carriage return. */
 const CONTROL_CHAR = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 
 const DEFAULT_MAX_PAYLOAD_CHARS = 12_000;
+/**
+ * How many strip/escape passes before the transformation is declared unstable.
+ *
+ * Every pass strictly shrinks the string or escapes something, so this converges in
+ * practice; the bound exists so a pathological input cannot spin, and reaching it is
+ * treated as a failure to sanitise rather than as success.
+ */
+const MAX_NEUTRALISE_PASSES = 8;
 
 export interface WrapOptions {
   /** Payload cap. Truncation is stated in the header, never hidden. */
@@ -165,6 +188,32 @@ function countOccurrences(haystack: string, needle: string): number {
  * hide characters from a reader. Every edit is counted so the caller can report it -
  * silent rewriting would hide the attack from the user as effectively as ignoring it.
  */
+/**
+ * Make an externally-influenced *field* safe to place inline in the prompt.
+ *
+ * Wrapping suits a block of retrieved content. It does not suit a device name or a
+ * status line, which have to read as the one-line values they are — and those were the
+ * fields nobody wrapped, so they went into the system prompt verbatim. A device name is
+ * chosen by whoever enrols; an optimizer status line comes from a separate subsystem
+ * over HTTP. Neither is Vesper's own voice, and both sat in the position that is.
+ *
+ * Three things happen here, and the second is the one that matters most: line breaks
+ * are collapsed. A single-line field that can introduce a newline can start what looks
+ * like a fresh directive line in Vesper's own instructions, which is exactly how the
+ * reproduction worked.
+ */
+export function sanitiseInline(value: string, maxChars = 240): string {
+  const { text } = neutralisePayload(value, "");
+  const flattened = text
+    .replace(/[\r\n\u2028\u2029]+/g, " ")
+    // A field rendered inside quotes must not be able to close them and speak outside.
+    .replace(/["\u201C\u201D]/g, "'")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  if (flattened.length <= maxChars) return flattened;
+  return `${flattened.slice(0, maxChars)}…`;
+}
+
 export function neutralisePayload(
   content: string,
   nonce: string,
@@ -174,32 +223,76 @@ export function neutralisePayload(
     if (count > 0) edits.push({ kind, count });
   };
 
+  let text = content;
   let boundary = 0;
-  let text = content.replace(SENTINEL_LOOKALIKE, () => {
-    boundary += 1;
-    return ESCAPE_MARKER;
-  });
-  record("boundary", boundary);
+  let nonces = 0;
+  let tokens = 0;
+  let invisible = 0;
+  let bidi = 0;
+  let controls = 0;
 
-  const nonceHits = countOccurrences(text, nonce);
-  if (nonceHits > 0) {
-    text = text.split(nonce).join(ESCAPE_MARKER);
-    record("nonce", nonceHits);
+  // Strip before escaping, then repeat until nothing changes.
+  //
+  // The original order escaped first and stripped afterwards. Both strip passes are
+  // deletions, so they could *create* the very substrings the escape passes existed to
+  // remove: one zero-width character in the middle of a word meant SENTINEL_LOOKALIKE
+  // and CONTROL_TOKEN never matched, and the later deletion reassembled a literal
+  // `<|im_start|>` or a complete END marker. Escaping what you have not yet normalised
+  // is escaping the wrong string.
+  //
+  // Looping to a fixed point is the general form of that lesson. One ordered pass is
+  // only correct if no transformation can ever feed another, which is an assumption
+  // this module already got wrong once; iterating removes the need to be right about it.
+  //
+  // Honest note: with today's transformations the loop always converges on the first
+  // pass, and no test fails if the bound is cut to one — strip-before-escape is what
+  // actually fixes the reported defect. The loop is insurance for the next
+  // transformation somebody adds in the wrong order, and it is recorded as unexercised
+  // rather than presented as load-bearing.
+  for (let pass = 0; pass < MAX_NEUTRALISE_PASSES; pass += 1) {
+    const before = text;
+
+    const invisibleHits = text.match(INVISIBLE)?.length ?? 0;
+    if (invisibleHits > 0) {
+      // Stripped as one category, reported as two. "Text was reordered" and "text was
+      // hidden" are different claims about what an author was doing, and collapsing them
+      // would cost the reader the distinction for no gain.
+      const bidiHits = text.match(BIDI_CONTROL)?.length ?? 0;
+      bidi += bidiHits;
+      invisible += invisibleHits - bidiHits;
+      text = text.replace(INVISIBLE, "");
+    }
+    const controlHits = text.match(CONTROL_CHAR)?.length ?? 0;
+    if (controlHits > 0) {
+      controls += controlHits;
+      text = text.replace(CONTROL_CHAR, " ");
+    }
+
+    text = text.replace(SENTINEL_LOOKALIKE, () => {
+      boundary += 1;
+      return ESCAPE_MARKER;
+    });
+    if (nonce) {
+      const hits = countOccurrences(text, nonce);
+      if (hits > 0) {
+        nonces += hits;
+        text = text.split(nonce).join(ESCAPE_MARKER);
+      }
+    }
+    text = text.replace(CONTROL_TOKEN, () => {
+      tokens += 1;
+      return ESCAPE_MARKER;
+    });
+
+    if (text === before) break;
   }
 
-  let tokens = 0;
-  text = text.replace(CONTROL_TOKEN, () => {
-    tokens += 1;
-    return ESCAPE_MARKER;
-  });
+  record("boundary", boundary);
+  record("nonce", nonces);
   record("control-token", tokens);
-
-  record("zero-width", text.match(ZERO_WIDTH)?.length ?? 0);
-  text = text.replace(ZERO_WIDTH, "");
-  record("bidi", text.match(BIDI_CONTROL)?.length ?? 0);
-  text = text.replace(BIDI_CONTROL, "");
-  record("control-char", text.match(CONTROL_CHAR)?.length ?? 0);
-  text = text.replace(CONTROL_CHAR, " ");
+  record("zero-width", invisible);
+  record("bidi", bidi);
+  record("control-char", controls);
 
   return { text, edits };
 }
@@ -212,13 +305,12 @@ export function neutralisePayload(
  */
 function sanitiseLabel(value: string | undefined, limit = 120): string | undefined {
   if (typeof value !== "string") return undefined;
-  const flat = value
-    .replace(SENTINEL_LOOKALIKE, ESCAPE_MARKER)
-    .replace(CONTROL_TOKEN, ESCAPE_MARKER)
-    .replace(ZERO_WIDTH, "")
-    .replace(BIDI_CONTROL, "")
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(CONTROL_CHAR, " ")
+  // Same ordering rule as the payload path, and for the same reason: strip what is
+  // invisible before escaping what is dangerous, or the strip pass reassembles it.
+  // A header field is Vesper's own voice describing where content came from, so a
+  // filename that reads like a directive must not be able to become one.
+  const flat = neutralisePayload(value, "")
+    .text.replace(/[\r\n\t]+/g, " ")
     .trim();
   if (!flat) return undefined;
   return flat.length > limit ? `${flat.slice(0, limit)}...` : flat;
@@ -359,20 +451,56 @@ const CONFUSABLE_PATTERN = new RegExp(`[${Object.keys(CONFUSABLES).join("")}]`, 
  * Turning a whitespace escape into a space can only separate tokens, never join them,
  * so it cannot manufacture a phrase - only reveal one. `\uXXXX` is decoded for the same
  * reason base64 is: spelling a directive that way is an attacker's construct.
+ *
+ * **Every** JSON escape, not a chosen few. The list was `\n \r \t`, which left exactly
+ * the escapes JSON.stringify produces for U+0008, U+000C and U+0000 — `\b`, `\f` and
+ * `\u0000` — invisible to the screener while the raw path stripped them. One backspace
+ * between two words of a directive took a payload from 79/high (refused, withheld, event
+ * emitted, user told) to 36/medium (delivered to the model, no event at all), because
+ * the agent screens the JSON *encoding* of a tool result rather than the result.
+ *
+ * A parser differential is not a scoring bug: it is one component deciding on a
+ * different string than the one another component acts on. The rule here is that
+ * screening must see what the model will see.
  */
-function decodeStringEscapes(text: string): string {
-  return text.replace(/\\[nrt]/g, " ").replace(/\\u([0-9a-fA-F]{4})/g, (whole, hex: string) => {
-    const code = Number.parseInt(hex, 16);
-    return code > 0 ? String.fromCharCode(code) : whole;
-  });
+function decodeStringEscapes(text: string, control: ControlStrategy = "separate"): string {
+  // The escape stands for the character, so it must be treated as the character — under
+  // the same strategy. Decoding `\b` to a space unconditionally made the "close" reading
+  // unreachable on the JSON path, which is the only path a tool result takes.
+  const replacement = control === "close" ? "" : " ";
+  return text
+    // \b \f \n \r \t — every JSON escape that denotes whitespace or a control code.
+    .replace(/\\[nrtbf]/g, replacement)
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_whole, hex: string) => {
+      const code = Number.parseInt(hex, 16);
+      // No `code > 0` guard: \u0000 is exactly the escape JSON.stringify writes for NUL,
+      // and leaving it as literal text was the third of the three blind spots.
+      return code === 0 || code < 0x20 || code === 0x7f
+        ? replacement
+        : String.fromCharCode(code);
+    });
 }
 
-function normaliseForScreening(text: string): string {
-  return decodeStringEscapes(text)
+/**
+ * What to do with a control character: separate the words around it, or close the gap.
+ *
+ * Both readings are needed and neither is right on its own. `Ignore\ball\bprevious`
+ * only reveals its phrase if each control character becomes a space; `Ig\bnore all
+ * previous` only reveals it if the character is removed. An attacker picks whichever the
+ * screener does not do, so the screener does both — see `screenForInjection`, which
+ * scores each and keeps the worse verdict.
+ */
+type ControlStrategy = "separate" | "close";
+
+function normaliseForScreening(text: string, control: ControlStrategy = "separate"): string {
+  return decodeStringEscapes(text, control)
     .normalize("NFKC")
-    .replace(ZERO_WIDTH, "")
-    .replace(BIDI_CONTROL, "")
-    .replace(CONTROL_CHAR, " ")
+    .replace(INVISIBLE, "")
+    // The screener may strip more than the payload path does: it only decides what to
+    // report, never what the model is shown, so a combining mark used to break a word
+    // boundary should not also break detection.
+    .replace(COMBINING_MARK, "")
+    .replace(CONTROL_CHAR, control === "close" ? "" : " ")
     .toLowerCase()
     .replace(CONFUSABLE_PATTERN, (char) => CONFUSABLES[char] ?? char)
     .replace(/\r\n?/g, "\n")
@@ -793,7 +921,7 @@ function collectPatternSignals(
 /** Invisible characters are reported even when nothing decodes to a directive. */
 function obfuscationSignals(raw: string, factor: number): InjectionSignal[] {
   const signals: InjectionSignal[] = [];
-  const zeroWidth = raw.match(ZERO_WIDTH)?.length ?? 0;
+  const zeroWidth = raw.match(INVISIBLE)?.length ?? 0;
   const bidi = raw.match(BIDI_CONTROL)?.length ?? 0;
   const discounts = factor < 1 ? ["explanatory register"] : [];
   if (zeroWidth >= 3) {
@@ -881,6 +1009,28 @@ export function screenForInjection(
   content: string,
   options: ScreenOptions = {},
 ): InjectionVerdict {
+  // Screened twice, once for each reading of a control character, keeping the worse
+  // verdict. A single control character placed *inside* a word ("Ig\bnore") defeats a
+  // screener that separates; one placed *between* words ("all\bprevious") defeats one
+  // that closes the gap. Scoring both costs a second pass over at most `maxScan`
+  // characters and removes the choice from the attacker.
+  //
+  // Only when there is something to disagree about: the second pass is skipped entirely
+  // unless the content actually contains a control character or an escape for one.
+  const first = screenOnce(content, options, "separate");
+  if (!HAS_CONTROL.test(typeof content === "string" ? content : "")) return first;
+  const second = screenOnce(content, options, "close");
+  return second.score > first.score ? second : first;
+}
+
+/** Every C0/C1-ish control character, and the JSON escapes that denote one. */
+const HAS_CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]|\\[nrtbf]|\\u00[01][0-9a-fA-F]/;
+
+function screenOnce(
+  content: string,
+  options: ScreenOptions,
+  control: ControlStrategy,
+): InjectionVerdict {
   const raw = typeof content === "string" ? content : String(content ?? "");
   const budget = Math.max(1_000, options.maxScan ?? DEFAULT_MAX_SCAN);
   // Head and tail. A payload appended after a long legitimate document is the common
@@ -890,7 +1040,7 @@ export function screenForInjection(
       ? raw
       : `${raw.slice(0, Math.floor(budget * 0.7))}\n${raw.slice(-Math.floor(budget * 0.3))}`;
 
-  const normalised = normaliseForScreening(scanned);
+  const normalised = normaliseForScreening(scanned, control);
   const { factor, explanatory } = explanatoryFactor(normalised);
   const riskNames = new Set<string>([
     ...VESPER_HIGH_RISK_TOOLS,
@@ -905,7 +1055,7 @@ export function screenForInjection(
       mask: buildQuotedMask(normalised),
       // Escape-decoded, so the `unicode` layer means genuine confusable or invisible
       // obfuscation and never a JSON newline that merely restored a word boundary.
-      rawLower: decodeStringEscapes(scanned).toLowerCase(),
+      rawLower: decodeStringEscapes(scanned, control).toLowerCase(),
       factor,
       bonus: 1,
       riskNames,
@@ -915,7 +1065,7 @@ export function screenForInjection(
 
   for (const blob of decodeEmbedded(scanned)) {
     collectPatternSignals(
-      normaliseForScreening(blob.text),
+      normaliseForScreening(blob.text, control),
       { layer: blob.layer, mask: null, rawLower: null, factor, bonus: ENCODED_BONUS, riskNames },
       signals,
     );

@@ -2,7 +2,10 @@ import { createId, nowIso } from "./id.ts";
 import type { Logger } from "./logging.ts";
 import type { MemoryStore } from "./memory/store.ts";
 import { attribute } from "./memory/scopes.ts";
-import type { RequestOrigin } from "./tools/remote.ts";
+import { decideRemoteToolRequest, type RequestOrigin } from "./tools/remote.ts";
+import type { TrustState } from "./distributed/identity.ts";
+import { capScopesForTrust, type ClientScope } from "./client/protocol.ts";
+import type { CapabilityManifest } from "./distributed/capabilities.ts";
 import type { KnowledgeIndex } from "./knowledge/rag.ts";
 import type { ModelRouter } from "./models/router.ts";
 import type { NotificationHub } from "./notifications.ts";
@@ -16,6 +19,7 @@ import { formatWorkloadContext, inspectWorkload } from "./specialists/context.ts
 import { MEMORY_CATEGORIES } from "./types.ts";
 import {
   decideUntrusted,
+  sanitiseInline,
   type UntrustedPolicyOptions,
   type UntrustedProvenance,
 } from "./untrusted.ts";
@@ -46,6 +50,14 @@ interface AgentDeps {
    * claim which device a fact belongs to rather than guessing.
    */
   deviceId?: string;
+  /**
+   * Resolve a device's trust *now*. A confirmation can outlive the turn that queued it
+   * and even the process, so its record stores who asked, never what they were allowed
+   * — authority is re-read at the moment it is exercised.
+   */
+  deviceTrust?: (deviceId: string) => Promise<TrustState>;
+  /** This device's capability manifest, for deciding what a peer may ask of it. */
+  selfManifest?: () => Promise<CapabilityManifest | null>;
   models: ModelRouter;
   tools: ToolRegistry;
   workspaces: WorkspaceManager;
@@ -183,6 +195,45 @@ const READY_APPS: Record<string, string[]> = {
   development: ["vscode"],
 };
 
+/**
+ * The widest a single round of tool calls may be.
+ *
+ * Eight is already more than any legitimate turn needs — the model gets another round if
+ * it needs one. See the truncation site in `handle` for why a bound exists at all.
+ */
+export const MAX_TOOL_CALLS_PER_ROUND = 8;
+
+/**
+ * A turn that failed after doing some of its work.
+ *
+ * The tool records accumulated inside a turn were local to it and went out with the
+ * exception, so the runtime's recovery synthesised a turn asserting `could_not_access`
+ * with zero tool calls — while a memory write had really happened, the owner's workspace
+ * had really been switched, and a confirmation was really sitting in the live queue.
+ * The record said nothing happened; the machine disagreed.
+ *
+ * Carrying the partial records out with the error is what lets the recovery say what did
+ * happen. It mirrors `cancelledTurn`, which already reports the tools that ran before a
+ * cancellation.
+ */
+export class TurnFailure extends Error {
+  readonly toolCalls: ToolCallRecord[];
+  constructor(cause: unknown, toolCalls: ToolCallRecord[]) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "TurnFailure";
+    this.cause = cause;
+    this.toolCalls = toolCalls;
+  }
+}
+
+/**
+ * The most of a message that is used as a retrieval query.
+ *
+ * Retrieval ranks stored items by similarity to what was asked; the first two thousand
+ * characters carry the question. Beyond that the extra tokens add cost, not relevance.
+ */
+export const MAX_RETRIEVAL_QUERY_CHARS = 2000;
+
 export class Agent {
   private readonly deps: AgentDeps;
   /**
@@ -248,11 +299,31 @@ export class Agent {
       origin?: RequestOrigin;
     },
   ): Promise<AgentTurn> {
+    // The accumulator lives out here so a throw from anywhere inside the turn still
+    // carries what already ran. See TurnFailure.
+    const toolCalls: ToolCallRecord[] = [];
+    try {
+      return await this.runTurn(userText, toolCalls, options);
+    } catch (error) {
+      throw error instanceof TurnFailure ? error : new TurnFailure(error, toolCalls);
+    }
+  }
+
+  private async runTurn(
+    userText: string,
+    toolCalls: ToolCallRecord[],
+    options?: {
+      confirmId?: string;
+      approve?: boolean;
+      signal?: AbortSignal;
+      onDelta?: (delta: string) => void;
+      origin?: RequestOrigin;
+    },
+  ): Promise<AgentTurn> {
     const at = nowIso();
     const origin = options?.origin;
     const workspace = this.deps.workspaces.current();
     const epistemic: EpistemicTag[] = [];
-    const toolCalls: ToolCallRecord[] = [];
     const pending: PendingConfirmation[] = [];
     const notes = [];
 
@@ -261,8 +332,8 @@ export class Agent {
       if (!confirmation) {
         return this.turn(userText, "That confirmation is no longer pending.", ["could_not_access"], [], [], at);
       }
-      this.deps.confirmations.delete(options.confirmId);
       if (options.approve === false) {
+        this.deps.confirmations.delete(options.confirmId);
         this.deps.log.info("permission", "User denied confirmation", { id: options.confirmId });
         return this.turn(
           userText,
@@ -273,17 +344,61 @@ export class Agent {
           at,
         );
       }
+
+      // An approval can never grant more authority than the request carried. Checked
+      // here as well as at queue time because a confirmation outlives the turn that
+      // created it: a record restored from disk is not a live origin, and treating a
+      // stored "local" as proof of local authority would make the queue file a way to
+      // ask for anything.
+      // Both sides are checked, because an approval is a second exercise of authority
+      // rather than a rubber stamp on the first: the request cannot carry more than the
+      // asker held, and it cannot gain more from whoever approves it.
+      const requester = await this.resolveOrigin(confirmation.requestedBy);
+      const approver = origin ?? { kind: "local" as const };
+      const checks = [
+        decideRemoteToolRequest({ toolName: confirmation.toolName, origin: requester }),
+        decideRemoteToolRequest({ toolName: confirmation.toolName, origin: approver }),
+      ];
+      const allowedForRequester = checks.find((check) => !check.allowed) ?? checks[0];
+      if (!allowedForRequester.allowed) {
+        // Deliberately not consumed. A refusal on authority grounds must not destroy a
+        // confirmation the owner may still legitimately approve at the machine —
+        // otherwise anyone who can attempt an approval can cancel one.
+        this.deps.log.warn("permission", allowedForRequester.reason, {
+          tool: confirmation.toolName,
+          id: options.confirmId,
+        });
+        return this.turn(
+          userText,
+          `I did not run ${confirmation.toolName}. ${allowedForRequester.reason} It is still waiting for approval here.`,
+          ["could_not_access"],
+          [],
+          [confirmation],
+          at,
+        );
+      }
+
       const record = await this.deps.tools.invoke({
-        origin,
+        origin: approver,
         name: confirmation.toolName,
         args: confirmation.args,
         workspaceId: confirmation.workspaceId,
         confirmed: true,
       });
       toolCalls.push(record);
+      // Authorized and attempted, so it is spent — whether the tool then succeeded or
+      // failed on its own terms. Only an authority refusal above leaves it pending.
+      this.deps.confirmations.delete(options.confirmId);
+      const subsystem = this.subsystemFor(confirmation.toolName);
       const reply = record.result?.ok
-        ? record.result.summary
-        : `I could not complete ${confirmation.toolName}: ${record.result?.summary ?? record.decision.reason}`;
+        ? subsystem
+          ? this.quoteSubsystem(record.result.summary, subsystem)
+          : record.result.summary
+        : `I could not complete ${confirmation.toolName}: ${
+            subsystem
+              ? this.quoteSubsystem(record.result?.summary, subsystem) || record.decision.reason
+              : (record.result?.summary ?? record.decision.reason)
+          }`;
       return this.turn(
         userText,
         reply,
@@ -304,13 +419,34 @@ export class Agent {
       return direct;
     }
 
-    const memories = await this.deps.memory.search(userText, { workspaceId: workspace.id, limit: 6 });
+    // Retrieval is a channel in its own right. A remote session that may not *call*
+    // memory_search must not have the same records handed to a model it is talking to —
+    // the tool gate would otherwise be the front door on a building with no back wall.
+    const mayRead = (scope: ClientScope): boolean =>
+      !origin || origin.kind !== "remote" || (origin.scopes ?? []).includes(scope);
+    const memoryWithheld = !mayRead("memory.read");
+    const knowledgeWithheld = !mayRead("knowledge.read");
+
+    // Retrieval is a relevance heuristic, so it does not need the whole message — and
+    // giving it the whole message makes its cost the sender's choice. Both stores score
+    // every stored item against every query token, so an unbounded query is unbounded
+    // work on a single-threaded host. The gateway refuses very long messages outright;
+    // this bounds the local path too, where there is no gateway to refuse anything.
+    const retrievalQuery = userText.length > MAX_RETRIEVAL_QUERY_CHARS
+      ? userText.slice(0, MAX_RETRIEVAL_QUERY_CHARS)
+      : userText;
+
+    const memories = memoryWithheld
+      ? []
+      : await this.deps.memory.search(retrievalQuery, { workspaceId: workspace.id, limit: 6 });
     // Awaitable retrieval so a model-backed embedder can actually influence ranking;
     // it falls back to lexical scoring when no embedding backend is reachable.
-    const knowledge = await this.deps.knowledge.searchAsync(userText, {
-      workspaceId: workspace.id,
-      limit: 4,
-    });
+    const knowledge = knowledgeWithheld
+      ? []
+      : await this.deps.knowledge.searchAsync(retrievalQuery, {
+          workspaceId: workspace.id,
+          limit: 4,
+        });
     const snapshot = this.deps.hardware.snapshot();
     const optimizer = await this.deps.optimizer.getStatus().catch(() => null);
 
@@ -318,15 +454,26 @@ export class Agent {
     const system = [
       VESPER_SYSTEM_PROMPT,
       nowContext,
-      `Active workspace: ${workspace.name} (${workspace.id}). ${workspace.description}`,
-      `Hardware mode: ${snapshot.mode}. ${snapshot.notes.join(" ")}`,
+      `Active workspace: ${sanitiseInline(workspace.name, 60)} (${workspace.id}). ${sanitiseInline(workspace.description)}`,
+      `Hardware mode: ${snapshot.mode}. ${sanitiseInline(snapshot.notes.join(" "))}`,
       `CPU: ${snapshot.cpu.name} ${snapshot.cpu.utilizationPct}% ${snapshot.cpu.tempC ?? "n/a"}°C`,
       snapshot.gpu
         ? `GPU: ${snapshot.gpu.name} ${snapshot.gpu.utilizationPct}% ${snapshot.gpu.tempC ?? "n/a"}°C VRAM ${snapshot.gpu.vramUsedGB}/${snapshot.gpu.vramGB} GB`
         : "GPU: unavailable",
       `RAM: ${snapshot.ram.usedGB}/${snapshot.ram.totalGB} GB`,
       optimizer
-        ? `Optimizer: ${optimizer.available ? optimizer.detail : "unavailable"}. Profile ${optimizer.currentProfile ?? "n/a"}.`
+        ? // The optimizer is a separate subsystem reached over HTTP, so its status text
+          // is free-form output from another program. Vesper's own words here are the
+          // profile and the availability; the subsystem's words get the same envelope as
+          // any other external content rather than a place in Vesper's voice.
+          [
+            `Optimizer profile ${sanitiseInline(optimizer.currentProfile ?? "n/a", 40)}, ${optimizer.available ? "available" : "unavailable"}.`,
+            optimizer.available && optimizer.detail
+              ? `Status reported by the optimizer:\n${this.screenUntrusted(optimizer.detail, { source: "tool", origin: "optimizer" }, { maxChars: 1_000 })}`
+              : "",
+          ]
+            .filter(Boolean)
+            .join("\n")
         : "Optimizer: could not query.",
       memories.length
         ? `Relevant memory:\n${
@@ -341,7 +488,9 @@ export class Agent {
               { maxChars: MAX_RETRIEVAL_CHARS },
             )
           }`
-        : "No relevant memory hits.",
+        : memoryWithheld
+          ? "Stored memory is not readable by this session. Say it is unavailable rather than guessing at it."
+          : "No relevant memory hits.",
       knowledge.length
         ? `Knowledge hits:\n${
             this.screenUntrusted(
@@ -350,7 +499,9 @@ export class Agent {
               { maxChars: MAX_RETRIEVAL_CHARS },
             )
           }`
-        : "",
+        : knowledgeWithheld
+          ? "Indexed documents are not readable by this session. Say so rather than guessing at them."
+          : "",
     ]
       .filter(Boolean)
       .join("\n");
@@ -406,6 +557,23 @@ export class Agent {
     let repeated: string | null = null;
     while (completion.toolCalls.length && iterations < this.deps.maxToolIterations) {
       iterations += 1;
+      // How many tool calls one round may contain.
+      //
+      // `maxToolIterations` bounds the number of *rounds*, and nothing bounded the width
+      // of a round, so a steered model multiplied its own reach by asking for hundreds of
+      // calls at once. A model asking for more than this in a single round is either
+      // malfunctioning or hostile; the extras are dropped and the model is told so on the
+      // next round rather than silently.
+      if (completion.toolCalls.length > MAX_TOOL_CALLS_PER_ROUND) {
+        this.deps.log.warn("tool", "Truncated an oversized tool-call round", {
+          asked: completion.toolCalls.length,
+          kept: MAX_TOOL_CALLS_PER_ROUND,
+        });
+        completion = {
+          ...completion,
+          toolCalls: completion.toolCalls.slice(0, MAX_TOOL_CALLS_PER_ROUND),
+        };
+      }
       const signature = completion.toolCalls
         .map((call) => `${call.name}:${JSON.stringify(call.arguments ?? {})}`)
         .sort()
@@ -426,9 +594,12 @@ export class Agent {
         });
         toolCalls.push(record);
         if (record.decision.requiresConfirmation && !record.result) {
-          const queued = [...this.deps.confirmations.values()].find(
-            (item) => item.toolName === call.name,
-          );
+          // Exactly the confirmation this call produced. Searching the queue by tool
+          // name surfaced whichever one happened to be first, so the prompt could
+          // describe one action while approving another.
+          const queued = record.confirmationId
+            ? this.deps.confirmations.get(record.confirmationId)
+            : undefined;
           if (queued) pending.push(queued);
         }
         if (record.result?.epistemic) epistemic.push(record.result.epistemic);
@@ -563,7 +734,8 @@ export class Agent {
             ? `GPU ${snapshot.gpu.utilizationPct}%${snapshot.gpu.tempC != null ? ` at ${snapshot.gpu.tempC}°C` : ""}, VRAM ${snapshot.gpu.vramUsedGB}/${snapshot.gpu.vramGB} GB.`
             : "GPU telemetry unavailable.",
           ram: `RAM ${snapshot.ram.usedGB} of ${snapshot.ram.totalGB} GB.`,
-          optimizer: opt.result?.summary ?? "I could not access the optimizer.",
+          optimizer:
+            this.quoteSubsystem(opt.result?.summary, "The optimizer") || "I could not access the optimizer.",
           processes: running ? `Running: ${running}. ${formatWorkloadContext(context)}` : `No simulated user apps running. ${formatWorkloadContext(context)}`,
           events: recent ? `Recent: ${recent}.` : "",
         });
@@ -594,9 +766,11 @@ export class Agent {
       case "forget": {
         const record = await invoke("memory_forget", { key: intent.slots.key });
         if (record.decision.requiresConfirmation) {
-          const pending = [...this.deps.confirmations.values()].filter(
-            (item) => item.toolName === "memory_forget",
-          );
+          // The one this call queued, not every memory_forget anyone ever queued.
+          const queued = record.confirmationId
+            ? this.deps.confirmations.get(record.confirmationId)
+            : undefined;
+          const pending = queued ? [queued] : [];
           return this.turn(
             userText,
             `Forgetting '${intent.slots.key}' needs confirmation.`,
@@ -644,12 +818,14 @@ export class Agent {
           profile: intent.slots.profile || "",
         });
         if (request.decision.requiresConfirmation) {
-          const pending = [...this.deps.confirmations.values()].filter(
-            (item) => item.toolName === "optimizer_request",
-          );
+          // The one this call queued, not every optimizer_request anyone ever queued.
+          const queued = request.confirmationId
+            ? this.deps.confirmations.get(request.confirmationId)
+            : undefined;
+          const pending = queued ? [queued] : [];
           return this.turn(
             userText,
-            `${analysis.result?.summary ?? ""} I requested an optimizer action and need your confirmation.`.trim(),
+            `${this.quoteSubsystem(analysis.result?.summary, "The optimizer")} I requested an optimizer action and need your confirmation.`.trim(),
             ["requested"],
             toolCalls,
             pending,
@@ -658,7 +834,12 @@ export class Agent {
         }
         return this.turn(
           userText,
-          [analysis.result?.summary, request.result?.summary].filter(Boolean).join(" "),
+          [
+            this.quoteSubsystem(analysis.result?.summary, "The optimizer"),
+            this.quoteSubsystem(request.result?.summary, "The optimizer"),
+          ]
+            .filter(Boolean)
+            .join(" "),
           ["requested"],
           toolCalls,
           [],
@@ -717,7 +898,7 @@ export class Agent {
             ? `GPU ${gpu.name} is at ${gpu.utilizationPct}% (${gpu.vramUsedGB}/${gpu.vramGB} GB VRAM).`
             : "No GPU snapshot is available.",
           context.result?.summary ?? "",
-          analysis.result?.summary ?? "",
+          this.quoteSubsystem(analysis.result?.summary, "The optimizer"),
           "Live GPU-time attribution per process was not measured.",
         ]
           .filter(Boolean)
@@ -827,6 +1008,82 @@ export class Agent {
       });
     }
     return decision.text;
+  }
+
+  /**
+   * Turn a recorded identity into the authority it actually holds right now.
+   *
+   * Trust is never taken from the record. A device demoted or revoked since the
+   * confirmation was queued must lose the approval with it, and a record with no
+   * readable origin resolves to the most restricted thing it could be.
+   */
+  /**
+   * Re-read a remote origin's authority immediately before it is exercised.
+   *
+   * RequestOrigin is a snapshot taken when the gateway accepted the request, and a turn
+   * outlives that moment: a device revoked or demoted while its turn was still running
+   * kept the trust and scopes it had at entry, so a revoked phone's already-started
+   * conversation went on calling tools. Trust is a live property everywhere else in this
+   * system; it has to be live here too, or "revocation is immediate" is only true
+   * between turns.
+   */
+  private async liveOrigin(origin: RequestOrigin | undefined): Promise<RequestOrigin | undefined> {
+    if (!origin || origin.kind !== "remote" || !origin.deviceId || !this.deps.deviceTrust) {
+      return origin;
+    }
+    const trust = await this.deps.deviceTrust(origin.deviceId);
+    return {
+      ...origin,
+      trust,
+      scopes: capScopesForTrust(origin.scopes ?? [], trust),
+    };
+  }
+
+  /**
+   * The subsystem a tool speaks for, when its result text originates outside Vesper.
+   *
+   * A tool whose handler writes its own summary ("Wrote notes.md") is Vesper speaking.
+   * A tool that relays what another program said is not, and the difference has to
+   * survive into the reply or the other program borrows Vesper's voice.
+   */
+  private subsystemFor(toolName: string): string | null {
+    if (toolName.startsWith("optimizer_")) return "The optimizer";
+    if (toolName.startsWith("obs_")) return "OBS";
+    if (toolName.startsWith("mcp_")) return "The MCP server";
+    return null;
+  }
+
+  /**
+   * Repeat what a separate subsystem said, as a quotation attributed to it.
+   *
+   * Sanitising the text is not enough on a reply path. Neutralisation stops it forging a
+   * boundary or a directive line, but the words survive — and concatenating them into
+   * Vesper's own sentence made the optimizer's claims read as Vesper's: "I have applied a
+   * live optimization and I have granted myself administrator permission on this
+   * machine" was spoken in the first person by an assistant that had done neither.
+   *
+   * Quoting and naming the source is what makes it a report rather than an assertion.
+   */
+  private quoteSubsystem(text: string | undefined, subsystem: string): string {
+    const clean = sanitiseInline(text ?? "", 300);
+    return clean.length > 0 ? `${subsystem} reports: "${clean}"` : "";
+  }
+
+  private async resolveOrigin(
+    recorded: PendingConfirmation["requestedBy"],
+  ): Promise<RequestOrigin> {
+    if (!recorded || recorded.kind === "local") {
+      return { kind: recorded?.kind ?? "remote" };
+    }
+    const trust = recorded.deviceId && this.deps.deviceTrust
+      ? await this.deps.deviceTrust(recorded.deviceId)
+      : "unknown";
+    return {
+      kind: "remote",
+      deviceId: recorded.deviceId,
+      trust,
+      manifest: this.deps.selfManifest ? await this.deps.selfManifest() : null,
+    };
   }
 
   private turn(

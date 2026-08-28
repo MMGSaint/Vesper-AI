@@ -147,3 +147,226 @@ describe("a restricted device is capped by trust, not by a separate protocol", (
     assert.ok(after.includes("conversation"));
   });
 });
+
+describe("revocation is terminal, not merely guarded on one edge", () => {
+  it("refuses every transition out of revoked, not just the one to trusted", async () => {
+    // The direct edge revoked -> trusted was refused, and re-enrolment was refused, but
+    // revoked -> restricted -> trusted restored a device the owner had declared lost —
+    // sessions, scopes and all — while revokedAt sat on the record proving it had been
+    // revoked. A terminal state that can be left through an intermediate is not terminal.
+    for (const intermediate of ["restricted", "pending"] as const) {
+      const runtime = await testRuntime();
+      const phone = await peer("phone");
+      await runtime.devices.enrol(phone.publicIdentity());
+      await runtime.devices.setTrust(phone.deviceId, "trusted");
+      await runtime.devices.setTrust(phone.deviceId, "revoked");
+
+      const hop = await runtime.devices.setTrust(phone.deviceId, intermediate);
+      assert.equal(hop.ok, false, `revoked -> ${intermediate} was allowed`);
+
+      const restore = await runtime.devices.setTrust(phone.deviceId, "trusted");
+      assert.equal(restore.ok, false, `revoked -> ${intermediate} -> trusted restored the device`);
+
+      const record = await runtime.devices.get(phone.deviceId);
+      assert.equal(record?.trust, "revoked", "the device left the revoked state");
+      await runtime.stop();
+    }
+  });
+
+  it("a revoked device cannot open a session by any route", async () => {
+    const runtime = await testRuntime();
+    const gateway = new VesperClientGateway(runtime);
+    const phone = await peer("phone");
+    await runtime.devices.enrol(phone.publicIdentity());
+    await runtime.devices.setTrust(phone.deviceId, "trusted");
+    await runtime.devices.setTrust(phone.deviceId, "revoked");
+    await runtime.devices.setTrust(phone.deviceId, "restricted");
+
+    const session = await gateway.issueSession({ deviceId: phone.deviceId, deviceLabel: "phone" });
+    assert.ok("ok" in session && session.ok === false, "a revoked device opened a session");
+    await runtime.stop();
+  });
+
+  it("still allows forgetting a revoked device, the one deliberate way back", async () => {
+    // The control must narrow, not sever: revocation has to be undoable by an explicit
+    // act at the machine, or a mistyped device id is permanent.
+    const runtime = await testRuntime();
+    const phone = await peer("phone");
+    await runtime.devices.enrol(phone.publicIdentity());
+    await runtime.devices.setTrust(phone.deviceId, "revoked");
+
+    assert.equal(await runtime.devices.forget(phone.deviceId), true);
+    const reEnrolled = await runtime.devices.enrol(phone.publicIdentity());
+    assert.equal(reEnrolled.ok, true, "a forgotten device could not re-enrol");
+    assert.equal((await runtime.devices.get(phone.deviceId))?.trust, "pending");
+    await runtime.stop();
+  });
+});
+
+describe("the bearer token is the only authenticator, so it is compared exactly", () => {
+  /**
+   * A wrong token had no test anywhere.
+   *
+   * Every existing UNAUTHENTICATED assertion in this file and in gateway.test.ts is
+   * satisfied by a *different* mechanism: no token at all (the `if (!token)` guard), an
+   * unenrolled device (caught at issue time), a revoked device (caught by the registry
+   * re-check). Not one of them presented a wrong or truncated token to a live session,
+   * so the comparison itself — `safeEqual(item.token, token)` — was unexercised.
+   *
+   * Substituting `item.token.startsWith(token)`, which is the shape of any prefix or
+   * non-constant-time comparison slip, makes the token brute-forceable one character at
+   * a time and leaves the whole suite green. That is what this test is for.
+   */
+  async function liveSession(name = "phone") {
+    const runtime = await testRuntime();
+    const gateway = new VesperClientGateway(runtime);
+    const device = await peer(name);
+    await runtime.devices.enrol(device.publicIdentity());
+    await runtime.devices.setTrust(device.deviceId, "trusted");
+    const issued = await gateway.issueSession({ deviceId: device.deviceId, deviceLabel: name });
+    if ("ok" in issued) throw new Error(issued.detail);
+    return { runtime, gateway, token: issued.token };
+  }
+
+  it("refuses every near-miss token, including a prefix of the real one", async () => {
+    const { runtime, gateway, token } = await liveSession();
+    assert.ok(token.length > 8, "the token is too short for this test to mean anything");
+
+    const flipped = `${token.slice(0, -1)}${token.at(-1) === "a" ? "b" : "a"}`;
+    const wrong: [string, string][] = [
+      ["empty string", ""],
+      ["one character", token.slice(0, 1)],
+      ["a proper prefix", token.slice(0, token.length - 1)],
+      ["the token plus a character", `${token}x`],
+      ["one character flipped", flipped],
+      ["a prefix with the rest as whitespace", token.slice(0, 4).padEnd(token.length, " ")],
+      ["an unrelated token", "NOT-THE-TOKEN"],
+    ];
+    for (const [label, candidate] of wrong) {
+      const result = await gateway.status(candidate);
+      assert.ok("ok" in result && result.ok === false, `${label} authenticated`);
+      assert.equal(result.code, "UNAUTHENTICATED", `${label} failed for the wrong reason`);
+    }
+
+    // Narrowing, not severing: the real token must still work, in this same test, or a
+    // comparison that refused everything would pass the loop above.
+    const good = await gateway.status(token);
+    assert.equal("ok" in good, false, "the correct token stopped working");
+    await runtime.stop();
+  });
+
+  it("does not accept one device's token on another device's session", async () => {
+    const first = await liveSession("phone-a");
+    const second = await liveSession("phone-b");
+    const crossed = await first.gateway.status(second.token);
+    assert.ok("ok" in crossed && crossed.ok === false, "a token from another host authenticated");
+    assert.equal(crossed.code, "UNAUTHENTICATED");
+    await first.runtime.stop();
+    await second.runtime.stop();
+  });
+});
+
+describe("revocation outlives the file the registry lives in", () => {
+  /**
+   * Revocation is documented as terminal — `forget` is the one deliberate way back — but
+   * that guarantee lived entirely in one record, inside one value, inside one file. A
+   * corrupt or unreadable `devices.registry` cost the *record*, and `enrol` then had
+   * nothing to refuse: a device the owner had declared lost re-enrolled as `pending` and
+   * could be trusted again.
+   *
+   * No attacker is required to trigger it — a truncated write or a full disk does — but
+   * an attacker who can cause one gets a revoked device back. An I/O error is not an
+   * authorization decision, so the revocation list is a separate store that the registry
+   * consults before its own records.
+   */
+  async function revokedDeviceAcross(options: { shareStorage: boolean }) {
+    const { MemoryStorage } = await import("../storage.ts");
+    const { DeviceRegistry } = await import("../distributed/registry.ts");
+    const registryStore = new MemoryStorage();
+    const revocationStore = options.shareStorage ? registryStore : new MemoryStorage();
+    const self = (await peer("host")).publicIdentity();
+    const phone = (await peer("phone")).publicIdentity();
+
+    const first = new DeviceRegistry({
+      storage: registryStore,
+      revocations: revocationStore,
+      self,
+    });
+    await first.enrol(phone);
+    await first.setTrust(phone.deviceId, "trusted");
+    const revoked = await first.setTrust(phone.deviceId, "revoked");
+    assert.equal(revoked.ok, true, revoked.reason);
+
+    // The registry's own store is destroyed, exactly as a truncated state file does.
+    await registryStore.set("devices.registry", "not-an-array" as never);
+
+    const second = new DeviceRegistry({
+      storage: registryStore,
+      revocations: revocationStore,
+      self,
+    });
+    return { second, phone };
+  }
+
+  it("refuses to re-enrol a revoked device after its registry record is destroyed", async () => {
+    const { second, phone } = await revokedDeviceAcross({ shareStorage: false });
+    assert.equal(
+      (await second.get(phone.deviceId))?.trust,
+      undefined,
+      "the record survived, so this does not test what it claims",
+    );
+    const again = await second.enrol(phone);
+    assert.equal(again.ok, false, "a revoked device re-enrolled after its record was lost");
+    assert.match(again.reason ?? "", /revoked and cannot re-enrol/);
+  });
+
+  it("cannot be trusted back into service either", async () => {
+    const { second, phone } = await revokedDeviceAcross({ shareStorage: false });
+    await second.enrol(phone);
+    const promoted = await second.setTrust(phone.deviceId, "trusted");
+    assert.equal(promoted.ok, false, "a revoked device was promoted after a registry loss");
+  });
+
+  it("still lets forget be the one deliberate way back, even with no record left", async () => {
+    // Narrowing, not severing. `forget` has to work on the state a corrupt registry
+    // leaves behind, which is a revocation entry with no record beside it.
+    const { second, phone } = await revokedDeviceAcross({ shareStorage: false });
+    assert.equal(await second.forget(phone.deviceId), true, "forget found nothing to do");
+    const back = await second.enrol(phone);
+    assert.equal(back.ok, true, `a forgotten device could not re-enrol: ${back.reason}`);
+    assert.equal(back.record?.trust, "pending", "it came back as something other than pending");
+  });
+
+  it("re-applies the revocation to a record that survived as trusted", async () => {
+    // The other direction: a state file restored from a backup taken before the
+    // revocation, or written mid-revoke. The list wins over the record.
+    const { MemoryStorage } = await import("../storage.ts");
+    const { DeviceRegistry } = await import("../distributed/registry.ts");
+    const registryStore = new MemoryStorage();
+    const revocationStore = new MemoryStorage();
+    const self = (await peer("host")).publicIdentity();
+    const phone = (await peer("phone")).publicIdentity();
+
+    const first = new DeviceRegistry({ storage: registryStore, revocations: revocationStore, self });
+    await first.enrol(phone);
+    await first.setTrust(phone.deviceId, "trusted");
+    await first.setTrust(phone.deviceId, "revoked");
+
+    // The registry is rolled back to a moment when the device was still trusted.
+    const stale = [
+      {
+        identity: phone,
+        trust: "trusted",
+        presence: { reachability: "offline", activity: "unknown", lastSeen: null },
+        capabilities: null,
+        enrolledAt: new Date().toISOString(),
+        revokedAt: null,
+      },
+    ];
+    await registryStore.set("devices.registry", stale as never);
+
+    const second = new DeviceRegistry({ storage: registryStore, revocations: revocationStore, self });
+    const record = await second.get(phone.deviceId);
+    assert.equal(record?.trust, "revoked", "a rolled-back registry restored a revoked device");
+  });
+});

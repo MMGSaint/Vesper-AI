@@ -2,6 +2,7 @@ import type { SimulatedHardware } from "../hardware/simulated.ts";
 import { isolateFailure, sleep } from "../recover.ts";
 import { isRedirect, linkAbort, NO_REDIRECT } from "../models/http.ts";
 import { checkLocalEndpoint } from "../net.ts";
+import { sanitiseInline } from "../untrusted.ts";
 import type { Logger } from "../logging.ts";
 import type {
   HardwareSnapshot,
@@ -367,7 +368,9 @@ export function createHttpOptimizerAdapter(
     async getStatus() {
       const result = await callGet("/status");
       if (!result.ok) return unavailableStatus(result.error);
-      const parsed = parseStatus(result.data);
+      // "live" is what this adapter *is*: it was constructed because the configuration
+      // named a live endpoint, and it is issuing real HTTP requests to it.
+      const parsed = parseStatus(result.data, "live");
       if (!parsed) {
         log?.warn("optimizer", "Malformed optimizer status", {});
         return unavailableStatus("Malformed optimizer status response.");
@@ -522,18 +525,61 @@ function asObject(value: unknown): JsonObject | null {
   return value as JsonObject;
 }
 
-function parseStatus(value: unknown): OptimizerStatus | null {
+/**
+ * Every string the optimizer sends, made safe to repeat.
+ *
+ * Sanitised here, at the boundary where the response is parsed, rather than at each
+ * place a reply is composed. The system-prompt and tool-result routes were already
+ * screened, but every *deterministic* reply path — the status composer, the analysis
+ * summary, the confirmation text — read these fields straight out of the parsed status
+ * and concatenated them into what Vesper says in its own voice. Patching those one at a
+ * time would leave the next one to be written unprotected; sanitising on the way in
+ * means a consumer cannot forget.
+ *
+ * The optimizer is a separate subsystem reached over HTTP. Its text is data.
+ */
+function safeText(value: unknown, max = 240): string | null {
+  if (typeof value !== "string") return null;
+  const clean = sanitiseInline(value, max);
+  return clean.length > 0 ? clean : null;
+}
+
+/** The same, where the caller has a sensible default and the field is not nullable. */
+function safeTextOr(value: unknown, fallback: string, max = 240): string {
+  return safeText(value, max) ?? fallback;
+}
+
+/**
+ * Read a status body. `mode` is deliberately **not** taken from it.
+ *
+ * `mode` is Vesper's own provenance label for which adapter is in use — the LIVE /
+ * SIMULATED / MOCKED distinction the product promises the user — and Vesper knows the
+ * answer locally: `config.optimizer.mode === "live" && endpoint` is what selected the
+ * HTTP adapter in the first place. It was being taken from the response body, so an
+ * endpoint could answer `mode: "mock"`, and `detail: "No live optimization was
+ * performed"`, while `POST /optimize` was genuinely issued to it. Vesper's status, its
+ * health report, and its own honesty classification in diagnostics all repeated the
+ * claim.
+ *
+ * That is a subsystem's assertion being accepted as attestation about Vesper itself. The
+ * caller supplies the mode; the endpoint's own claim is kept as `reportedMode` for the
+ * one place it is worth showing — a disagreement between the two is worth surfacing —
+ * and no honesty label reads it.
+ */
+function parseStatus(value: unknown, mode: OptimizerStatus["mode"]): OptimizerStatus | null {
   const obj = asObject(value);
   if (!obj || typeof obj.available !== "boolean") return null;
-  const mode = obj.mode === "live" || obj.mode === "mock" || obj.mode === "unavailable" ? obj.mode : "unavailable";
+  const reportedMode =
+    obj.mode === "live" || obj.mode === "mock" || obj.mode === "unavailable" ? obj.mode : null;
   return {
     available: obj.available,
-    mode,
-    currentProfile: typeof obj.currentProfile === "string" ? obj.currentProfile : null,
-    lastAction: typeof obj.lastAction === "string" ? obj.lastAction : null,
-    lastResult: typeof obj.lastResult === "string" ? obj.lastResult : null,
-    performanceState: typeof obj.performanceState === "string" ? obj.performanceState : null,
-    detail: typeof obj.detail === "string" ? obj.detail : "Optimizer status.",
+    mode: obj.available ? mode : "unavailable",
+    reportedMode,
+    currentProfile: safeText(obj.currentProfile, 60),
+    lastAction: safeText(obj.lastAction, 120),
+    lastResult: safeText(obj.lastResult, 120),
+    performanceState: safeText(obj.performanceState, 60),
+    detail: safeTextOr(obj.detail, "Optimizer status."),
   };
 }
 
@@ -548,7 +594,12 @@ function parseTelemetry(value: unknown): OptimizerTelemetry | null {
     available: obj.available,
     hardware: emptyHardware(),
     bound,
-    notes: Array.isArray(obj.notes) ? obj.notes.filter((item): item is string => typeof item === "string") : [],
+    notes: Array.isArray(obj.notes)
+      ? obj.notes
+          .filter((item): item is string => typeof item === "string")
+          .map((note) => safeText(note) ?? "")
+          .filter((note) => note.length > 0)
+      : [],
   };
 }
 
@@ -562,8 +613,13 @@ function parseAnalysis(value: unknown): { bound: OptimizerTelemetry["bound"]; no
   if (typeof obj.summary !== "string") return null;
   return {
     bound,
-    notes: Array.isArray(obj.notes) ? obj.notes.filter((item): item is string => typeof item === "string") : [],
-    summary: obj.summary,
+    notes: Array.isArray(obj.notes)
+      ? obj.notes
+          .filter((item): item is string => typeof item === "string")
+          .map((note) => safeText(note) ?? "")
+          .filter((note) => note.length > 0)
+      : [],
+    summary: safeText(obj.summary) ?? "",
   };
 }
 
@@ -572,6 +628,6 @@ function parseAccepted(value: unknown): { accepted: boolean; summary: string } |
   if (!obj || typeof obj.accepted !== "boolean") return null;
   return {
     accepted: obj.accepted,
-    summary: typeof obj.summary === "string" ? obj.summary : obj.accepted ? "Accepted." : "Declined.",
+    summary: safeTextOr(obj.summary, obj.accepted ? "Accepted." : "Declined."),
   };
 }

@@ -1,3 +1,4 @@
+import { sanitiseInline } from "../untrusted.ts";
 import type { VesperConfig } from "../config.ts";
 import type { EventBus } from "../events.ts";
 import type { SimulatedHardware } from "../hardware/simulated.ts";
@@ -214,10 +215,20 @@ export function registerBuiltinTools(input: {
       ["title", "body"],
     ),
     async (args) => {
-      const title = str(args, "title");
-      const body = str(args, "body");
+      // Screened and attributed. `kind: "system"` is the most authoritative class in the
+      // hub and is reserved for Vesper's own machinery; a model-written notice is
+      // `info`, authored `model`, with its text neutralised the way any other
+      // model-chosen string bound for a durable record is.
+      const title = sanitiseInline(str(args, "title"), 80);
+      const body = sanitiseInline(str(args, "body"), 300);
       try {
-        const sent = notifications.push({ kind: "system", title, body, cooldownKey: `notify:${title}` });
+        const sent = notifications.push({
+          kind: "info",
+          author: "model",
+          title,
+          body,
+          cooldownKey: `notify:${title}`,
+        });
         const host = windows.notify(title, body);
         return {
           ok: true,
@@ -251,13 +262,39 @@ export function registerBuiltinTools(input: {
     ),
     async (args, context) => {
       const category = (str(args, "category") || "fact") as MemoryCategory;
+      const key = str(args, "key");
+      const value = str(args, "value");
+
+      // Storing over an existing key destroys what was there, and destroying a memory is
+      // what memory_forget needs confirmation for. Leaving this at "safe" made that
+      // confirmation decorative: writing an empty value to an existing key deleted it
+      // outright, autonomously, and writing any other value replaced it just as
+      // permanently. A new key is a genuinely additive act and stays autonomous; a
+      // replacement has to go through the tier that governs destruction.
+      const existing = (await memory.search(key, { workspaceId: context.workspaceId, scope: "all" }))
+        .find((item) => item.key.toLowerCase() === key.toLowerCase());
+      if (existing && existing.value !== value) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary:
+            `'${key}' already holds a different value. Replacing a memory destroys what was there, ` +
+            `so forget it first — which asks you before it does anything.`,
+        };
+      }
+
       const entry = await memory.remember({
         category,
-        key: str(args, "key"),
-        value: str(args, "value"),
+        key,
+        value,
         workspaceId: context.workspaceId,
         source: "agent",
-        provenance: { origin: "user-request", kind: "stated" },
+        // The assistant wrote this, and it does not know whether the user stated it.
+        // `origin: "user-request", kind: "stated"` claimed both, so a fact the model
+        // invented was indistinguishable in the record from one the user actually said —
+        // and `attribute()` renders that difference back into the prompt on every later
+        // turn, which is how an invented fact becomes a remembered one.
+        provenance: { origin: "agent", kind: "inferred" },
       });
       return { ok: true, epistemic: "changed", summary: `Remembered ${entry.key}.`, data: { id: entry.id, key: entry.key, category: entry.category } };
     },
@@ -290,8 +327,9 @@ export function registerBuiltinTools(input: {
       { key: { type: "string" } },
       ["key"],
     ),
-    async (args) => {
-      const ok = await memory.forget(str(args, "key"));
+    async (args, context) => {
+      // Scoped: a workspace may only forget what it can see. See MemoryStore.forget.
+      const ok = await memory.forget(str(args, "key"), { workspaceId: context.workspaceId });
       return {
         ok,
         epistemic: ok ? "changed" : "could_not_access",
@@ -672,7 +710,8 @@ export function registerBuiltinTools(input: {
   registry.register(
     spec("mcp_status", "Read optional MCP bridge status. MCP is never required at runtime.", "read", {}),
     async () => {
-      const status = mcpBridgeStatus({ enabled: false });
+      // No config surface exists to attach a server, so this is not a user setting.
+      const status = mcpBridgeStatus({ enabled: false, configurable: false });
       return {
         ok: true,
         epistemic: "checked",

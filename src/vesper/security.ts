@@ -3,8 +3,43 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path
 
 const SHELL_META = /[|&;<>`$()\n\r]/;
 const SAFE_COMMAND = /^[A-Za-z0-9._-]+$/;
-const SECRET_VALUE =
-  /\b(sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|xai-[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9._\-]+)\b/i;
+/**
+ * Values that are credentials rather than notes.
+ *
+ * The previous pattern required the token body to be unbroken alphanumerics, so
+ * `sk-[A-Za-z0-9]{16,}` could not match `sk-live-...` or `sk-proj-...` — the hyphen ends
+ * the run immediately after the prefix, and nearly every modern key has one. It matched
+ * a shape almost no real key takes.
+ *
+ * Recognised by issuer prefix where one exists, because a prefix is a fact about the
+ * token rather than a guess about entropy, plus one shape that carries its own label
+ * ("api_key = <something long>"). Deliberately not a general high-entropy test: this
+ * decides what is withheld from sync and redacted from logs, and a heuristic that
+ * swallowed ordinary notes would cost the user their own memories.
+ */
+const SECRET_VALUE = new RegExp(
+  [
+    // OpenAI and Anthropic, including project- and environment-scoped forms.
+    "sk-[A-Za-z0-9_-]{16,}",
+    // GitHub: classic, fine-grained, and the app/refresh variants.
+    "gh[pousr]_[A-Za-z0-9]{20,}",
+    "github_pat_[A-Za-z0-9_]{20,}",
+    // GitLab, Slack, Google, AWS, Stripe, SendGrid, xAI.
+    "glpat-[A-Za-z0-9_-]{16,}",
+    "xox[baprs]-[A-Za-z0-9-]{10,}",
+    "AIza[0-9A-Za-z_-]{30,}",
+    "AKIA[0-9A-Z]{16}",
+    "(?:r|s)k_(?:live|test)_[A-Za-z0-9]{16,}",
+    "SG\\.[A-Za-z0-9_-]{16,}\\.[A-Za-z0-9_-]{16,}",
+    "xai-[A-Za-z0-9_-]{16,}",
+    // A bearer token, and a JSON Web Token anywhere.
+    "Bearer\\s+[A-Za-z0-9._~+/-]{16,}",
+    "eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}",
+    // A value that names itself: "api_key: <20+ non-space characters>".
+    "(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password)\\s*[:=]\\s*\\S{12,}",
+  ].join("|"),
+  "i",
+);
 
 export function containsTraversal(input: string): boolean {
   if (!input) return false;
@@ -48,9 +83,14 @@ export function isDangerousRoot(root: string): boolean {
   if (!trimmed) return true;
   if (containsTraversal(trimmed)) return true;
 
-  // Normalise separators and drop trailing slashes so "C:\\Users\\" and "C:/Users"
-  // are judged identically.
-  const unix = trimmed.replace(/\\/g, "/").replace(/\/+$/, "");
+  // Normalise separators, collapse repeated ones, and drop trailing slashes so
+  // "C:\\Users\\", "C:/Users" and "//etc" are all judged as what they actually address.
+  // Leaving repeats in place meant "//etc" and "//home" were not recognised as system
+  // directories at all, while the operating system resolves them exactly like "/etc".
+  const unix = trimmed
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(/\/+$/, "");
   if (unix === "" || unix === "/" || unix === ".") return true;
   // A bare drive: "C:", "C:\", "C:/".
   if (/^[a-zA-Z]:$/.test(unix)) return true;
@@ -174,4 +214,44 @@ async function realpathDeepest(target: string): Promise<string> {
       current = parent;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Vesper's own directories
+// ---------------------------------------------------------------------------
+
+/**
+ * Paths belonging to Vesper itself, which its own tools and indexer must never read.
+ *
+ * The data directory holds the device's private key, the audit trail, the device
+ * registry and the memory store. None of that is a document, and the knowledge indexer
+ * had no way to know it: point a knowledge root at a parent of the data directory — or
+ * approve a home directory that contains it — and the private key came back as a search
+ * hit, reachable by any companion holding knowledge.read.
+ *
+ * Deliberately a deny-list of *Vesper's own* paths rather than a guess about what is
+ * sensitive in general. It is set once at startup from the directories the host was
+ * actually given, so it cannot drift from where the files really are.
+ */
+const OWN_PATHS = new Set<string>();
+
+export function registerOwnPaths(paths: (string | undefined)[]): void {
+  for (const path of paths) {
+    if (!path) continue;
+    OWN_PATHS.add(resolve(path));
+  }
+}
+
+/** Exposed for tests; production sets this once at startup and never clears it. */
+export function clearOwnPaths(): void {
+  OWN_PATHS.clear();
+}
+
+export function isVesperOwnPath(candidate: string): boolean {
+  if (OWN_PATHS.size === 0) return false;
+  const target = resolve(candidate);
+  for (const own of OWN_PATHS) {
+    if (target === own || isPathInside(own, target)) return true;
+  }
+  return false;
 }

@@ -97,7 +97,13 @@ describe("hostile security review", () => {
       workspaceId: "general",
     });
     assert.equal(record.result?.ok, true);
-    assert.match(record.result?.summary ?? "", /disabled|optional|local-first/i);
+    // Assert the state, not the sentence. Matching prose meant the test passed on any
+    // wording containing "disabled" — including wording that called an unbuildable
+    // feature a user setting.
+    const status = record.result?.data as { enabled?: boolean; required?: boolean; servers?: string[] };
+    assert.equal(status.required, false, "MCP must never be required at runtime");
+    assert.equal(status.enabled, false);
+    assert.deepEqual(status.servers, [], "no MCP server can be attached in this build");
   });
 
   it("refuses to read through a symlink that escapes an approved root", async () => {

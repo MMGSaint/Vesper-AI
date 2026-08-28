@@ -13,8 +13,13 @@
  * can do that.
  */
 
-import { NEVER_REMOTE, decideRemoteRequest, type Capability, type CapabilityManifest } from "../distributed/capabilities.ts";
+import {
+  decideRemoteRequest,
+  type Capability,
+  type CapabilityManifest,
+} from "../distributed/capabilities.ts";
 import type { TrustState } from "../distributed/identity.ts";
+import type { ClientScope } from "../client/protocol.ts";
 
 /** Who is driving this turn. Absent means the person at this machine. */
 export interface RequestOrigin {
@@ -22,6 +27,13 @@ export interface RequestOrigin {
   deviceId?: string;
   trust?: TrustState;
   manifest?: CapabilityManifest | null;
+  /**
+   * The scopes the driving session actually holds.
+   *
+   * Absent on a remote origin means "no scopes established", not "all of them": a
+   * request whose authority cannot be established gets none.
+   */
+  scopes?: readonly ClientScope[];
 }
 
 /**
@@ -31,7 +43,72 @@ export interface RequestOrigin {
  * change trust states can promote itself or another device, which turns a single stolen
  * phone into permanent access. Trust is granted at the machine, by the person.
  */
-export const HOST_ONLY_TOOLS: readonly string[] = ["device_trust"];
+export const HOST_ONLY_TOOLS: readonly string[] = [
+  "device_trust",
+  // Registering, removing, or reindexing a knowledge source decides which directories
+  // Vesper will read from disk. That is filesystem policy, and policy is set at the
+  // machine — a remote device that could widen it would have found the long way round
+  // to the filesystem authority it is never granted directly.
+  "knowledge_register",
+  "knowledge_remove",
+  "knowledge_reindex",
+  // `notify` writes into the owner's notification hub, and the only scope that named it
+  // — `notifications` — is a *read* scope whose own gateway method returns recent items
+  // and which every default companion holds. Mapping a write to a read scope made a
+  // phishing primitive out of a default grant: a companion could plant a `system`-kind
+  // notification in the owner's hub, in Vesper's voice, saying whatever it liked. There
+  // is no notifications.write scope to map it to, and inventing one would hand the same
+  // capability out under a new name.
+  "notify",
+];
+
+/**
+ * Tools that change state belonging to the person at the machine.
+ *
+ * `workspace_switch` moves the *owner's* active workspace: their next local turn runs in
+ * whatever workspace a remote device chose, which decides the tool list, the scoping of
+ * memory and knowledge retrieval, and the default model role. A restricted device — the
+ * portable class, running on a host whose surroundings cannot be vouched for — was able
+ * to do that silently, because a tool with no capability mapping fell through to
+ * "allowed". Pausing and resuming the host's background runtime is the same shape.
+ *
+ * A trusted device may still do these: switching workspace from your own phone is the
+ * feature. What must not happen is a restricted one doing it.
+ */
+const TRUSTED_ONLY_TOOLS: readonly string[] = [
+  "workspace_switch",
+  "runtime_pause",
+  "runtime_resume",
+  // The task queue is the owner's private work list. Descriptions are free text the
+  // owner wrote — "wipe the drive holding the tax records; passphrase is in the safe" is
+  // the shape of a real entry — and `task_list` returns every one of them with no scope
+  // mapping at all, so it fell through to "allowed" for a device holding nothing but
+  // `conversation`. A trusted phone reading its owner's task list is the feature; a
+  // restricted one, on a host Vesper cannot vouch for, is disclosure.
+  "task_list",
+  "task_create",
+];
+
+/**
+ * Tools that exercise a client scope.
+ *
+ * The gateway checks scopes on its own methods, but a conversation is a tool-calling
+ * loop and tools are not gateway methods — so a device holding only `conversation`
+ * reached exactly the data its missing scopes describe: private memory without
+ * memory.read, indexed file contents without knowledge.read, and memory writes without
+ * memory.write. Two authorization models with no single owner drift the moment one of
+ * them is not consulted. This is where they meet.
+ */
+const TOOL_SCOPE: Readonly<Record<string, ClientScope>> = {
+  memory_search: "memory.read",
+  memory_remember: "memory.write",
+  memory_forget: "memory.write",
+  knowledge_search: "knowledge.read",
+};
+
+export function scopeForTool(toolName: string): ClientScope | null {
+  return TOOL_SCOPE[toolName] ?? null;
+}
 
 /**
  * Which capability a tool exercises. Tools with no entry are not capability-bearing —
@@ -86,10 +163,42 @@ export function decideRemoteToolRequest(input: {
     };
   }
 
+  // A trust floor that applies to every tool, capability-bearing or not.
+  //
+  // Without this, a tool with no capability mapping skipped the trust check entirely and
+  // a revoked device's request was still honoured — the session layer happened to be the
+  // only thing refusing it, and a held confirmation outlives the session that queued it.
+  // Revocation has to mean the same thing at every layer that can act on a request.
+  const trust = input.origin.trust ?? "unknown";
+  if (trust !== "trusted" && trust !== "restricted") {
+    return {
+      allowed: false,
+      reason: `A '${trust}' device may not have '${input.toolName}' run on its behalf.`,
+    };
+  }
+
+  // Scope-governed tools answer to the session's scopes wherever they are reached from,
+  // not only through the gateway method that happens to share their name.
+  const scope = scopeForTool(input.toolName);
+  if (scope) {
+    const held = input.origin.scopes ?? [];
+    if (!held.includes(scope)) {
+      return {
+        allowed: false,
+        reason: `'${input.toolName}' needs the '${scope}' scope, which this session does not hold.`,
+      };
+    }
+  }
+
+  if (TRUSTED_ONLY_TOOLS.includes(input.toolName) && trust !== "trusted") {
+    return {
+      allowed: false,
+      reason: `'${input.toolName}' changes state belonging to the machine's owner, so a '${trust}' device may not run it.`,
+    };
+  }
+
   const capability = capabilityForTool(input.toolName);
   if (!capability) {
-    // Not capability-bearing. Client scopes already decided whether this device may be
-    // having this conversation at all.
     return { allowed: true, reason: "Not a capability-bearing tool." };
   }
 
@@ -99,9 +208,4 @@ export function decideRemoteToolRequest(input: {
     manifest: input.origin.manifest ?? null,
   });
   return { allowed: decision.allowed, reason: decision.reason };
-}
-
-/** Exposed so a caller can state the rule without importing the capability module. */
-export function neverRemoteCapabilities(): readonly Capability[] {
-  return NEVER_REMOTE;
 }

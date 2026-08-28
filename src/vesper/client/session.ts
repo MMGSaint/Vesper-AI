@@ -3,7 +3,7 @@ import { createId } from "../id.ts";
 import {
   CLIENT_SCOPES,
   DEFAULT_COMPANION_SCOPES,
-  RESTRICTED_COMPANION_SCOPES,
+  capScopesForTrust,
   clientError,
   type ClientError,
   type ClientScope,
@@ -64,7 +64,7 @@ export class ClientSessionStore {
       );
     }
     const requested = normalizeScopes(input.scopes ?? DEFAULT_COMPANION_SCOPES);
-    const scopes = capScopes(requested, trust);
+    const scopes = capScopesForTrust(requested, trust);
     const now = Date.now();
     const ttl = Math.min(Math.max(input.ttlMs ?? DEFAULT_TTL_MS, 30_000), 60 * 60 * 1000);
     const session: ClientSession = {
@@ -108,7 +108,7 @@ export class ClientSessionStore {
         `Device ${session.deviceId} is ${trust}; its sessions are no longer valid.`,
       );
     }
-    return { ...session, scopes: capScopes(session.scopes, trust) };
+    return { ...session, scopes: capScopesForTrust(session.scopes, trust) };
   }
 
   async require(
@@ -140,17 +140,6 @@ export class ClientSessionStore {
   list(): Omit<ClientSession, "token">[] {
     return [...this.sessions.values()].map(({ token: _token, ...rest }) => rest);
   }
-}
-
-/**
- * A restricted device cannot hold more than the restricted ceiling, whatever it asked
- * for and whatever it held a moment ago. Applied at issue *and* on every request, so a
- * demotion cannot be outlived by a session opened while the device was still trusted.
- */
-function capScopes(scopes: ClientScope[], trust: TrustState): ClientScope[] {
-  if (trust !== "restricted") return scopes;
-  const ceiling = new Set<ClientScope>(RESTRICTED_COMPANION_SCOPES);
-  return scopes.filter((scope) => ceiling.has(scope));
 }
 
 function normalizeScopes(scopes: ClientScope[]): ClientScope[] {

@@ -10,8 +10,8 @@ describe("bm25", () => {
       "vesper vesper vesper",
       "vesper vesper vesper",
     ]);
-    const common = bm25(["vesper"], index, 0);
-    const rare = bm25(["hotspot"], index, 0);
+    const common = bm25(new Set(["vesper"]), index, 0);
+    const rare = bm25(new Set(["hotspot"]), index, 0);
     assert.ok(rare > common, `rare term ${rare} should beat common term ${common}`);
   });
 
@@ -19,17 +19,17 @@ describe("bm25", () => {
     const short = "hotspot reading";
     const long = `hotspot reading ${"filler ".repeat(200)}`;
     const index = buildLexicalIndex([short, long, "unrelated gardening notes"]);
-    assert.ok(bm25(["hotspot"], index, 0) > bm25(["hotspot"], index, 1));
+    assert.ok(bm25(new Set(["hotspot"]), index, 0) > bm25(new Set(["hotspot"]), index, 1));
   });
 
   it("scores nothing for a term the document does not contain", () => {
     const index = buildLexicalIndex(["alpha beta", "gamma delta"]);
-    assert.equal(bm25(["omega"], index, 0), 0);
-    assert.equal(bm25(["alpha"], index, 5), 0);
+    assert.equal(bm25(new Set(["omega"]), index, 0), 0);
+    assert.equal(bm25(new Set(["alpha"]), index, 5), 0);
   });
 
   it("does not let a repeated query term count twice", () => {
     const index = buildLexicalIndex(["alpha beta gamma", "delta"]);
-    assert.equal(bm25(["alpha", "alpha"], index, 0), bm25(["alpha"], index, 0));
+    assert.equal(bm25(new Set(["alpha", "alpha"]), index, 0), bm25(new Set(["alpha"]), index, 0));
   });
 });

@@ -28,6 +28,8 @@ export class PermissionDeniedError extends Error {
 }
 
 export interface PermissionPolicy {
+  /** Set when the configuration could not be read; see `lockedDownConfig`. */
+  lockedDown?: boolean;
   toolOverrides: Record<string, PermissionLevel>;
   neverAllowAutonomous: string[];
 }
@@ -65,6 +67,20 @@ export function evaluatePermission(input: {
       requiresConfirmation: false,
       toolName: input.tool.name,
       reason: `Tool '${input.tool.name}' is classified high-risk and is never autonomous.`,
+    };
+  }
+
+  // The configuration could not be read, so nothing is known about what the user
+  // authorised. Ask, rather than assume the tool's own declared level was acceptable to
+  // them — a user who had set `fs_read: "never"` must not get it back autonomously
+  // because a write was truncated.
+  if (input.policy.lockedDown && (level === "read" || level === "safe")) {
+    return {
+      allowed: false,
+      level,
+      requiresConfirmation: true,
+      toolName: input.tool.name,
+      reason: `Vesper could not read its configuration, so '${input.tool.name}' needs your say-so.`,
     };
   }
 

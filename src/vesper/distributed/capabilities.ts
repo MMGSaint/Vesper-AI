@@ -151,10 +151,36 @@ export function decideRemoteRequest(input: {
   };
 }
 
-/** Sanity check used by tests and startup: grants must never name a forbidden power. */
+/**
+ * Startup self-check: no trust class can reach a never-remote capability.
+ *
+ * The previous version compared `CAPABILITIES` (bare names like `filesystem`) against
+ * `FORBIDDEN_REMOTE_POWERS` (dotted names like `os.filesystem`). Those namespaces cannot
+ * intersect, so it was a constant `true` — and it never read the GRANTS table its name,
+ * its comment and its caller all described. A guard that cannot fail is not a guard.
+ *
+ * Asserting on GRANTS directly would also be wrong, because GRANTS.trusted deliberately
+ * *is* the full capability list: the never-remote rule is enforced ahead of trust, not
+ * by trimming the table. So the property worth checking at startup is the one that
+ * actually protects the machine — that the decision function refuses, for every class.
+ */
 export function grantsRespectForbiddenPowers(): boolean {
-  const forbidden = new Set<string>(FORBIDDEN_REMOTE_POWERS);
-  return !CAPABILITIES.some((capability) => forbidden.has(capability));
+  const everyTrust: TrustState[] = ["trusted", "restricted", "pending", "unknown", "revoked"];
+  return everyTrust.every((trust) =>
+    NEVER_REMOTE.every(
+      (capability) =>
+        !decideRemoteRequest({ trust, capability, manifest: manifestOf(capability) }).allowed,
+    ),
+  );
+}
+
+/** A manifest that claims the capability, so the check cannot pass for want of one. */
+function manifestOf(capability: Capability): CapabilityManifest {
+  return {
+    deviceId: "self-check",
+    generatedAt: "1970-01-01T00:00:00.000Z",
+    findings: [{ id: capability, state: "AVAILABLE", detail: "self-check" }],
+  };
 }
 
 export interface DiscoveryProbe {

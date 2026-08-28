@@ -151,6 +151,13 @@ export interface PendingConfirmation {
   reason: string;
   createdAt: string;
   workspaceId: string;
+  /**
+   * Who asked for the action being held. Recorded so an approval can never grant more
+   * authority than the request carried, and so the audit trail says which device set a
+   * dangerous action up. Deliberately minimal: an id, not a cached capability manifest,
+   * because authority must be re-read live at approval time rather than replayed.
+   */
+  requestedBy?: { kind: "local" | "remote"; deviceId?: string };
 }
 
 export interface MemoryEntry {
@@ -224,6 +231,20 @@ export interface VesperNotification {
   body: string;
   at: string;
   kind: "info" | "success" | "warning" | "system" | "error";
+  /**
+   * Who wrote it. Set by the hub from the caller, never from the payload.
+   *
+   * A hub entry written by the model through the `notify` tool used to be byte-for-byte
+   * indistinguishable from one emitted by `app_launch` or by a subsystem. The hub keeps
+   * a hundred entries, every turn carries the most recent five, and the console prints
+   * each under the reply — so a model that had just been refused could write a durable,
+   * replayed, Vesper-voiced assertion that the action had succeeded, sitting next to the
+   * refusal that is the true record.
+   *
+   * `subsystem` is Vesper's own machinery saying something happened. `model` is the
+   * assistant repeating a claim, which the reader is entitled to weigh differently.
+   */
+  author: "subsystem" | "model";
   cooldownKey?: string;
 }
 
@@ -392,6 +413,16 @@ export interface ToolCallRecord {
   decision: PermissionDecision;
   result?: ToolExecutionResult;
   at: string;
+  /**
+   * The confirmation this call queued, when it queued one.
+   *
+   * Without it the agent had to re-find "the confirmation I just created" by searching
+   * the queue for a matching tool *name*, so any older unresolved confirmation for the
+   * same tool shadowed the new one — and the consent prompt described one action while
+   * approving a different one. A confirmation should only ever be reachable by the id of
+   * the call that produced it.
+   */
+  confirmationId?: string;
 }
 
 export interface AgentTurn {
@@ -432,7 +463,18 @@ export interface ApprovedApp {
 
 export interface OptimizerStatus {
   available: boolean;
+  /**
+   * Which adapter Vesper is actually using. Set by Vesper, never by the endpoint.
+   *
+   * This is the LIVE / SIMULATED / MOCKED distinction the product promises, so it is a
+   * fact about Vesper, not a fact the optimizer is entitled to assert. See `parseStatus`.
+   */
   mode: "mock" | "live" | "unavailable";
+  /**
+   * What the endpoint said about itself, if anything. Recorded so a disagreement with
+   * `mode` can be shown; read by nothing that decides how Vesper describes itself.
+   */
+  reportedMode?: "mock" | "live" | "unavailable" | null;
   currentProfile: string | null;
   lastAction: string | null;
   lastResult: string | null;

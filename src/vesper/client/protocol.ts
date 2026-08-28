@@ -59,6 +59,23 @@ export const RESTRICTED_COMPANION_SCOPES: ClientScope[] = [
   "knowledge.read",
 ];
 
+/**
+ * The scopes a device of this trust class may actually exercise.
+ *
+ * The single owner of that rule. It was written out three times — the client session
+ * store, the signed-grant verifier, and the agent's own re-check — and a ceiling copied
+ * three times is a ceiling that will eventually differ in one of them.
+ */
+export function capScopesForTrust(
+  scopes: readonly ClientScope[],
+  trust: "unknown" | "pending" | "restricted" | "trusted" | "revoked",
+): ClientScope[] {
+  if (trust === "trusted") return [...scopes];
+  if (trust !== "restricted") return [];
+  const ceiling = new Set<ClientScope>(RESTRICTED_COMPANION_SCOPES);
+  return scopes.filter((scope) => ceiling.has(scope));
+}
+
 /** Scopes a remote companion must never receive. OS tools stay on the host. */
 export const FORBIDDEN_REMOTE_POWERS = [
   "os.filesystem",

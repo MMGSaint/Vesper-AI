@@ -10,6 +10,18 @@ const DEFAULT_MAX_PERSISTENT = 500;
 const MAX_NOTICES = 100;
 
 /**
+ * The largest a single remembered value may be.
+ *
+ * Generous for a fact about the user — a long paragraph of preferences fits — and small
+ * enough that 500 of them cannot make retrieval slow. See `remember` for why the bound
+ * is enforced there rather than at the callers.
+ */
+export const MAX_MEMORY_VALUE_CHARS = 8000;
+
+/** Keys are looked up and compared constantly; a key is a name, not a document. */
+export const MAX_MEMORY_KEY_CHARS = 200;
+
+/**
  * Legacy write scope, kept because it reads naturally at call sites: "file this
  * globally" rather than "file this at scope global". It maps onto `MemoryScopeLevel`.
  */
@@ -146,6 +158,23 @@ export class MemoryStore {
     tags?: string[];
     provenance?: MemoryEntry["provenance"];
   }): Promise<MemoryEntry> {
+    // Bounded before the lock is taken, so an oversized write costs nothing.
+    //
+    // Memory search scores every stored entry against every query token, so the size of
+    // what is stored is the cost of every future turn — one planted 18 MiB entry made an
+    // ordinary 53-character question take 1.7 seconds and grow the heap on each repeat.
+    // The model chooses what to remember, and the model is never the security authority,
+    // so the bound belongs here rather than in whichever caller happens to be careful.
+    if (input.value.length > MAX_MEMORY_VALUE_CHARS) {
+      throw new Error(
+        `Memory value is ${input.value.length} characters; the limit is ${MAX_MEMORY_VALUE_CHARS}.`,
+      );
+    }
+    if (input.key.length > MAX_MEMORY_KEY_CHARS) {
+      throw new Error(
+        `Memory key is ${input.key.length} characters; the limit is ${MAX_MEMORY_KEY_CHARS}.`,
+      );
+    }
     return this.runExclusive(async () => {
       const now = nowIso();
       const workspaceId = input.scope === "global" ? undefined : input.workspaceId;
@@ -252,31 +281,52 @@ export class MemoryStore {
     return hits.map((entry) => ({ entry, score: scoreMemory(entry, prepared) }));
   }
 
-  async update(id: string, patch: Partial<Pick<MemoryEntry, "value" | "tags" | "category" | "key">>) {
+  /**
+   * The scope a destructive call is asking from.
+   *
+   * Absent means "no workspace was named", which `isVisibleFrom` already treats as
+   * unrestricted — the shape the CLI and the maintenance paths use. A tool call always
+   * has a workspace and always passes it.
+   */
+  async update(
+    id: string,
+    patch: Partial<Pick<MemoryEntry, "value" | "tags" | "category" | "key">>,
+    context: { workspaceId?: string } = {},
+  ) {
     return this.runExclusive(async () => {
       const sessionHit = this.sessionEntries.find((item) => item.id === id);
       if (sessionHit) {
+        if (!isVisibleFrom(sessionHit, context)) return undefined;
         applyPatch(sessionHit, patch);
         return sessionHit;
       }
       const entries = await this.loadPersistent();
       const entry = entries.find((item) => item.id === id);
       if (!entry) return undefined;
+      // The workspace boundary the read path calls a rule is a rule here too. It was
+      // not: `update` and `forget` matched on bare id or key across the whole store,
+      // so an entry invisible to `search` in the active workspace could still be
+      // rewritten and deleted from it.
+      if (!isVisibleFrom(entry, context)) return undefined;
       applyPatch(entry, patch);
       await this.savePersistent(entries, entry.id);
       return entry;
     });
   }
 
-  async forget(idOrKey: string): Promise<boolean> {
+  async forget(idOrKey: string, context: { workspaceId?: string } = {}): Promise<boolean> {
     return this.runExclusive(async () => {
-      const sessionNext = this.sessionEntries.filter(
-        (entry) => entry.id !== idOrKey && entry.key !== idOrKey,
-      );
+      // Matched by id *or* key, and a key is not unique — the same key exists in every
+      // workspace that stored it. So visibility decides what may be removed, and a key
+      // that names entries the caller cannot see removes only the ones it can.
+      const targets = (entry: MemoryEntry) =>
+        (entry.id === idOrKey || entry.key === idOrKey) && isVisibleFrom(entry, context);
+
+      const sessionNext = this.sessionEntries.filter((entry) => !targets(entry));
       const sessionChanged = sessionNext.length !== this.sessionEntries.length;
       this.sessionEntries = sessionNext;
       const entries = await this.loadPersistent();
-      const next = entries.filter((entry) => entry.id !== idOrKey && entry.key !== idOrKey);
+      const next = entries.filter((entry) => !targets(entry));
       const persistentChanged = next.length !== entries.length;
       if (persistentChanged) await this.savePersistent(next);
       return sessionChanged || persistentChanged;

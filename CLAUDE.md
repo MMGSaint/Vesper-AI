@@ -134,6 +134,28 @@ test. The test names say what broke.
   real install's config was ignored entirely. A test parses the script and asserts it.
 - **An audit-log write failure must never reach the process.** It used to arrive as an
   unhandled rejection and take the assistant down.
+- **A remote device never reaches OS authority, at any trust class.** A conversation is
+  a tool-calling loop, so a device permitted to converse was permitted to call anything
+  the agent chose — including filesystem tools on the host's disk. Enforced where tools
+  run, not only where capabilities are discussed. A trusted *device* is still a
+  different machine.
+- **Trust is read live, never cached into a session.** A client session that carried its
+  own copy of trust kept working for up to an hour after the user revoked the device.
+- **A device is a key, not a label.** Sessions bind to a registered device id. Anyone
+  can claim to be called "laptop".
+- **Scope rules live in one module.** The store and the sync engine each grew their own
+  copy and the copies drifted: `search` hid `user`-scoped memories outside the workspace
+  they were recorded in, which is the opposite of what user scope is for.
+- **A named device is a constraint, not a preference.** `preferredDevice` falls through
+  when the machine is offline. For "prepare my desktop", falling through runs the work
+  on hardware the user never asked about and reports success.
+- **Retrieved text is data, never instruction.** Tool results, knowledge hits, and
+  memory are sealed in a per-wrap nonce boundary the content cannot close. Screening is
+  evidence; the boundary and the escaping are what contain an attack, so they apply to
+  clean content too.
+- **Retrieval envelopes are capped.** `fitContext` cannot trim the system prompt, so an
+  unbounded envelope starves history with no way to recover. One long memory took 68% of
+  the budget.
 
 ## Honesty rules that constrain code, not just prose
 
@@ -147,6 +169,14 @@ test. The test names say what broke.
 - **"Available" means what it says.** For voice it means Vesper can convert between
   audio buffers and text — never that an audio device works.
 - Never claim an optimization happened without `accepted: true` from the adapter.
+- **A capability is discovered, never assumed.** A device type does not imply a
+  capability; the component that would do the work is asked. `AVAILABLE`,
+  `UNAVAILABLE`, and `NOT_CONFIGURED` are three different claims — the last means
+  nothing is wired up to answer, and reporting it as `UNAVAILABLE` would imply we
+  looked. A mock adapter answering "available" is not the capability.
+- **Never claim forensic "zero trace".** No application can promise that about a host it
+  does not control. The honest objective is no intentional application persistence plus
+  minimized host exposure.
 
 ## Important constraints
 
@@ -160,4 +190,9 @@ test. The test names say what broke.
 
 ## Status classification required in reports
 
-Use only: **IMPLEMENTED + TESTED**, **IMPLEMENTED + HARDWARE DEPENDENT**, **MOCKED / SIMULATED**, **DOCUMENTED BUT NOT IMPLEMENTED**.
+Use only: **IMPLEMENTED + TESTED**, **IMPLEMENTED + HARDWARE DEPENDENT**, **MOCKED / SIMULATED**, **DOCUMENTED BUT NOT IMPLEMENTED**, **EXTERNAL BLOCKER**.
+
+A module that is implemented and tested but that nothing calls is **not** IMPLEMENTED +
+TESTED at the product level. Say so — "implemented and tested, not wired" — because a
+guarantee no call site asks for is not a guarantee the product has. Several modules were
+in exactly that state and were found only by sweeping exports for call sites.

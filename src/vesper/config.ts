@@ -169,6 +169,18 @@ export const vesperConfigSchema = z.object({
     .default({ model: "nomic-embed-text", provider: "ollama", enabled: true }),
   permissions: z
     .object({
+      /**
+       * Nothing runs without asking.
+       *
+       * Set only by Vesper itself, when the configuration file could not be read at all
+       * and nothing is known about what the user authorised. `toolOverrides` cannot
+       * express "everything is stricter" — it names tools one at a time — so an
+       * unreadable file would otherwise lose a user's `fs_read: "never"` and leave the
+       * tool autonomous at its declared level. Under this flag every autonomous level
+       * becomes a confirmation instead, which is the honest answer to "I do not know
+       * what you allowed".
+       */
+      lockedDown: z.boolean().default(false),
       toolOverrides: z.record(z.string(), permissionLevel).default({}),
       neverAllowAutonomous: z.array(z.string()).default([
         "disk_wipe",
@@ -178,6 +190,7 @@ export const vesperConfigSchema = z.object({
       ]),
     })
     .default({
+      lockedDown: false,
       toolOverrides: {},
       neverAllowAutonomous: [
         "disk_wipe",
@@ -381,6 +394,44 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * What a security section becomes when it cannot be read.
+ *
+ * The least authority the section can express: no approved roots means no filesystem
+ * access, no approved applications means nothing may be launched, no knowledge sources
+ * means nothing is indexed. The assistant still starts and still says what happened; it
+ * simply cannot do the things the unreadable section was what authorised.
+ */
+const LOCKED_DOWN: Record<string, unknown> = {
+  approvedRoots: [],
+  approvedApps: [],
+  knowledgeSources: [],
+};
+
+/**
+ * The configuration to run on when the file could not be read at all.
+ *
+ * Distinct from a *validation* failure, which `removeExact` handles section by section:
+ * this is the whole file being unparseable or unreadable, where nothing at all is known
+ * about what the user intended. `defaultConfig()` is the vendor's permissive starting
+ * point — it approves three filesystem roots, indexes two knowledge sources and carries
+ * no tool overrides — so booting on it after a truncated write silently *granted* more
+ * than the file it replaced. A user who had set `fs_read: "never"` and no approved roots
+ * came back from a power cut with `fs_read` autonomous over three directories.
+ *
+ * The failure of a parser must never be the thing that grants authority.
+ */
+export function lockedDownConfig(): VesperConfig {
+  const config = defaultConfig();
+  return {
+    ...config,
+    approvedRoots: [],
+    approvedApps: [],
+    knowledgeSources: [],
+    permissions: { ...config.permissions, lockedDown: true },
+  };
+}
+
 function isSecurityPath(path: string): boolean {
   return SECURITY_SECTIONS.some((section) => path === section || path.startsWith(`${section}.`));
 }
@@ -426,6 +477,17 @@ function removeExact(
     !restored.has(key)
   ) {
     restored.add(key);
+    // A security section that failed validation is put back *locked down*, not put back
+    // to the vendor's starting point.
+    //
+    // DEFAULT_CONFIG_INPUT is a permissive place to begin — approvedRoots already lists
+    // notes, docs and knowledge — so restoring it silently widened a user who had
+    // narrowed their own settings. The safe reading of "this section is unreadable" is
+    // the least authority it could express, not the most convenient one.
+    if (isSecurityPath(key) && key in LOCKED_DOWN) {
+      parent[key] = structuredClone(LOCKED_DOWN[key]);
+      return true;
+    }
     parent[key] = structuredClone(DEFAULT_CONFIG_INPUT[key]);
     return true;
   }

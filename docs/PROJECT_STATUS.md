@@ -1,7 +1,73 @@
 # Project status
 
-Phase: **software-only work continuing; the previous "software-only complete" claim was
-wrong and has been retracted.**
+Phase: **distributed and portable architecture, on top of the retracted
+"software-only complete" claim.**
+
+Current validation, on a Linux development host: **491 tests**, **25 security tests**,
+typecheck and hygiene clean. CI and CodeQL results for the distributed branch are
+recorded in the section for that work, and are not claimed before they are observed.
+
+For what the distributed layer does and does not do, see
+[distributed.md](distributed.md). For portable/USB, see [portable.md](portable.md).
+
+## Distributed and portable work
+
+Built and tested:
+
+- **Device identity** — ed25519, generated on first run, private half never synced,
+  logged, or exported; a stored key is signature-self-tested before it is trusted.
+  Hardware fingerprints deliberately not used: spoofable, and they leak.
+- **Trust states** — `unknown → pending → restricted ⇄ trusted → revoked`, revocation
+  terminal. Trust is re-read on every request rather than cached, so revoking a lost
+  phone ends its live sessions immediately instead of at token expiry.
+- **Capability manifests** — discovered by asking the component that would do the work,
+  never assumed from device type. `AVAILABLE` / `UNAVAILABLE` / `NOT_CONFIGURED` are
+  three distinct claims and are not collapsed.
+- **Memory scopes** — five scopes with visibility and syncability owned by one module,
+  so the store and the sync engine cannot drift. Device facts about another machine are
+  attributed to it rather than stated bare.
+- **Cross-device tasks** — persistent, capability-routed, never degraded onto an
+  incapable device; a named device is a hard constraint, not a preference.
+- **Client protocol v2** — sessions bound to a registered device id rather than a
+  free-text label.
+- **Remote authority limits** — filesystem, Windows control, and trust administration
+  are refused to every remote device at every trust class, enforced at the point tools
+  run.
+- **Untrusted content boundary** — every byte of retrieved text (tool results, knowledge
+  hits, memory) is sealed in a per-wrap nonce boundary it cannot close, screened, and
+  withheld outright when it scores high.
+
+Defects found by running the product rather than reading the code, each now a
+regression test:
+
+- A companion device holding only the `conversation` scope could drive the agent into
+  filesystem tools on the host's disk. The permission gate returned `allowed: true`,
+  because the request was indistinguishable from the person at the machine.
+- Client sessions survived device revocation for up to an hour, because the gateway
+  never consulted the registry.
+- No device ever built a capability manifest, so routing refused every capability-bearing
+  task on machines that could have done the work.
+- The mock optimizer reported itself as a live `nexus` capability.
+- `search` hid `user`-scoped memories outside the workspace they were recorded in — the
+  opposite of what user scope is for.
+- A single long memory consumed 68% of the whole context budget, and the system prompt
+  is the one part `fitContext` cannot trim.
+
+Implemented and tested but **not wired**, stated plainly rather than counted as done:
+
+- **Sync engine.** Conflict resolution, sync filtering, and the engine itself are
+  tested; nothing calls them, because calling them needs a transport. Capability
+  discovery reports `sync` as `NOT_CONFIGURED` on every device today, which is accurate.
+- **Session grants.** The signed, replay-guarded portable grant model exists and is
+  tested; the companion path uses device-bound client sessions instead.
+- **Presence between machines.** A device records its own presence; nothing heartbeats
+  across devices, again for want of a transport.
+
+Not built: any transport, pairing flow, or listener; a mobile client application;
+portable packaging or Windows isolation. See the "Genuinely not implemented" section
+below for why the transport in particular is not being built unattended.
+
+## The earlier retraction, kept for the record
 
 ## What changed, and why the previous status was retracted
 
@@ -33,9 +99,9 @@ what was still outstanding, and is now fixed:
 The lesson is recorded in `CLAUDE.md` under "Invariants": each one is a defect that
 shipped, with a regression test named after what broke.
 
-## Validation (this session, on a Linux development host)
+## Validation (the retraction session, on a Linux development host)
 
-- Tests: **314 passing** (baseline at session start: 125)
+- Tests: **314 passing** (baseline at that session's start: 125)
 - Security tests: **25 passing** (was 15)
 - Typecheck (`tsc --noEmit`, test files included): passing
 - Hygiene: passing
@@ -119,7 +185,7 @@ Nothing below has been observed. See `docs/known-limitations.md`.
 
 Stated plainly rather than classified as complete:
 
-- **Companion transport.** `vesper.client` v1 is in-process only: no pairing, no
+- **Companion transport.** `vesper.client` v2 is in-process only: no pairing, no
   listener, no LAN TLS. This is deliberately **not** built autonomously. Opening an
   inbound network listener on a personal machine is an outward-facing security decision
   that belongs to the owner, not to an agent working unattended. The scoped protocol and

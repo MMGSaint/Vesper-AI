@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { createRuntime, type RuntimeOptions, type VesperRuntime } from "../runtime.ts";
 import { FileStorage } from "../storage.ts";
 import { createLogger } from "../logging.ts";
-import { loadHostConfig, writeConfigIfMissing } from "../config-file.ts";
+import { loadHostConfig, writeConfigIfMissing, type LoadedHostConfig } from "../config-file.ts";
 import {
   auditLogFile,
   configFile,
@@ -14,6 +14,7 @@ import {
   lastErrorFile,
   resolveVesperDirs,
   stateFile,
+  revokedDevicesFile,
 } from "../paths.ts";
 import { runDoctor, formatDoctor, type DoctorReport } from "../doctor.ts";
 import type { VesperDirs } from "../types.ts";
@@ -52,7 +53,7 @@ export interface ProductionHost {
   runtime: VesperRuntime;
   gateway: VesperClientGateway;
   dirs: VesperDirs;
-  configSource: "file" | "default";
+  configSource: LoadedHostConfig["source"];
   lock: InstanceLock | null;
   lifecycle: LifecycleController;
   notifications: HostNotificationAdapter;
@@ -114,8 +115,13 @@ export async function createProductionHost(options?: {
       return createLogger({ sink: audit.sink });
     })();
   if (!loaded.ok) {
-    log.warn("lifecycle", "Host config invalid; using defaults", {
+    // At error level, not warn. `recentErrors` in diagnostics filters on `error`, so a
+    // warn line meant the one state where Vesper is running on a configuration the user
+    // did not write was the one state nothing surfaced — no event, no notification, no
+    // diagnostic, just a line in the audit file.
+    log.error("lifecycle", `Host config could not be read; running locked down: ${loaded.path}`, {
       errors: loaded.errors.join("; "),
+      source: loaded.source,
     });
   }
 
@@ -127,11 +133,31 @@ export async function createProductionHost(options?: {
   }
 
   const storage = options?.runtime?.storage ?? new FileStorage(stateFile(dirs));
+  // Its own file, so a corrupt state.json cannot undo a revocation. See REVOKED_KEY in
+  // distributed/registry.ts.
+  const revocationStorage =
+    options?.runtime?.revocationStorage ?? new FileStorage(revokedDevicesFile(dirs));
   const runtime = await createRuntime({
     ...options?.runtime,
     config: options?.runtime?.config ?? loaded.config,
     storage,
+    revocationStorage,
     logger: log,
+    // The real host has directories, so say so.
+    //
+    // Without this the production host fell into the identity branch written for
+    // in-memory runs — "no dirs means no filesystem: keep the key in the storage adapter
+    // so tests never leave a private key on disk" — and the device's ed25519 private key
+    // was written into state.json instead of its own 0600 file. state.json holds
+    // memories and the device registry and is created at the default 0644, so the key
+    // that authenticates this machine to its peers sat world-readable next to them.
+    dirs: options?.runtime?.dirs ?? {
+      data: dirs.data,
+      config: dirs.config,
+      logs: dirs.logs,
+      models: dirs.models,
+      root: dirs.root,
+    },
   });
   await runtime.start();
 

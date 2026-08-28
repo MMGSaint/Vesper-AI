@@ -12,7 +12,19 @@ export class NotificationHub {
     this.cooldownMs = cooldownMs;
   }
 
-  push(input: Omit<VesperNotification, "id" | "at"> & { at?: string }): VesperNotification | null {
+  /**
+   * Add a notification.
+   *
+   * `author` defaults to `subsystem`, which is what every internal caller is. The one
+   * caller that must pass `model` is the `notify` tool, and it cannot pass anything else
+   * because the tool handler sets it — not the model's arguments.
+   */
+  push(
+    input: Omit<VesperNotification, "id" | "at" | "author"> & {
+      at?: string;
+      author?: VesperNotification["author"];
+    },
+  ): VesperNotification | null {
     if (!this.enabled) return null;
     const now = Date.now();
     if (input.cooldownKey) {
@@ -26,6 +38,7 @@ export class NotificationHub {
       title: input.title,
       body: input.body,
       kind: input.kind,
+      author: input.author ?? "subsystem",
       cooldownKey: input.cooldownKey,
     };
     this.items.push(item);

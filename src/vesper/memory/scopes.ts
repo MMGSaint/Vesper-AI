@@ -83,8 +83,12 @@ export function describesAnotherDevice(entry: MemoryEntry, context: ScopeContext
  * otherwise Vesper states another device's hardware as though it were this one's.
  */
 export function attribute(entry: MemoryEntry, context: ScopeContext): string {
-  if (describesAnotherDevice(entry, context)) {
-    return `${entry.value} (on ${entry.deviceId})`;
-  }
-  return entry.value;
+  const parts: string[] = [];
+  if (describesAnotherDevice(entry, context)) parts.push(`on ${entry.deviceId}`);
+  // A fact the assistant inferred is not a fact the user stated, and the difference has
+  // to survive into the prompt or recording it is bookkeeping nobody reads. Without this
+  // an invented memory came back on every later turn indistinguishable from something
+  // the user really said — which is how an invention becomes a remembered fact.
+  if (entry.provenance?.kind === "inferred") parts.push("inferred by the assistant, not stated");
+  return parts.length > 0 ? `${entry.value} (${parts.join("; ")})` : entry.value;
 }

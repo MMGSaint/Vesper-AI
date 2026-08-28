@@ -1,4 +1,6 @@
+import { dirname, join } from "node:path";
 import { defaultConfig, parseConfig, type VesperConfig } from "./config.ts";
+import { registerOwnPaths } from "./security.ts";
 import { createLogger, type Logger } from "./logging.ts";
 import { MemoryStorage, type StorageAdapter } from "./storage.ts";
 import { createPermissionGate } from "./permissions.ts";
@@ -29,7 +31,7 @@ import { createVoiceSession, type VoiceSession } from "./voice/session.ts";
 import { createModelRouter, type ModelRouter } from "./models/router.ts";
 import { createBenchmarkHarness, type BenchmarkHarness } from "./models/benchmark.ts";
 import { createIdleScheduler, type IdleScheduler } from "./scheduler.ts";
-import { Agent } from "./agent.ts";
+import { Agent, TurnFailure } from "./agent.ts";
 import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
 import { buildDiagnostics } from "./diagnostics.ts";
 import { createId } from "./id.ts";
@@ -39,7 +41,11 @@ import { loadDeviceIdentity, type DeviceIdentity, type HostPosture } from "./dis
 import { DeviceRegistry } from "./distributed/registry.ts";
 import { TaskQueue } from "./distributed/tasks.ts";
 import { buildNow, renderNow } from "./distributed/now.ts";
-import { discoverCapabilities, type CapabilityManifest } from "./distributed/capabilities.ts";
+import {
+  discoverCapabilities,
+  grantsRespectForbiddenPowers,
+  type CapabilityManifest,
+} from "./distributed/capabilities.ts";
 import { buildDiscoveryProbes } from "./distributed/discovery.ts";
 import type { RequestOrigin } from "./tools/remote.ts";
 import { describeStartupRegistration } from "./windows/startup.ts";
@@ -48,6 +54,7 @@ import type {
   CapabilityProfile,
   ChatMessage,
   DiagnosticReport,
+  EpistemicTag,
   FirstBootReport,
   JsonObject,
   JsonValue,
@@ -63,10 +70,21 @@ export interface RuntimeOptions {
   providers?: Parameters<typeof createModelRouter>[0]["providers"];
   skipDiscovery?: boolean;
   /**
-   * Where the device keypair lives. Absent (as in tests) the identity is kept in the
-   * storage adapter instead, so a test never writes a key to the developer's disk.
+   * Where Vesper's own files live.
+   *
+   * `data` is where the device keypair goes; absent (as in tests) the identity is kept
+   * in the storage adapter instead, so a test never writes a key to the developer's
+   * disk. The rest are declared so Vesper's own tools and indexer refuse them — the
+   * config file and the audit log are Vesper's business, not documents.
    */
-  dirs?: { data: string };
+  dirs?: { data: string; config?: string; logs?: string; models?: string; root?: string };
+  /**
+   * Where the device revocation list is kept, when it must outlive the state file.
+   *
+   * Absent it shares `storage`. Production passes a separate file so a corrupt state
+   * file cannot resurrect a revoked device.
+   */
+  revocationStorage?: StorageAdapter;
   /** How much the machine underneath is trusted. Portable sessions pass `foreign`. */
   hostPosture?: HostPosture;
 }
@@ -196,6 +214,48 @@ export class VesperRuntime {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+    // Stored state that could not be read is a security event, not a footnote.
+    //
+    // The registry treats a corrupt file as "costs knowledge of peers, never the ability
+    // to run locally", which is the right call for availability — but it held no logger,
+    // so a *revocation* could disappear in silence and the device it named could enrol
+    // again as a fresh `pending` peer awaiting approval. Losing a decision the owner made
+    // about who may reach their machine has to be visible, whatever else is done about it.
+    const storage = this.storage as unknown as { wasCorrupted?: () => boolean };
+    if (typeof storage.wasCorrupted === "function") {
+      if (storage.wasCorrupted()) {
+        this.log.error("lifecycle", "Stored state was unreadable and has been reset", {});
+        this.events.emit({
+          type: "security.state_unreadable",
+          title: "Stored state could not be read and was reset",
+          detail:
+            "Device trust, revocations, pending confirmations and memories are restored from that file. " +
+            "Anything it held is gone: check the device list, because a revoked device can enrol again as pending.",
+          severity: "error",
+        });
+        this.notifications.push({
+          title: "Vesper's saved state could not be read",
+          body: "Device trust and revocations may have been lost. Review your device list before approving anything.",
+          kind: "error",
+        });
+      }
+    }
+
+    // A grant table that names a forbidden power would hand remote devices exactly what
+    // the forbidden list exists to withhold. Checked at startup, not only in tests: the
+    // tables are edited by hand and this is the assertion that catches a bad edit on a
+    // real machine rather than in CI.
+    if (!grantsRespectForbiddenPowers()) {
+      this.log.error("permission", "A capability grant names a forbidden remote power", {});
+      this.events.emit({
+        type: "security.grant_table_invalid",
+        title: "Capability grants name a forbidden remote power",
+        detail:
+          "Remote capability grants overlap the forbidden-powers list. Remote requests are refused until this is corrected.",
+        severity: "error",
+      });
+    }
+
     // Record what this device can actually do. Until this runs, the registry holds a
     // device with no manifest, and routing correctly refuses to send it work — which
     // looks exactly like a machine that cannot do anything.
@@ -283,21 +343,70 @@ export class VesperRuntime {
     },
   ): Promise<AgentTurn> {
     if (!this.started) await this.start();
+    let completed: AgentTurn | null = null;
     try {
-      const turn = await this.agent.handle(text, options);
+      completed = await this.agent.handle(text, options);
+      // Persisting the queue is bookkeeping that happens *after* the turn is done. A
+      // failure here used to discard the whole successful turn and replace it with one
+      // asserting `could_not_access` and no tool calls — the turn had run, its side
+      // effects had landed, and the account of it was thrown away.
       await this.persistConfirmations();
-      return turn;
+      return completed;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log.error("error", "Agent turn failed", { error: message });
       await this.recordLastError(message, text);
+
+      // Report what actually happened, not what would be convenient.
+      //
+      // This used to synthesise a turn with no tool calls and no pending confirmations,
+      // which is a false claim in the direction nobody checks: a memory write that had
+      // already landed, a workspace the owner's next turn would run in, an app that had
+      // been launched — all absent from the only structured account of the turn, while
+      // the turn asserted `could_not_access`.
+      //
+      // The confirmations are the sharper half. The queue is live and the entry is still
+      // approvable, but the console only walks `turn.pendingConfirmations`, so a
+      // confirmation raised during a failed turn was invisible to the person who is
+      // supposed to answer it — and could not be declined.
+      // Three cases, in order of how much is known: the turn finished and only the
+      // bookkeeping after it failed; the turn threw partway and carried its records out;
+      // or something failed before any record existed.
+      const ran = completed?.toolCalls ?? (error instanceof TurnFailure ? error.toolCalls : []);
+      if (completed) {
+        return {
+          ...completed,
+          reply:
+            `${completed.reply}\n\n[I could not save my record of this turn: ${message}. ` +
+            `What is described above did happen.]`,
+          epistemic: completed.epistemic.includes("could_not_access")
+            ? completed.epistemic
+            : [...completed.epistemic, "could_not_access"],
+          pendingConfirmations: [...this.confirmations.values()],
+        };
+      }
+      const queued = [...this.confirmations.values()];
+      const epistemic: EpistemicTag[] = ["could_not_access"];
+      for (const record of ran) {
+        const tag = record.result?.epistemic;
+        if (tag && !epistemic.includes(tag)) epistemic.push(tag);
+      }
+      const ranNote =
+        ran.length > 0
+          ? ` ${ran.length} step${ran.length === 1 ? "" : "s"} had already run before it failed: ` +
+            `${ran.map((record) => record.toolName).join(", ")}.`
+          : "";
+      const queuedNote =
+        queued.length > 0
+          ? ` ${queued.length} action${queued.length === 1 ? " is" : "s are"} still waiting for your confirmation.`
+          : "";
       return {
         id: createId("turn"),
         userText: text,
-        reply: `I hit an internal error and recovered: ${message}`,
-        epistemic: ["could_not_access"],
-        toolCalls: [],
-        pendingConfirmations: [],
+        reply: `I hit an internal error and recovered: ${message}.${ranNote}${queuedNote}`,
+        epistemic,
+        toolCalls: ran,
+        pendingConfirmations: queued,
         workspaceId: this.workspaces.current().id,
         notifications: this.notifications.recent(5),
         events: this.events.recent({ limit: 8 }),
@@ -451,6 +560,10 @@ export class VesperRuntime {
         reason: typeof rec.reason === "string" ? rec.reason : "confirmation required",
         createdAt: typeof rec.createdAt === "string" ? rec.createdAt : new Date().toISOString(),
         workspaceId: typeof rec.workspaceId === "string" ? rec.workspaceId : "general",
+        // An unreadable or absent origin is treated as remote-unknown, not as local.
+        // A restored confirmation is the one case where we cannot ask who queued it,
+        // and guessing "local" there would hand a persisted record local authority.
+        requestedBy: readRequestedBy(rec.requestedBy),
       });
     }
     if (this.confirmations.size > 0) {
@@ -522,6 +635,32 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     log.warn("lifecycle", "Config invalid; using defaults", { errors: parsed.errors.join("; ") });
   }
   const storage = options.storage ?? new MemoryStorage();
+  // Declare where Vesper's own files live before anything can be asked to read them.
+  // Every directory Vesper owns, not just the data one. paths.ts puts config, logs and
+  // models in *sibling* directories of data, so registering data alone left the config
+  // file and the audit log readable by an autonomous fs_read — the audit log being the
+  // record of what Vesper has been asked to do.
+  registerOwnPaths([
+    options.dirs?.data,
+    options.dirs?.config,
+    options.dirs?.logs,
+    options.dirs?.models,
+    options.dirs?.root,
+    // The siblings, derived when they were not given.
+    //
+    // `resolveVesperDirs` nests `data` inside the Vesper root and puts config, logs and
+    // models beside it, so a caller passing only `{ data }` — which every embedder and
+    // the production host did until this campaign — left the config file and the audit
+    // log as ordinary readable documents.
+    //
+    // The *names* are derived, not the parent itself. Registering `dirname(data)` would
+    // be simpler and wrong: a root that legitimately contains the user's notes next to
+    // `data/` would stop being readable at all. paths.ts owns this layout, so these are
+    // exactly the directories it creates and nothing else.
+    ...(options.dirs?.data && !options.dirs?.root
+      ? ["config", "logs", "models"].map((name) => join(dirname(options.dirs!.data), name))
+      : []),
+  ]);
 
   // Device identity, the registry, and the task queue are constructed before anything
   // that might want to know which machine this is.
@@ -548,7 +687,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   });
   const deviceIdentity = loadedIdentity.identity;
   const hostPosture: HostPosture = options.hostPosture ?? "owned";
-  const devices = new DeviceRegistry({ storage, self: deviceIdentity.publicIdentity() });
+  const devices = new DeviceRegistry({
+    storage,
+    revocations: options.revocationStorage,
+    self: deviceIdentity.publicIdentity(),
+  });
   const taskQueue = new TaskQueue({ storage });
 
   const memory = new MemoryStore(storage);
@@ -669,7 +812,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   });
   const gate = createPermissionGate(config.permissions, log);
   const confirmations = new Map<string, PendingConfirmation>();
-  const tools = new ToolRegistry(gate, log, confirmations);
+  const tools = new ToolRegistry(gate, log, confirmations, async (id) =>
+    (await devices.get(id))?.trust ?? "unknown",
+  );
   const models = createModelRouter({
     config,
     providers: options.providers,
@@ -723,6 +868,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     history,
     maxToolIterations: config.agent.maxToolIterations,
     deviceId: deviceIdentity.deviceId,
+    deviceTrust: async (id: string) => (await devices.get(id))?.trust ?? "unknown",
+    selfManifest: async () =>
+      (await devices.get(deviceIdentity.deviceId))?.capabilities ?? null,
     describeNow: async () => {
       const [records, tasks] = await Promise.all([devices.list(), taskQueue.list()]);
       const self =
@@ -791,5 +939,25 @@ function emptyProfile(config: VesperConfig): CapabilityProfile {
     optimizer: "mocked_simulated",
     voice: "documented_not_implemented",
     notes: [],
+  };
+}
+
+/**
+ * Read a persisted confirmation's origin without trusting the file.
+ *
+ * Absent or malformed means "we cannot tell", and the safe reading of that is *not*
+ * "local". A record on disk is attacker-influenceable in a way a live in-process origin
+ * is not, so an unreadable origin resolves to a remote device with no id — the most
+ * restricted thing it could be.
+ */
+function readRequestedBy(value: unknown): { kind: "local" | "remote"; deviceId?: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { kind: "remote" };
+  }
+  const record = value as { kind?: unknown; deviceId?: unknown };
+  const kind = record.kind === "local" ? "local" : "remote";
+  return {
+    kind,
+    deviceId: typeof record.deviceId === "string" ? record.deviceId : undefined,
   };
 }
