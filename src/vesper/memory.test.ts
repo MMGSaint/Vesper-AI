@@ -6,6 +6,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { JsonValue } from "./types.ts";
+import { testRuntime } from "./test-helpers.ts";
 
 function seededStorage(entries: unknown[]): MemoryStorage {
   return new MemoryStorage({ "memory.entries": entries as unknown as JsonValue });
@@ -236,5 +237,99 @@ describe("memory", () => {
     }
     assert.equal((await store.stats()).persistent, 2);
     assert.deepEqual(dropped, ["a"]);
+  });
+});
+
+describe("meta-question retrieval — asking Vesper what it knows in general", () => {
+  /**
+   * Before this, three distinct defects combined into one bad experience:
+   *
+   *   1. The intent extractor lifted "me?" out of "what do you know about me?" as the
+   *      raw query, punctuation and all, so `memory_search` looked for the literal
+   *      token `me?` and found nothing.
+   *   2. Even without the punctuation, "me" is a stopword, so the search dropped it
+   *      before scoring and returned filler-only matches.
+   *   3. A user asking "what do you know about me" wants an overview, not a keyword
+   *      search — the right answer is a summary of what's stored, not a lookup.
+   *
+   * Fixed at the intent boundary: punctuation is trimmed once, self-referential-only
+   * queries are treated as summarise, and the recall handler uses `memory_summarize`
+   * for the empty-query case.
+   */
+  async function withThreeFacts() {
+    const runtime = await testRuntime();
+    await runtime.memory.remember({ category: "fact", key: "streaming schedule", value: "I stream on Thursdays.", source: "user" });
+    await runtime.memory.remember({ category: "preference", key: "coffee", value: "Black, no sugar.", source: "user" });
+    await runtime.memory.remember({ category: "fact", key: "birthday", value: "June.", source: "user" });
+    return runtime;
+  }
+
+  for (const question of [
+    "what do you know about me?",
+    "what do you know about me",
+    "what do you remember about me?",
+    "tell me what you know",
+    "what do you know",
+    "list my memories",
+  ]) {
+    it(`summarises for the meta-question '${question}'`, async () => {
+      const runtime = await withThreeFacts();
+      const turn = await runtime.chat(question);
+      // The consequence: every one of the user's own facts is in the reply.
+      assert.match(turn.reply, /streaming schedule|Thursdays/i, `reply missed the streaming fact: ${turn.reply}`);
+      assert.match(turn.reply, /coffee/i, `reply missed the coffee fact: ${turn.reply}`);
+      assert.match(turn.reply, /birthday|June/i, `reply missed the birthday fact: ${turn.reply}`);
+      // And it went via memory_summarize, not a literal search for "me" / "me?".
+      assert.ok(
+        turn.toolCalls.some((call) => call.toolName === "memory_summarize"),
+        `expected memory_summarize; called: ${turn.toolCalls.map((c) => c.toolName).join(", ")}`,
+      );
+      assert.ok(
+        !turn.toolCalls.some((call) => call.toolName === "memory_search" && (call.args as { query?: string }).query === "me?"),
+        "the literal 'me?' search reappeared",
+      );
+      await runtime.stop();
+    });
+  }
+
+  it("strips trailing punctuation before searching, so 'coffee?' finds the coffee memory", async () => {
+    // Before this, the intent extractor lifted the raw tail out of the question — so
+    // "what do you know about coffee?" searched for the literal token "coffee?" and
+    // missed the entry keyed "coffee". Punctuation is stripped once at the intent
+    // boundary; that is the only place a question mark can smuggle itself into a search.
+    const runtime = await withThreeFacts();
+    for (const question of ["what do you know about coffee?", "what do you know about coffee!"]) {
+      const turn = await runtime.chat(question);
+      const call = turn.toolCalls.find((c) => c.toolName === "memory_search");
+      assert.ok(call, `no memory_search for ${question}`);
+      assert.equal(
+        (call.args as { query?: string }).query,
+        "coffee",
+        `punctuation reached the search query for '${question}': ${JSON.stringify(call.args)}`,
+      );
+      assert.match(turn.reply, /coffee.*(Black|sugar)/i, `punctuated ${question} missed the value: ${turn.reply}`);
+    }
+    await runtime.stop();
+  });
+
+  it("still handles a specific 'about X' question with search, not summarise", async () => {
+    // Narrowing, not severing: "what do you know about coffee" should still search.
+    const runtime = await withThreeFacts();
+    const turn = await runtime.chat("what do you know about coffee");
+    assert.ok(
+      turn.toolCalls.some((call) => call.toolName === "memory_search" && (call.args as { query?: string }).query === "coffee"),
+      `expected memory_search for 'coffee', got: ${turn.toolCalls.map((c) => `${c.toolName}(${JSON.stringify(c.args)})`).join(", ")}`,
+    );
+    assert.match(turn.reply, /coffee.*(Black|sugar)/i, `reply missed the coffee value: ${turn.reply}`);
+    await runtime.stop();
+  });
+
+  it("says so plainly when nothing has been stored", async () => {
+    const runtime = await testRuntime();
+    const turn = await runtime.chat("tell me what you know");
+    // With no user facts, the seeded memories are still present, so what matters is
+    // that a summary was requested and returned — not a literal token search.
+    assert.ok(turn.toolCalls.some((call) => call.toolName === "memory_summarize"));
+    await runtime.stop();
   });
 });

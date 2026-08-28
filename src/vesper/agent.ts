@@ -790,11 +790,24 @@ export class Agent {
         );
       }
       case "recall": {
-        const record = await invoke("memory_search", { query: intent.slots.query });
+        // An empty query is the summarise path — the user asked what Vesper knows
+        // in general, not for a specific fact.
+        const q = intent.slots.query.trim();
+        if (q === "") {
+          const record = await invoke("memory_summarize", {});
+          const hits = Array.isArray(record.result?.data) ? record.result?.data : [];
+          const text = hits.length === 0
+            ? "I have not been told anything to remember yet."
+            : `I remember ${hits.length} thing${hits.length === 1 ? "" : "s"}:\n${(hits as { key: string; value: string; category: string }[])
+                .map((hit) => `• [${hit.category}] ${hit.key}: ${hit.value}`)
+                .join("\n")}`;
+          return this.turn(userText, text, ["checked"], toolCalls, [], at);
+        }
+        const record = await invoke("memory_search", { query: q });
         const hits = Array.isArray(record.result?.data) ? record.result?.data : [];
         const text =
           hits.length === 0
-            ? `I checked memory for '${intent.slots.query}' and found nothing.`
+            ? `I checked memory for '${q}' and found nothing.`
             : `I checked memory:\n${(hits as { key: string; value: string; category: string }[])
                 .map((hit) => `• ${hit.key}: ${hit.value}`)
                 .join("\n")}`;
@@ -1144,8 +1157,31 @@ export function classifyIntent(text: string): DirectIntent | null {
   const forget = /^(forget|delete memory)\s+(.+)$/i.exec(trimmed);
   if (forget) return { kind: "forget", confidence: 0.95, slots: { key: forget[2].trim() } };
 
+  // "tell me what you know", "what do you know", "what do you remember" —
+  // meta-questions the user asks when they want to see everything Vesper has stored.
+  // These always route to a summary; a literal search would strip every content-bearing
+  // token as a stopword and turn up nothing.
+  if (
+    /^(?:tell me )?what do you (?:know|remember)\s*$/i.test(trimmed) ||
+    /^(?:tell me )?what do you (?:know|remember) about\s+(?:me|us|myself|yourself|it all|everything|anything)[?.!]*$/i.test(trimmed) ||
+    /^tell me what you know[?.!]*$/i.test(trimmed) ||
+    /^(?:list|show)\s+(?:my )?memories[?.!]*$/i.test(trimmed)
+  ) {
+    return { kind: "recall", confidence: 0.9, slots: { query: "" } };
+  }
   if (/what do you (remember|know) about\s+(.+)/i.test(trimmed) || /^recall\s+(.+)/i.test(trimmed)) {
-    const query = trimmed.replace(/what do you (remember|know) about\s+/i, "").replace(/^recall\s+/i, "");
+    const raw = trimmed
+      .replace(/what do you (remember|know) about\s+/i, "")
+      .replace(/^recall\s+/i, "");
+    // Trailing punctuation ("me?") reached the search verbatim before this, so
+    // memory_search looked for the literal token `me?` and missed a fact it had just
+    // stored. Trim quotation and terminal punctuation once at the intent boundary.
+    const query = raw.replace(/^["'`]|["'`.!?…,]+$/g, "").trim();
+    // If the cleaned query is a self-referential stopword, treat it as "summarise".
+    // Adding "me?" to a stopword set does not help — the punctuation must be gone first.
+    if (query === "" || /^(?:me|us|myself|yourself|everything|anything|it all)$/i.test(query)) {
+      return { kind: "recall", confidence: 0.9, slots: { query: "" } };
+    }
     return { kind: "recall", confidence: 0.9, slots: { query } };
   }
 

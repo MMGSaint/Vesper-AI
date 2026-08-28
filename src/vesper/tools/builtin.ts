@@ -318,6 +318,27 @@ export function registerBuiltinTools(input: {
       };
     },
   );
+  registry.register(
+    spec(
+      "memory_summarize",
+      "List everything Vesper remembers in the active workspace, grouped by category. Use this for open-ended questions like 'what do you know about me' — it returns a compact overview rather than searching for a literal token that stopword-filtering would strip.",
+      "read",
+      {},
+    ),
+    async (_args, context) => {
+      const overview = await memory.summarize(context.workspaceId);
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: overview,
+        // `summarize` already returns a formatted string; the data field carries the same
+        // information as a compact array so a model can walk it.
+        data: (await memory.search("", { workspaceId: context.workspaceId, limit: 50 })) as unknown as JsonObject,
+      };
+    },
+  );
+
+
 
   registry.register(
     spec(
