@@ -16,7 +16,7 @@ Last touched 2026-08-28. Everything below is observed output or a repo fact.
 | Authoritative repo | **`MMGSaint/vesper-ai`**, working copy `/home/user/vesper-ai` |
 | Not the target | `/home/user/Vesper-personal-assistant-` is a **second working copy of this same repository**, sitting on a detached HEAD several commits behind the tip. It is not an empty scaffold — earlier checkpoints said so and were wrong. **Do all work in `/home/user/vesper-ai`.** A stale second checkout is an active hazard: it made four adversarial verifier agents report real code as "non-existent" (see `security/BACKLOG.md` §4b). |
 | Work branch | `claude/vesper-local-ai-build-ti8ofa` |
-| HEAD | `dba22dd`, pushed, **29 commits ahead of `origin/main`** |
+| HEAD | `6e958c1`, pushed, **33 commits ahead of `origin/main`** |
 | `origin/main` | `9b7d924` — the round-2 security campaign is merged there |
 
 Verify git state rather than trusting this table if any time has passed.
@@ -79,22 +79,59 @@ user text → deterministic intent OR model → autonomy governor → permission
 
 | Check | Result |
 |---|---|
-| `npm test` | **880 pass, 0 fail** (was 671 at session-start of Phase 1) |
-| `npm run security:quick` | **294 pass, 0 fail** |
-| `npm run hygiene` | clean, 344 files |
+| `npm test` | **894 pass, 0 fail, 0 skipped** (was 671 at session-start of Phase 1) |
+| `npm run security:quick` | **297 pass, 0 fail** |
+| `npm run hygiene` | clean, 345 files |
 | `npx tsc --noEmit` | clean |
 | Journal adversarial workflow | 30 CONFIRMED findings — all HIGH fixed with regression tests |
 | Phase-2 attack suite | 28 CONFIRMED (1 CRITICAL, 10 HIGH) across scheduler / governor / checkpoint, **plus 12 capsule findings the verifiers wrongly refuted** — all fixed, 37 regression tests |
+| CI, both platforms | **green on `6e958c1`** — ubuntu-latest and windows-latest, all nine steps |
+| CodeQL | run on this branch by `workflow_dispatch` (it is otherwise `main`-only) |
 
 Every load-bearing defence added this session is either mutation-proven or
 attack-proven. Three defences are honestly labelled defence-in-depth rather
 than claimed load-bearing (all in journal / workspaces code).
+
+**windows-latest was red on every commit of this branch** from `6d90a466` to
+`8e6f359`, while `main` stayed green on both platforms — so the branch carried
+the regression the whole way, and it was not infrastructure. The cause was the
+entry guard in `host/main.ts`:
+
+```ts
+process.argv[1].endsWith("host/main.ts")   // a POSIX-shaped suffix
+```
+
+On Windows `argv[1]` is `D:\a\...\src\vesper\host\main.ts`, with
+backslashes, so the suffix never matched and `main()` was never called. The
+process loaded the module, did nothing, and exited 0. Every child-process test
+saw `exit=0 stdout="" stderr=""`.
+
+The red build was the smaller half. On Windows — the only OS Vesper targets —
+`--ask`, `--diagnostics`, `--doctor`, `--status`, `--export-memory`,
+`--client-hello` and `--first-boot-report` all did nothing and reported
+success. Fixed in `6e958c1` by comparing resolved paths, with six regression
+tests that run the guard's decision against Windows-shaped input from Linux.
+
+One earlier diagnosis was wrong and is recorded as wrong: `dc281c5` attributed
+the failure to Windows' asynchronous pipe writes truncating stdout on
+`process.exit()`, and that fix changed nothing, because there was never any
+output to flush. The flush stays — Node documents pipe writes as async on
+Windows, so exiting without draining is a real latent bug on that same path —
+but it was a second, quieter bug, not the cause. CI evidence separated them.
 
 ---
 
 ## 4. Session commit list (Phase 2 half)
 
 ```
+6e958c1 fix(host): the entry guard never matched on Windows, so nothing ran
+8e6f359 fix(security): a decline must not launder a remote request into a local turn
+dc281c5 fix(host): flush stdout before exit (a real latent bug; not the CI cause)
+db541aa fix(repo): normalize the lockfile, correct how the verifier failure is recorded
+8bb3330 docs: record what the phase-2 attack pass found, fixed, and deliberately left
+dba22dd fix(capsule): verify against the registered key, not the embedded one
+d593562 fix(scheduler): persist crash recovery; refuse terminal transitions
+2441148 fix(autonomy): rankOf fails closed so an unknown level cannot bypass tightening
 92edb97 feat(hardware): probe interface + physical-PC validation checklist
 63c96ba fix(events): harden the durable journal against 10+ adversarial findings
 849d629 feat(continuity): session capsule — signed handoff, no transport
@@ -103,6 +140,12 @@ cae3771 feat(autonomy): governor that wraps the permission gate and only tighten
 02278f6 feat(scheduler): a task scheduler that actually drives the queue
 c735224 feat(events): durable event journal alongside the 500-entry hot ring
 ```
+
+Two of the closing commits are security fixes rather than build work.
+`8e6f359` is the one worth naming: a remote operator's **decline** of a pending
+confirmation was routed through the local turn path, dropping the remote origin
+and laundering a remote request into a local one. Declining is an authorization
+decision like approving, and it now carries the same origin.
 
 Phase 1 commits are above these in the log (a9a30aa through 6d90a46), 15
 commits landing the assistant foundation.
@@ -238,13 +281,52 @@ finding came back false. A CRITICAL identity-spoofing bug was nearly dismissed
 on that basis.
 
 An agent that finds a file missing cannot tell "this does not exist" from "this
-does not exist *at the commit I am standing on*". Future passes should have
-agents report their repo root **and `git rev-parse HEAD`**, and should treat a
-"file does not exist" refutation as a claim about the harness until the commit
-is confirmed. Full write-up in `security/BACKLOG.md` §4b.
+does not exist *at the commit I am standing on*". Full write-up in
+`security/BACKLOG.md` §4b.
 
-Keep `npm run security:quick` as a permanent regression gate. Do not restart
-the red-team campaign as part of the build mission; track platform/security
-gaps in `security/BACKLOG.md`. Phase-2 attack findings and their fixes are in
-commits 63c96ba, 2441148, d593562, and dba22dd; what was deliberately not
-fixed is in `security/BACKLOG.md` §4b.
+**Mandatory preflight for any future security or verifier pass.** Before
+reporting on a file, an agent must establish and state:
+
+| | |
+|---|---|
+| repository root | not inferred from the current working directory |
+| worktree | which of the two checkouts it is standing in |
+| branch | by name |
+| `git rev-parse HEAD` | the exact commit, verbatim |
+| target commit | the one it was asked to audit |
+| file path | as it exists at that commit |
+| working-tree state | clean or dirty |
+
+A verifier may not conclude "this file does not exist" — only "this file does
+not exist **at commit X**". A bare "does not exist" is a claim about the
+harness until the commit is confirmed.
+
+---
+
+## 10. Campaign status
+
+The focused security campaign that ran alongside Phase 2 is **closed**, not
+abandoned. What closed it: every CRITICAL and HIGH finding is either fixed with
+a named regression test, or recorded in `security/BACKLOG.md` §4b/§4c with the
+reason it was not fixed. Phase-2 attack findings and their fixes are in commits
+63c96ba, 2441148, d593562, dba22dd, and 8e6f359.
+
+Two confused-deputy findings remain open in §4c. They are recorded, not
+silently closed.
+
+**Comprehensive pre-1.0 adversarial testing remains planned and has not been
+performed.** That milestone is deliberately reserved: it should run against a
+build that is feature-complete, ideally on the physical target machine, rather
+than being spent piecemeal during construction. Nothing in this checkpoint
+should be read as "Vesper is secure" — it says which specific attacks were
+tried, which defences are mutation-proven, and what is still unexamined.
+
+Keep `npm run security:quick` as a permanent regression gate. It must not be
+weakened, and tests must not be removed to make it pass.
+
+**Transport is still not wired.** Session capsules have a shape, a signature,
+and a verify/ingest path; nothing carries them between machines. `.listen(` in
+the tree is `models/ollama-loopback.ts` (a test server, imported only by its
+own test, bound to `127.0.0.1:0`) and `live-backend.test.ts`. Opening a
+listener on a personal machine needs an explicit user decision that has not
+been made.
