@@ -340,3 +340,181 @@ describe("the full agent path runs against a real socket", () => {
     );
   });
 });
+
+describe("the model→tool call path is honest about failures", () => {
+  // Every case below drives the runtime through a real socket so no test-only shortcut
+  // hides what would happen with a real Ollama. The consequence-based check is always
+  // the tool-call record: a request that reached the tool registry and was refused
+  // must be visible in `turn.toolCalls`, not silently dropped or invented.
+
+  it("records `Unknown tool` for a tool call the registry has never heard of", async () => {
+    await withLoopback(
+      {
+        chat: {
+          "loopback-agent": [
+            {
+              frames: [{ toolCall: { name: "tool_that_does_not_exist", args: {} } }],
+              finishReason: "tool_calls",
+            },
+            {
+              frames: [{ content: "I could not do that." }],
+              finishReason: "stop",
+            },
+          ],
+        },
+      },
+      async (loopback) => {
+        const provider = createOllamaProvider({ baseUrl: loopback.url, defaultModel: "loopback-agent" });
+        const runtime = await testRuntime({
+          providers: [provider],
+          config: {
+            models: {
+              roles: { everyday: { provider: "ollama", model: "loopback-agent" } },
+              endpoints: { ollama: loopback.url },
+            },
+          },
+        });
+        const turn = await runtime.chat("please describe the weather in Paris in one line", { origin: { kind: "local" } });
+        const bad = turn.toolCalls.find((c) => c.toolName === "tool_that_does_not_exist");
+        assert.ok(bad, "the unknown tool call was not recorded");
+        assert.equal(bad.decision.allowed, false);
+        assert.equal(bad.decision.level, "never");
+        assert.match(bad.decision.reason, /Unknown tool/);
+        assert.equal(bad.result?.ok, false);
+        await runtime.stop();
+      },
+    );
+  });
+
+  it("refuses a never-tier tool the model asks for, and stays refused after retry", async () => {
+    // The never tier's whole point is that no route — model, remote device, scheduled
+    // task — can reach it. Removing the enforcement would let the model take an action
+    // no user ever asked for.
+    await withLoopback(
+      {
+        chat: {
+          "loopback-agent": [
+            {
+              frames: [{ toolCall: { name: "disk_wipe", args: {} } }],
+              finishReason: "tool_calls",
+            },
+            {
+              // Model tries again after seeing the refusal — the runtime should still
+              // refuse, and the repeated-call detector should break the loop.
+              frames: [{ toolCall: { name: "disk_wipe", args: {} } }],
+              finishReason: "tool_calls",
+            },
+            {
+              frames: [{ content: "That is not something I will do." }],
+              finishReason: "stop",
+            },
+          ],
+        },
+      },
+      async (loopback) => {
+        const provider = createOllamaProvider({ baseUrl: loopback.url, defaultModel: "loopback-agent" });
+        const runtime = await testRuntime({
+          providers: [provider],
+          config: {
+            models: {
+              roles: { everyday: { provider: "ollama", model: "loopback-agent" } },
+              endpoints: { ollama: loopback.url },
+            },
+          },
+        });
+        const turn = await runtime.chat("please describe the weather in Paris in one line", { origin: { kind: "local" } });
+        const refusals = turn.toolCalls.filter((c) => c.toolName === "disk_wipe");
+        assert.ok(refusals.length >= 1, "disk_wipe call was never recorded");
+        for (const record of refusals) {
+          assert.equal(record.decision.allowed, false, "disk_wipe was allowed by the permission gate");
+          assert.notEqual(record.result?.ok, true, "disk_wipe returned a successful result");
+        }
+        await runtime.stop();
+      },
+    );
+  });
+
+  it("truncates a round that asks for more than MAX_TOOL_CALLS_PER_ROUND calls", async () => {
+    // A steered model can try to widen its reach in one shot. The runtime caps the width
+    // of a single round; the extras are dropped, not silently executed. This test proves
+    // the cap by asking for many calls and asserting fewer records than requested.
+    const asked = 20;
+    const oversized = Array.from({ length: asked }, () => ({
+      toolCall: { name: "system_info", args: {} },
+    }));
+    await withLoopback(
+      {
+        chat: {
+          "loopback-agent": [
+            { frames: oversized, finishReason: "tool_calls" },
+            { frames: [{ content: "Done." }], finishReason: "stop" },
+          ],
+        },
+      },
+      async (loopback) => {
+        const provider = createOllamaProvider({ baseUrl: loopback.url, defaultModel: "loopback-agent" });
+        const runtime = await testRuntime({
+          providers: [provider],
+          config: {
+            models: {
+              roles: { everyday: { provider: "ollama", model: "loopback-agent" } },
+              endpoints: { ollama: loopback.url },
+            },
+          },
+        });
+        const turn = await runtime.chat("please describe the weather in Paris in one line", { origin: { kind: "local" } });
+        const executed = turn.toolCalls.filter((c) => c.toolName === "system_info").length;
+        assert.ok(
+          executed < asked,
+          `expected fewer than ${asked} executed calls, got ${executed} — the cap did not apply`,
+        );
+        assert.ok(executed > 0, "no calls were executed at all");
+        await runtime.stop();
+      },
+    );
+  });
+
+  it("refuses malformed args and does not run the tool", async () => {
+    // `memory_remember` requires `key` and `value`. The registry validates arguments
+    // against the advertised schema before the handler runs; a model that omits a
+    // required field must be refused, not silently coerced.
+    await withLoopback(
+      {
+        chat: {
+          "loopback-agent": [
+            {
+              frames: [{ toolCall: { name: "memory_remember", args: { value: "no key given" } } }],
+              finishReason: "tool_calls",
+            },
+            {
+              frames: [{ content: "I could not save that." }],
+              finishReason: "stop",
+            },
+          ],
+        },
+      },
+      async (loopback) => {
+        const provider = createOllamaProvider({ baseUrl: loopback.url, defaultModel: "loopback-agent" });
+        const runtime = await testRuntime({
+          providers: [provider],
+          config: {
+            models: {
+              roles: { everyday: { provider: "ollama", model: "loopback-agent" } },
+              endpoints: { ollama: loopback.url },
+            },
+          },
+        });
+        const before = await runtime.memory.search("no key given", { limit: 5 });
+        assert.equal(before.length, 0, "test precondition: memory should not already contain this");
+
+        await runtime.chat("please describe the weather in Paris in one line", { origin: { kind: "local" } });
+
+        // The consequence: no memory was written. Asserting on the record alone would
+        // pass even if the handler somehow ran; this asserts on the store itself.
+        const after = await runtime.memory.search("no key given", { limit: 5 });
+        assert.equal(after.length, 0, "malformed memory_remember reached the store");
+        await runtime.stop();
+      },
+    );
+  });
+});
