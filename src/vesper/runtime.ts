@@ -17,6 +17,7 @@ import { WorkspaceManager } from "./workspaces.ts";
 import { EventBus } from "./events.ts";
 import { EventJournal } from "./event-journal.ts";
 import { TaskExecutorRegistry, TaskScheduler, registerBuiltinExecutors } from "./task-scheduler.ts";
+import { AutonomyGovernor, defaultAutonomyPolicy } from "./autonomy.ts";
 import { NotificationHub } from "./notifications.ts";
 import { createSimulatedHardware, type SimulatedHardware } from "./hardware/simulated.ts";
 import {
@@ -102,6 +103,7 @@ export class VesperRuntime {
   readonly journal: EventJournal;
   readonly taskExecutors: TaskExecutorRegistry;
   readonly taskScheduler: TaskScheduler;
+  readonly autonomy: AutonomyGovernor;
   readonly notifications: NotificationHub;
   readonly hardware: SimulatedHardware;
   readonly optimizer: OptimizerAdapter;
@@ -138,6 +140,7 @@ export class VesperRuntime {
       journal: EventJournal;
       taskExecutors: TaskExecutorRegistry;
       taskScheduler: TaskScheduler;
+      autonomy: AutonomyGovernor;
       notifications: NotificationHub;
       hardware: SimulatedHardware;
       optimizer: OptimizerAdapter;
@@ -168,6 +171,7 @@ export class VesperRuntime {
     this.journal = parts.journal;
     this.taskExecutors = parts.taskExecutors;
     this.taskScheduler = parts.taskScheduler;
+    this.autonomy = parts.autonomy;
     this.notifications = parts.notifications;
     this.hardware = parts.hardware;
     this.optimizer = parts.optimizer;
@@ -965,6 +969,12 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   const tools = new ToolRegistry(gate, log, confirmations, async (id) =>
     (await devices.get(id))?.trust ?? "unknown",
   );
+  const autonomy = new AutonomyGovernor({
+    policy: defaultAutonomyPolicy(),
+    events,
+    log,
+  });
+  tools.setAutonomyGovernor(autonomy);
   const models = createModelRouter({
     config,
     providers: options.providers,
@@ -1056,6 +1066,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     journal,
     taskExecutors,
     taskScheduler,
+    autonomy,
     notifications,
     hardware,
     optimizer,

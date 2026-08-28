@@ -53,11 +53,13 @@ function device(input: {
     trust: input.trust ?? "trusted",
     capabilities,
     presence: {
-      lastSeenAt: "2026-01-01T00:00:00Z",
-      activity: input.online === false ? "offline" : "active",
-      reachability: input.online === false ? "unreachable" : "online",
+      lastSeen: "2026-01-01T00:00:00Z",
+      activity: input.online === false ? "unknown" : "active",
+      reachability: input.online === false ? "offline" : "online",
     },
-  };
+    enrolledAt: "2026-01-01T00:00:00Z",
+    revokedAt: null,
+  } as DeviceRecord;
 }
 
 function harness(options: { enabled?: boolean; deviceId?: string; devices?: DeviceRecord[]; executors?: TaskExecutor | { [kind: string]: TaskExecutor } } = {}) {
