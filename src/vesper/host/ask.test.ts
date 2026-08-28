@@ -52,9 +52,11 @@ describe("--ask answers one question and exits", () => {
   it("reports honestly that no model is loaded rather than inventing an answer", async () => {
     // With no local backend reachable, the truthful reply is that there is none — not a
     // fabricated one. This is the "do not conflate model output with execution results"
-    // rule at the point a user would actually notice it.
+    // rule at the point a user would actually notice it. The probe must be a question
+    // no deterministic intent regex captures — otherwise the truthful-fallback branch
+    // is not the branch that answered.
     const cwd = await sandbox();
-    const result = await ask(["--ask", "catch me up"], cwd);
+    const result = await ask(["--ask", "please write a haiku about a cat"], cwd);
     assert.equal(result.code, 0);
     assert.match(result.stdout, /no local inference backend|not available/i);
   });

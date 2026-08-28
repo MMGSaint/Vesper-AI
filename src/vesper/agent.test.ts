@@ -332,3 +332,97 @@ describe("agent", () => {
     assert.equal(intent?.slots.category, undefined);
   });
 });
+
+describe("agent — catch me up", () => {
+  it("classifies 'catch me up' as catchup, ahead of the general status regex", () => {
+    assert.equal(classifyIntent("catch me up")?.kind, "catchup");
+    assert.equal(classifyIntent("what did I miss")?.kind, "catchup");
+    assert.equal(classifyIntent("what's new")?.kind, "catchup");
+    assert.equal(classifyIntent("what happened")?.kind, "catchup");
+    assert.equal(classifyIntent("what happened while I was away")?.kind, "catchup");
+  });
+
+  it("summarises events by category, and drops idle_tick as background noise", async () => {
+    // The mission's own example question: "Vesper, catch me up." A catchup reply is
+    // built from what the runtime already knows — nothing is fabricated. Every category
+    // this test seeds must appear in the reply; idle_tick must not.
+    const runtime = await testRuntime();
+    runtime.events.emit({
+      type: "security.state_unreadable",
+      severity: "error",
+      title: "State was unreadable on startup",
+
+    });
+    runtime.events.emit({
+      type: "application.started",
+      severity: "info",
+      title: "Chrome started",
+
+    });
+    runtime.events.emit({
+      type: "game.started",
+      severity: "info",
+      title: "Squad launched",
+
+    });
+    runtime.events.emit({
+      type: "workspace.switch",
+      severity: "info",
+      title: "Switched to gaming",
+
+    });
+    runtime.events.emit({
+      type: "optimizer.state",
+      severity: "info",
+      title: "Optimizer engaged",
+
+    });
+    // Noise the catchup summary must drop.
+    for (let i = 0; i < 20; i++) {
+      runtime.events.emit({
+        type: "lifecycle.idle_tick",
+        severity: "info",
+        title: "Idle tick",
+
+      });
+    }
+
+    const turn = await runtime.chat("catch me up");
+
+    assert.match(turn.reply, /Security notices.*State was unreadable/);
+    assert.match(turn.reply, /Applications.*Squad launched/);
+    assert.match(turn.reply, /Workspace changes.*Switched to gaming/);
+    assert.match(turn.reply, /Optimizer state changes.*Optimizer engaged/);
+    // The 20 idle_ticks must not appear as lifecycle titles or as an inflated count.
+    // The whole lifecycle badge only counts start/stop/pause, so the digest should read
+    // "Lifecycle: 1 start." even though the ring holds 20 idle_ticks plus one start.
+    assert.ok(!/idle tick/i.test(turn.reply), "idle_tick events must not appear in the digest");
+    assert.match(turn.reply, /Lifecycle: 1 start\./);
+    assert.ok(!/Lifecycle:.*21/i.test(turn.reply), "the 20 idle_ticks must not inflate any count");
+    assert.match(turn.reply, /workspace .+, \d+ remembered fact/);
+  });
+
+  it("reports queued confirmations at the top of the catchup", async () => {
+    // A pending confirmation is user-owned business. The mission's rule "confirmation is
+    // not authorization" means the catchup must not silently ignore actions the user
+    // hasn't answered.
+    const runtime = await testRuntime();
+    const optimize = await runtime.chat("optimize this");
+    assert.ok(optimize.pendingConfirmations.length >= 1);
+    const turn = await runtime.chat("catch me up");
+    assert.match(turn.reply, /1 action waiting for your confirmation/);
+  });
+
+  it("summarises a quiet startup as a short lifecycle line plus context", async () => {
+    // A fresh runtime emits a lifecycle.start event on boot. Everything else is quiet.
+    // The catchup should report the start and the context, and nothing else — no
+    // security notices, no applications, no confirmations, no fabricated news.
+    const runtime = await testRuntime();
+    const turn = await runtime.chat("catch me up");
+    assert.match(turn.reply, /Lifecycle: 1 start/);
+    assert.match(turn.reply, /workspace .+, \d+ remembered fact/);
+    assert.ok(!/Security notices/.test(turn.reply));
+    assert.ok(!/Applications/.test(turn.reply));
+    assert.ok(!/waiting for your confirmation/.test(turn.reply));
+  });
+});
