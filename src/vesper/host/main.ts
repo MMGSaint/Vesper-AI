@@ -18,6 +18,43 @@ import { formatCrashNote, writeCrashNoteSync } from "./crash.ts";
 /** Kept referenced while the daemon runs; it is the only thing holding the event loop. */
 const KEEP_ALIVE_MS = 60_000;
 
+/**
+ * Wait until everything written to stdout and stderr has actually reached the OS.
+ *
+ * `stream.write()` returning false means the data is buffered; the drain event says it
+ * has been handed over. On Linux a pipe write completes synchronously so this resolves
+ * immediately, which is why the missing flush was invisible in local runs and in the
+ * ubuntu CI job while the windows job failed on every commit for a month.
+ */
+async function flushStdio(): Promise<void> {
+  const settle = (stream: NodeJS.WriteStream): Promise<void> =>
+    new Promise((resolve) => {
+      // `writableNeedDrain` asks whether anything is still buffered WITHOUT appending
+      // to the stream. Probing with `write("")` would queue a chunk of its own, which
+      // on a backpressured stream is one more thing to wait for.
+      if (!stream.writableNeedDrain) {
+        resolve();
+        return;
+      }
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        stream.off("drain", finish);
+        resolve();
+      };
+      stream.once("drain", finish);
+      // Never hang a shutdown on a stream that will not drain (a closed pipe, a
+      // consumer that went away). Deliberately NOT unref'd: an unref'd timer cannot
+      // keep the loop alive, so on a stuck stream the promise would never settle, the
+      // loop would drain, and Node would exit 0 on its own — losing the exit code this
+      // shutdown was called with. `--ask` documents exit 3 for a pending confirmation,
+      // and a wrong exit code is worse than a bounded 2s wait.
+      setTimeout(finish, 2000);
+    });
+  await Promise.all([settle(process.stdout), settle(process.stderr)]);
+}
+
 async function main() {
   const command = parseCli(process.argv.slice(2));
   if (command.kind === "help") {
@@ -107,6 +144,16 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     await host.shutdown(reason);
+    // Flush stdout/stderr BEFORE exiting.
+    //
+    // Node's stream-to-pipe writes are synchronous on Linux and macOS but
+    // ASYNCHRONOUS on Windows (documented under "process I/O"). Every one-shot
+    // command here writes its answer with console.log and then calls this helper,
+    // so on Windows `process.exit()` was terminating the process while the write
+    // was still queued — and the output was simply lost. Not a test artifact: any
+    // Windows user piping `vesper --ask "..."` into a file or another program got
+    // an empty result and a zero exit code, on the one OS Vesper targets.
+    await flushStdio();
     process.exit(code);
   };
   const sigintShutdown = () => void shutdown(0, "SIGINT");
