@@ -116,3 +116,31 @@ describe("--ask reports a confirmation, and never answers it", () => {
     assert.equal(call.ok, null, "a tool awaiting confirmation reported a result");
   });
 });
+
+
+describe("--ask makes a workspace switch survive the next --ask", () => {
+  /**
+   * The user-visible bug: `vesper --ask "switch to gaming"` said "Switched to Gaming.",
+   * but the next `vesper --ask` opened in General with no notice. Without persistence,
+   * a script or a schedule that flips the workspace does nothing durable.
+   *
+   * Driven through the real binary in a shared temp cwd, because whether the two
+   * processes agree is exactly what a unit test cannot answer.
+   */
+  it("switches in one process and reports the new workspace in the next", async () => {
+    const cwd = await sandbox();
+
+    const first = await ask(["--ask", "switch to gaming"], cwd);
+    assert.equal(first.code, 0, first.stderr);
+    assert.match(first.stdout, /gaming/i, `switch reply did not mention the workspace: ${first.stdout}`);
+
+    const second = await ask(["--ask", "status", "--json"], cwd);
+    assert.equal(second.code, 0);
+    const turn = JSON.parse(second.stdout);
+    assert.equal(
+      turn.workspaceId,
+      "gaming",
+      `the second process opened in ${turn.workspaceId}, not gaming — persistence failed`,
+    );
+  });
+});

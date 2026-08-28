@@ -747,7 +747,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
       });
     },
   });
-  const workspaces = new WorkspaceManager(config);
+  const workspaces = new WorkspaceManager(config, { storage, log });
+  // Load-on-start rather than lazy-load per current(). current() is called on every
+  // tool decision and every reply; a synchronous cache miss surfaced only by an await
+  // there would surprise every caller.
+  await workspaces.load();
   // The event log is persisted so correlation still works after a restart or crash,
   // which is exactly when 'what happened just before this?' matters most.
   const events = new EventBus(log, 500, storage);
