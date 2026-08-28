@@ -93,7 +93,7 @@ describe("buildSessionCapsule + verifyCapsule", () => {
       now: () => new Date("2026-01-02T00:00:00Z"),
     });
     assert.ok(capsule.signature.length > 0);
-    const verify = verifyCapsule(capsule);
+    const verify = verifyCapsule(capsule, identity.publicIdentity().publicKey);
     assert.ok(verify.ok, `verify failed: ${verify.reason}`);
   });
 
@@ -142,7 +142,7 @@ describe("buildSessionCapsule + verifyCapsule", () => {
     });
     // Tamper: change the active workspace after signing.
     const tampered = { ...capsule, activeWorkspace: "attacker-controlled" };
-    const verify = verifyCapsule(tampered);
+    const verify = verifyCapsule(tampered, identity.publicIdentity().publicKey);
     assert.equal(verify.ok, false, "a tampered capsule must not verify");
     assert.match(verify.reason ?? "", /signature/);
   });
@@ -165,7 +165,7 @@ describe("buildSessionCapsule + verifyCapsule", () => {
     // Swap alice's sender for bob's public identity — signature is still alice's, so
     // verification with bob's key fails.
     const swapped = { ...capsule, sender: bob.publicIdentity() };
-    assert.equal(verifyCapsule(swapped).ok, false);
+    assert.equal(verifyCapsule(swapped, bob.publicIdentity().publicKey).ok, false);
   });
 
   it("encodeCapsule/decodeCapsule round-trips a valid capsule", async () => {
@@ -189,7 +189,7 @@ describe("buildSessionCapsule + verifyCapsule", () => {
     // Strict deep-equal would fail because JSON.stringify drops `undefined` fields.
     // The semantic contract: what was signed still verifies, and the observable fields
     // round-trip.
-    assert.ok(verifyCapsule(decoded!).ok);
+    assert.ok(verifyCapsule(decoded!, identity.publicIdentity().publicKey).ok);
     assert.equal(decoded!.sessionId, capsule.sessionId);
     assert.equal(decoded!.activeWorkspace, capsule.activeWorkspace);
     assert.equal(decoded!.preferences.length, capsule.preferences.length);
@@ -217,7 +217,8 @@ describe("ingestCapsule — deterministic, restrictive merge", () => {
     let called = 0;
     const result = await ingestCapsule(capsule, {
       self: self.publicIdentity(),
-      trustOf: async () => null, // unknown
+      trustOf: async () => null,
+      publicKeyOf: async () => alice.publicIdentity().publicKey, // unknown
       onPreference: async () => { called += 1; },
     });
     assert.equal(result.accepted, false);
@@ -237,6 +238,7 @@ describe("ingestCapsule — deterministic, restrictive merge", () => {
     const result = await ingestCapsule(capsule, {
       self: self.publicIdentity(),
       trustOf: async () => "revoked",
+      publicKeyOf: async () => alice.publicIdentity().publicKey,
       onPreference: async () => {},
     });
     assert.equal(result.accepted, false);
@@ -255,6 +257,7 @@ describe("ingestCapsule — deterministic, restrictive merge", () => {
     const result = await ingestCapsule(capsule, {
       self: identity.publicIdentity(),
       trustOf: async () => "trusted",
+      publicKeyOf: async () => identity.publicIdentity().publicKey,
       onPreference: async () => { throw new Error("should never be called"); },
     });
     assert.equal(result.accepted, false);
@@ -278,6 +281,7 @@ describe("ingestCapsule — deterministic, restrictive merge", () => {
     const result = await ingestCapsule(capsule, {
       self: self.publicIdentity(),
       trustOf: async () => "trusted",
+      publicKeyOf: async () => alice.publicIdentity().publicKey,
       onPreference: async (entry) => { seen.push(entry); },
     });
     assert.equal(result.accepted, true);
@@ -299,6 +303,7 @@ describe("ingestCapsule — deterministic, restrictive merge", () => {
     const result = await ingestCapsule(capsule, {
       self: self.publicIdentity(),
       trustOf: async () => "restricted",
+      publicKeyOf: async () => alice.publicIdentity().publicKey,
       onPreference: async () => { calls += 1; },
     });
     assert.equal(result.accepted, true, "capsule is accepted");
@@ -325,6 +330,7 @@ describe("ingestCapsule — deterministic, restrictive merge", () => {
     const result = await ingestCapsule(capsule, {
       self: self.publicIdentity(),
       trustOf: async () => "trusted",
+      publicKeyOf: async () => alice.publicIdentity().publicKey,
       onPreference: async () => { calls += 1; },
     });
     assert.equal(result.accepted, true);
@@ -346,6 +352,7 @@ describe("ingestCapsule — deterministic, restrictive merge", () => {
     const result = await ingestCapsule(tampered, {
       self: self.publicIdentity(),
       trustOf: async () => "trusted",
+      publicKeyOf: async () => alice.publicIdentity().publicKey,
       onPreference: async () => { calls += 1; },
     });
     assert.equal(result.accepted, false);

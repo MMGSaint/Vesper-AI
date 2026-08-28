@@ -10,7 +10,10 @@
  *
  * Design decisions worth naming:
  *   - Signature covers a canonicalised JSON of the capsule minus the signature field
- *     itself. Any peer with the sender's public key can verify integrity + origin.
+ *     itself, and is verified against the key the RECEIVER has registered for the
+ *     claimed deviceId — never the key embedded in the capsule. Verifying against the
+ *     embedded key proves only that the author owns the key they chose to include,
+ *     which lets anyone claim any deviceId. A device is a key, not a label.
  *   - Preferences are drawn from persistent memory but pass through `filterForSync`
  *     first — the mission's rule "credential filter by name AND value" is enforced
  *     at capsule build, not at the transport layer.
@@ -26,15 +29,21 @@
  *     belong to whichever transport is implemented later. This module only builds,
  *     verifies, and ingests capsules held in memory or on disk.
  *
- * Load-bearing invariants (each has a named test):
+ * Load-bearing invariants (each has a named test in phase2-attacks.test.ts):
  *   - a tampered capsule fails signature verification
- *   - a capsule with a mismatched sender.deviceId vs signature key fails
- *   - `filterForSync` runs before serialization — no credential text leaves the
- *     device even if the caller passed a "secret" memory entry to build()
+ *   - a capsule whose sender.deviceId does not own the embedded key is refused
+ *     (the identity-spoofing CRITICAL)
+ *   - a replayed capsule is refused when a seen-set is wired
+ *   - `filterForSync` runs before serialization for memory, AND credential screening
+ *     runs at ingest over decision/observation prose and data bags — those carry free
+ *     text that never passed the build-time filter
+ *   - a restricted sender's decisions and observations are declined, not only its
+ *     preferences: otherwise the trust ceiling is bypassed by choice of field
+ *   - unknown top-level fields and oversized collections are refused
+ *   - a partly-failed merge reports `partial: true`; `accepted` means the capsule was
+ *     admissible, never that every item landed
  *   - ingestion never sets local trust higher than the record already holds
- *   - ingestion cannot un-revoke a device — a revoked deviceId in the local
- *     registry stays revoked
- *   - a capsule from an unknown device is not merged; its facts are dropped
+ *   - ingestion cannot un-revoke a device — a revoked deviceId stays revoked
  */
 
 import { canonicalJson, verifySignature } from "./distributed/identity.ts";
@@ -46,8 +55,10 @@ import type { VesperEvent, JsonObject, JsonValue } from "./types.ts";
 
 /**
  * The capsule schema. Version-tagged so a future author can migrate rather than
- * silently reinterpret. Every field is either mandatory or explicitly optional; the
- * ingest side rejects unknown top-level fields via a schema check.
+ * silently reinterpret. Every field is either mandatory or explicitly optional, and
+ * `verifyCapsule` refuses any top-level field outside ALLOWED_CAPSULE_FIELDS — an
+ * attacker must not be able to smuggle a payload past ingest inside a field the
+ * schema does not know about.
  */
 export interface SessionCapsule {
   /** Wire format version. Bump only for breaking changes. */
@@ -223,23 +234,103 @@ export interface CapsuleVerifyResult {
   reason?: string;
 }
 
+/** Top-level fields a version-1 capsule may carry. Anything else is refused. */
+const ALLOWED_CAPSULE_FIELDS = new Set<string>([
+  "version", "sender", "sessionId", "createdAt", "windowStart", "windowEnd",
+  "vesperVersion", "models", "activeWorkspace", "preferences", "tasks",
+  "decisions", "observations", "corrections", "pending", "signature",
+]);
+
+/** Bounds on a capsule's collections, so one artifact cannot exhaust the receiver. */
+const MAX_CAPSULE_BYTES = 1024 * 1024;
+const MAX_PREFERENCES = 500;
+const MAX_TASKS = 500;
+const MAX_DECISIONS = 1000;
+const MAX_OBSERVATIONS = 1000;
+const MAX_CORRECTIONS = 200;
+
 /**
- * Verify a capsule's signature and shape. Returns ok:true only when every check
- * passes. Callers must NOT ingest a capsule whose ok is false.
+ * Verify a capsule's shape and signature.
+ *
+ * `expectedPublicKey` is REQUIRED and must come from the receiver's own device
+ * registry, resolved by the claimed `sender.deviceId`. Verifying against the key
+ * embedded in the capsule proves only that whoever wrote the capsule owns the key
+ * they put in it — which is no claim at all. An attacker generates a fresh keypair,
+ * writes a victim's deviceId into `sender.deviceId`, signs with her own key, and the
+ * capsule verifies; the receiver then resolves trust by the claimed id and treats the
+ * forgery as the victim's. This is the codebase's existing rule stated for capsules:
+ * a device is a key, not a label.
+ *
+ * Callers must NOT ingest a capsule whose ok is false.
  */
-export function verifyCapsule(capsule: SessionCapsule): CapsuleVerifyResult {
+export function verifyCapsule(
+  capsule: SessionCapsule,
+  expectedPublicKey: string,
+): CapsuleVerifyResult {
   if (!capsule || typeof capsule !== "object") return { ok: false, reason: "capsule is not an object" };
   if (capsule.version !== 1) return { ok: false, reason: `unsupported version ${capsule.version}` };
   if (!capsule.sender || typeof capsule.sender.publicKey !== "string") {
     return { ok: false, reason: "missing sender public key" };
   }
+  if (typeof capsule.sender.deviceId !== "string" || capsule.sender.deviceId.length === 0) {
+    return { ok: false, reason: "missing sender deviceId" };
+  }
   if (typeof capsule.signature !== "string" || capsule.signature.length === 0) {
     return { ok: false, reason: "missing signature" };
   }
+  if (typeof expectedPublicKey !== "string" || expectedPublicKey.length === 0) {
+    return { ok: false, reason: "no registered public key for the claimed sender" };
+  }
+  // The embedded key must MATCH the one the receiver already holds for that device.
+  // A mismatch is an impersonation attempt, not a key rotation — rotation goes
+  // through enrolment, not through a capsule.
+  if (capsule.sender.publicKey !== expectedPublicKey) {
+    return { ok: false, reason: "sender public key does not match the registered key for that deviceId" };
+  }
+  // Unknown top-level fields are refused: an attacker must not be able to smuggle a
+  // payload past ingest inside a field the schema does not know about.
+  for (const key of Object.keys(capsule)) {
+    if (!ALLOWED_CAPSULE_FIELDS.has(key)) {
+      return { ok: false, reason: `unknown top-level field '${key}'` };
+    }
+  }
+  const bounds = checkCapsuleBounds(capsule);
+  if (!bounds.ok) return bounds;
+
   const { signature: _, ...rest } = capsule;
   const canonical = canonicalJson(rest as unknown as JsonObject);
-  const verified = verifySignature(capsule.sender.publicKey, canonical, capsule.signature);
+  // Verify against the REGISTERED key, not the embedded one. They are equal by the
+  // check above; using the registered one makes the dependency explicit.
+  const verified = verifySignature(expectedPublicKey, canonical, capsule.signature);
   if (!verified) return { ok: false, reason: "signature verification failed" };
+  return { ok: true };
+}
+
+/** Refuse a capsule whose collections or encoded size exceed the receiver's bounds. */
+function checkCapsuleBounds(capsule: SessionCapsule): CapsuleVerifyResult {
+  const sizes: Array<[string, unknown, number]> = [
+    ["preferences", capsule.preferences, MAX_PREFERENCES],
+    ["tasks", capsule.tasks, MAX_TASKS],
+    ["decisions", capsule.decisions, MAX_DECISIONS],
+    ["observations", capsule.observations, MAX_OBSERVATIONS],
+    ["corrections", capsule.corrections, MAX_CORRECTIONS],
+  ];
+  for (const [name, value, cap] of sizes) {
+    if (value !== undefined && !Array.isArray(value)) {
+      return { ok: false, reason: `${name} is not an array` };
+    }
+    if (Array.isArray(value) && value.length > cap) {
+      return { ok: false, reason: `${name} has ${value.length} entries; the cap is ${cap}` };
+    }
+  }
+  try {
+    const encoded = JSON.stringify(capsule);
+    if (encoded.length > MAX_CAPSULE_BYTES) {
+      return { ok: false, reason: `capsule is ${encoded.length} bytes; the cap is ${MAX_CAPSULE_BYTES}` };
+    }
+  } catch {
+    return { ok: false, reason: "capsule is not JSON-serialisable" };
+  }
   return { ok: true };
 }
 
@@ -248,6 +339,20 @@ export interface CapsuleIngestOptions {
   self: PublicDeviceIdentity;
   /** Returns the current trust of the sender device. If null, the sender is unknown. */
   trustOf: (deviceId: string) => Promise<"trusted" | "restricted" | "pending" | "unknown" | "revoked" | null>;
+  /**
+   * Resolve the public key the RECEIVER has registered for a deviceId. Returning null
+   * means "no such device is enrolled here". Required: verifying a capsule against the
+   * key it carries proves nothing about who sent it.
+   */
+  publicKeyOf: (deviceId: string) => Promise<string | null>;
+  /**
+   * Has this capsule already been ingested? Replay protection: a signed capsule is
+   * valid forever, so without a seen-check an attacker who captures one can replay it
+   * to re-apply its contents indefinitely. Returning true refuses the ingest.
+   */
+  seenBefore?: (capsuleId: string) => Promise<boolean>;
+  /** Record a capsule as ingested, so a later replay is refused. */
+  markSeen?: (capsuleId: string) => Promise<void>;
   /**
    * Called for each preference the ingest wishes to merge into local memory. The
    * caller decides what to do with it (usually MemoryStore.remember with
@@ -269,6 +374,13 @@ export interface CapsuleIngestResult {
     observations: number;
   };
   refusedFor?: string[];
+  /**
+   * True when at least one item was refused or its handler threw. `accepted: true`
+   * alone means "the capsule itself was admissible" — it does NOT mean every item
+   * landed. A caller that treats acceptance as completion would report a merge that
+   * only partly happened.
+   */
+  partial: boolean;
 }
 
 /**
@@ -282,21 +394,39 @@ export async function ingestCapsule(
   options: CapsuleIngestOptions,
 ): Promise<CapsuleIngestResult> {
   const refused: string[] = [];
+  const none = { preferences: 0, decisions: 0, observations: 0 };
   // Never ingest a capsule signed by this same device — a self-loop would create
   // duplicate provenance records and possible feedback amplification.
-  if (capsule.sender.deviceId === options.self.deviceId) {
+  if (capsule.sender?.deviceId === options.self.deviceId) {
     return {
       accepted: false,
       reason: "capsule was signed by this device; refusing to self-ingest",
-      ingested: { preferences: 0, decisions: 0, observations: 0 },
+      ingested: none,
+      partial: false,
     };
   }
-  const verify = verifyCapsule(capsule);
+  if (typeof capsule.sender?.deviceId !== "string") {
+    return { accepted: false, reason: "capsule has no sender deviceId", ingested: none, partial: false };
+  }
+  // Resolve the key the RECEIVER holds for the claimed device. A capsule that names a
+  // device we have never enrolled cannot be verified against anything, so it is
+  // refused before any signature work.
+  const registeredKey = await options.publicKeyOf(capsule.sender.deviceId);
+  if (!registeredKey) {
+    return {
+      accepted: false,
+      reason: "sender is not enrolled locally; ingest refused",
+      ingested: none,
+      partial: false,
+    };
+  }
+  const verify = verifyCapsule(capsule, registeredKey);
   if (!verify.ok) {
     return {
       accepted: false,
       reason: `signature check failed: ${verify.reason}`,
-      ingested: { preferences: 0, decisions: 0, observations: 0 },
+      ingested: none,
+      partial: false,
     };
   }
   const trust = await options.trustOf(capsule.sender.deviceId);
@@ -304,19 +434,32 @@ export async function ingestCapsule(
     return {
       accepted: false,
       reason: "sender is not enrolled locally; ingest refused",
-      ingested: { preferences: 0, decisions: 0, observations: 0 },
+      ingested: none,
+      partial: false,
     };
   }
   if (trust === "revoked") {
     return {
       accepted: false,
       reason: "sender is revoked locally; ingest refused",
-      ingested: { preferences: 0, decisions: 0, observations: 0 },
+      ingested: none,
+      partial: false,
+    };
+  }
+  // Replay protection. A signed capsule stays valid forever, so a captured one could
+  // otherwise be re-applied indefinitely.
+  const capsuleId = capsuleIdentity(capsule);
+  if (options.seenBefore && (await options.seenBefore(capsuleId))) {
+    return {
+      accepted: false,
+      reason: "capsule has already been ingested (replay refused)",
+      ingested: none,
+      partial: false,
     };
   }
 
   let prefCount = 0;
-  for (const entry of capsule.preferences) {
+  for (const entry of capsule.preferences ?? []) {
     // Device-scoped facts are per the mission never merged across devices —
     // a fact about the sender's machine has no meaning on ours.
     if (entry.originDeviceId && entry.originDeviceId !== capsule.sender.deviceId) {
@@ -330,6 +473,11 @@ export async function ingestCapsule(
       refused.push(`preference '${entry.key}': sender is restricted, ingest declined`);
       continue;
     }
+    const leak = screenForSecrets(`${entry.key} ${entry.value}`);
+    if (leak) {
+      refused.push(`preference '${entry.key}': ${leak}`);
+      continue;
+    }
     try {
       await options.onPreference(entry, capsule.sender.deviceId);
       prefCount += 1;
@@ -340,7 +488,20 @@ export async function ingestCapsule(
 
   let decisionCount = 0;
   if (options.onDecision) {
-    for (const entry of capsule.decisions) {
+    for (const entry of capsule.decisions ?? []) {
+      // A restricted sender's preferences are declined above; decisions and
+      // observations must be declined for the same reason. Otherwise a restricted
+      // device smuggles a preference-shaped payload through a channel whose handler
+      // writes it, and the trust ceiling is bypassed by choice of field.
+      if (trust === "restricted") {
+        refused.push(`decision '${entry.type}': sender is restricted, ingest declined`);
+        continue;
+      }
+      const leak = screenForSecrets(`${entry.title} ${entry.detail ?? ""}`, entry.data);
+      if (leak) {
+        refused.push(`decision '${entry.type}': ${leak}`);
+        continue;
+      }
       try {
         await options.onDecision(entry, capsule.sender.deviceId);
         decisionCount += 1;
@@ -352,7 +513,16 @@ export async function ingestCapsule(
 
   let observationCount = 0;
   if (options.onObservation) {
-    for (const entry of capsule.observations) {
+    for (const entry of capsule.observations ?? []) {
+      if (trust === "restricted") {
+        refused.push(`observation '${entry.type}': sender is restricted, ingest declined`);
+        continue;
+      }
+      const leak = screenForSecrets(`${entry.title} ${entry.detail ?? ""}`);
+      if (leak) {
+        refused.push(`observation '${entry.type}': ${leak}`);
+        continue;
+      }
       try {
         await options.onObservation(entry, capsule.sender.deviceId);
         observationCount += 1;
@@ -360,6 +530,10 @@ export async function ingestCapsule(
         refused.push(`observation '${entry.type}@${entry.at}': onObservation threw (${error instanceof Error ? error.message : String(error)})`);
       }
     }
+  }
+
+  if (options.markSeen) {
+    await options.markSeen(capsuleId).catch(() => undefined);
   }
 
   return {
@@ -370,7 +544,58 @@ export async function ingestCapsule(
       observations: observationCount,
     },
     refusedFor: refused.length ? refused : undefined,
+    // Honest reporting: `accepted` says the capsule was admissible, `partial` says
+    // whether every item inside it actually landed. A caller that conflated the two
+    // would announce a merge that only half-happened.
+    partial: refused.length > 0,
   };
+}
+
+/**
+ * A capsule's replay identity: sender + session + window + signature. The signature
+ * alone would do, but including the rest makes the key self-describing in a log.
+ */
+export function capsuleIdentity(capsule: SessionCapsule): string {
+  return `${capsule.sender.deviceId}|${capsule.sessionId}|${capsule.windowStart}|${capsule.signature.slice(0, 32)}`;
+}
+
+/**
+ * Screen capsule prose and payloads for credential-shaped content.
+ *
+ * `filterForSync` runs over memory entries at build time, but decisions and
+ * observations carry free text in `title`/`detail` and an arbitrary `data` bag —
+ * none of which passed that filter. A secret in an event detail would leave the
+ * sending device and land on the receiver. Reuses the same two questions the sync
+ * filter asks: does it look like a credential by NAME, and by VALUE.
+ */
+function screenForSecrets(text: string, data?: JsonObject): string | null {
+  const probe: MemoryEntry = {
+    id: "screen",
+    category: "fact",
+    key: "screen",
+    value: text,
+    createdAt: "1970-01-01T00:00:00Z",
+    updatedAt: "1970-01-01T00:00:00Z",
+    source: "agent",
+    scope: "user",
+    revision: 1,
+  };
+  if (filterForSync([probe]).send.length === 0) {
+    return "content looks like a credential; refused";
+  }
+  if (data) {
+    let encoded: string;
+    try {
+      encoded = JSON.stringify(data);
+    } catch {
+      return "data is not serialisable; refused";
+    }
+    const dataProbe: MemoryEntry = { ...probe, value: encoded };
+    if (filterForSync([dataProbe]).send.length === 0) {
+      return "data looks like it carries a credential; refused";
+    }
+  }
+  return null;
 }
 
 /**

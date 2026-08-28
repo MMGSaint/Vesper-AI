@@ -27,6 +27,35 @@ import type { DeviceRecord } from "./distributed/registry.ts";
 import type { CapabilityManifest } from "./distributed/capabilities.ts";
 import type { PermissionDecision, ToolSpec } from "./types.ts";
 import type { RequestOrigin } from "./tools/remote.ts";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { canonicalJson, loadDeviceIdentity } from "./distributed/identity.ts";
+import type { DeviceIdentity } from "./distributed/identity.ts";
+import { buildSessionCapsule, ingestCapsule, verifyCapsule } from "./session-capsule.ts";
+import type { MemoryEntry } from "./types.ts";
+
+async function makeCapsuleIdentity(name: string): Promise<DeviceIdentity> {
+  const dirs = { data: await mkdtemp(join(tmpdir(), `vesper-p2atk-${name}-`)) };
+  const { identity } = await loadDeviceIdentity({ dirs, name, deviceType: "desktop", vesperVersion: "test" });
+  return identity;
+}
+
+function capsuleMemoryEntry(overrides: Partial<MemoryEntry> = {}): MemoryEntry {
+  return {
+    id: "mem_k",
+    category: "preference",
+    key: "coffee",
+    value: "espresso",
+    workspaceId: "general",
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+    source: "user",
+    scope: "user",
+    revision: 1,
+    ...overrides,
+  };
+}
 
 function silentLog() {
   const log = {
@@ -551,5 +580,232 @@ describe("checkpoint attack #24: hostile TTL and timestamps are clamped on load"
     const listed = await store.list();
     assert.equal(listed.length, 1, "the record loads");
     assert.ok(listed[0].at.startsWith("2026-"), `at should be clamped to now, got ${listed[0].at}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session capsule
+//
+// NOTE ON PROVENANCE: the attack workflow's verifier agents "REFUTED" all 12
+// capsule findings on the grounds that session-capsule.ts does not exist. They
+// were reading the wrong repository — the session cwd is an empty scaffold, and
+// the real tree is elsewhere. Every finding below was re-verified by hand
+// against the actual module before being fixed. A refutation is only as good as
+// the directory it was run in.
+// ---------------------------------------------------------------------------
+
+describe("capsule attack (CRITICAL): a device is a key, not a label", () => {
+  it("refuses a capsule whose sender.deviceId names a device the embedded key does not own", async () => {
+    // Mallory generates her own keypair, writes Alice's deviceId into the sender,
+    // and signs with her own key. Verifying against the EMBEDDED key would accept
+    // this — the receiver must verify against the key it has registered for that id.
+    const [alice, mallory, receiver] = await Promise.all([
+      makeCapsuleIdentity("alice"),
+      makeCapsuleIdentity("mallory"),
+      makeCapsuleIdentity("receiver"),
+    ]);
+    const base = buildSessionCapsule({
+      sender: mallory,
+      sessionId: "s", windowStart: "2026-01-01T00:00:00Z", windowEnd: "2026-01-02T00:00:00Z",
+      vesperVersion: "t", activeWorkspace: "general",
+      memory: [], tasks: [], decisions: [], observations: [],
+      pending: { tasks: 0, confirmations: 0 },
+    });
+    const spoofed = { ...base, sender: { ...base.sender, deviceId: alice.deviceId } };
+    const { signature: _drop, ...rest } = spoofed;
+    const resigned = { ...spoofed, signature: mallory.sign(canonicalJson(rest as never)) };
+
+    // Verifying against ALICE's registered key must fail — the capsule carries
+    // Mallory's key.
+    const verify = verifyCapsule(resigned, alice.publicIdentity().publicKey);
+    assert.equal(verify.ok, false, "impersonation must not verify");
+    assert.match(verify.reason ?? "", /does not match the registered key/);
+
+    let merged = 0;
+    const result = await ingestCapsule(resigned, {
+      self: receiver.publicIdentity(),
+      trustOf: async (id) => (id === alice.deviceId ? "trusted" : null),
+      publicKeyOf: async (id) => (id === alice.deviceId ? alice.publicIdentity().publicKey : null),
+      onPreference: async () => { merged += 1; },
+    });
+    assert.equal(result.accepted, false, "the spoofed capsule must be refused at ingest");
+    assert.equal(merged, 0);
+  });
+});
+
+describe("capsule attack: replay of a signed capsule is refused", () => {
+  it("a second ingest of the same capsule is refused when a seen-set is wired", async () => {
+    const [alice, receiver] = await Promise.all([
+      makeCapsuleIdentity("alice"),
+      makeCapsuleIdentity("receiver"),
+    ]);
+    const capsule = buildSessionCapsule({
+      sender: alice,
+      sessionId: "s", windowStart: "2026-01-01T00:00:00Z", windowEnd: "2026-01-02T00:00:00Z",
+      vesperVersion: "t", activeWorkspace: "general",
+      memory: [capsuleMemoryEntry({ key: "coffee", value: "espresso" })],
+      tasks: [], decisions: [], observations: [],
+      pending: { tasks: 0, confirmations: 0 },
+    });
+    const seen = new Set<string>();
+    let merged = 0;
+    const opts = {
+      self: receiver.publicIdentity(),
+      trustOf: async () => "trusted" as const,
+      publicKeyOf: async () => alice.publicIdentity().publicKey,
+      seenBefore: async (id: string) => seen.has(id),
+      markSeen: async (id: string) => { seen.add(id); },
+      onPreference: async () => { merged += 1; },
+    };
+    const first = await ingestCapsule(capsule, opts);
+    assert.equal(first.accepted, true);
+    assert.equal(merged, 1);
+
+    const second = await ingestCapsule(capsule, opts);
+    assert.equal(second.accepted, false, "a replayed capsule must be refused");
+    assert.match(second.reason ?? "", /replay/i);
+    assert.equal(merged, 1, "the replay must not re-apply the payload");
+  });
+});
+
+describe("capsule attack: secrets cannot ride in decisions or observations", () => {
+  it("refuses a decision whose detail or data looks like a credential", async () => {
+    const [alice, receiver] = await Promise.all([
+      makeCapsuleIdentity("alice"),
+      makeCapsuleIdentity("receiver"),
+    ]);
+    const capsule = buildSessionCapsule({
+      sender: alice,
+      sessionId: "s", windowStart: "2026-01-01T00:00:00Z", windowEnd: "2026-01-02T00:00:00Z",
+      vesperVersion: "t", activeWorkspace: "general",
+      memory: [], tasks: [],
+      decisions: [
+        { id: "e1", type: "autonomy.decision", title: "clean", at: "2026-01-01T00:00:00Z", severity: "info" } as never,
+        { id: "e2", type: "autonomy.decision", title: "leak", detail: "token sk-live-abcdefghij0123456789", at: "2026-01-01T00:00:00Z", severity: "info" } as never,
+      ],
+      observations: [
+        { id: "e3", type: "note", title: "password=hunter2XXXXXXXXXX", at: "2026-01-01T00:00:00Z", severity: "info" } as never,
+      ],
+      pending: { tasks: 0, confirmations: 0 },
+    });
+    const decisionsSeen: string[] = [];
+    const observationsSeen: string[] = [];
+    const result = await ingestCapsule(capsule, {
+      self: receiver.publicIdentity(),
+      trustOf: async () => "trusted",
+      publicKeyOf: async () => alice.publicIdentity().publicKey,
+      onPreference: async () => {},
+      onDecision: async (e) => { decisionsSeen.push(e.title); },
+      onObservation: async (e) => { observationsSeen.push(e.title); },
+    });
+    assert.equal(result.accepted, true);
+    assert.deepEqual(decisionsSeen, ["clean"], "the credential-bearing decision must be refused");
+    assert.equal(observationsSeen.length, 0, "the credential-bearing observation must be refused");
+    assert.equal(result.partial, true, "a partial merge must be reported as partial");
+  });
+});
+
+describe("capsule attack: a restricted sender cannot smuggle via decisions", () => {
+  it("declines decisions and observations from a restricted sender, not just preferences", async () => {
+    const [alice, receiver] = await Promise.all([
+      makeCapsuleIdentity("alice"),
+      makeCapsuleIdentity("receiver"),
+    ]);
+    const capsule = buildSessionCapsule({
+      sender: alice,
+      sessionId: "s", windowStart: "2026-01-01T00:00:00Z", windowEnd: "2026-01-02T00:00:00Z",
+      vesperVersion: "t", activeWorkspace: "general",
+      memory: [], tasks: [],
+      decisions: [{ id: "e1", type: "preference.set", title: "set coffee to decaf", at: "2026-01-01T00:00:00Z", severity: "info" } as never],
+      observations: [{ id: "e2", type: "note", title: "note", at: "2026-01-01T00:00:00Z", severity: "info" } as never],
+      pending: { tasks: 0, confirmations: 0 },
+    });
+    let decisions = 0;
+    let observations = 0;
+    const result = await ingestCapsule(capsule, {
+      self: receiver.publicIdentity(),
+      trustOf: async () => "restricted",
+      publicKeyOf: async () => alice.publicIdentity().publicKey,
+      onPreference: async () => {},
+      onDecision: async () => { decisions += 1; },
+      onObservation: async () => { observations += 1; },
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(decisions, 0, "a restricted sender's decisions must be declined");
+    assert.equal(observations, 0, "a restricted sender's observations must be declined");
+    assert.ok(result.refusedFor?.some((r) => r.includes("restricted")));
+  });
+});
+
+describe("capsule attack: schema and size bounds", () => {
+  it("refuses an unknown top-level field even when correctly signed", async () => {
+    const alice = await makeCapsuleIdentity("alice");
+    const base = buildSessionCapsule({
+      sender: alice,
+      sessionId: "s", windowStart: "2026-01-01T00:00:00Z", windowEnd: "2026-01-02T00:00:00Z",
+      vesperVersion: "t", activeWorkspace: "general",
+      memory: [], tasks: [], decisions: [], observations: [],
+      pending: { tasks: 0, confirmations: 0 },
+    });
+    const smuggled = { ...base, exfil: { note: "extra" } };
+    const { signature: _d, ...rest } = smuggled;
+    const resigned = { ...smuggled, signature: alice.sign(canonicalJson(rest as never)) };
+    const verify = verifyCapsule(resigned as never, alice.publicIdentity().publicKey);
+    assert.equal(verify.ok, false, "an unknown top-level field must be refused");
+    assert.match(verify.reason ?? "", /unknown top-level field/);
+  });
+
+  it("refuses a capsule whose collections exceed the receiver's caps", async () => {
+    const alice = await makeCapsuleIdentity("alice");
+    const base = buildSessionCapsule({
+      sender: alice,
+      sessionId: "s", windowStart: "2026-01-01T00:00:00Z", windowEnd: "2026-01-02T00:00:00Z",
+      vesperVersion: "t", activeWorkspace: "general",
+      memory: [], tasks: [], decisions: [], observations: [],
+      pending: { tasks: 0, confirmations: 0 },
+    });
+    const flood = {
+      ...base,
+      observations: Array.from({ length: 5000 }, (_, i) => ({
+        at: "2026-01-01T00:00:00Z", type: "n", title: `o${i}`,
+      })),
+    };
+    const { signature: _d, ...rest } = flood;
+    const resigned = { ...flood, signature: alice.sign(canonicalJson(rest as never)) };
+    const verify = verifyCapsule(resigned as never, alice.publicIdentity().publicKey);
+    assert.equal(verify.ok, false, "an oversized collection must be refused");
+    assert.match(verify.reason ?? "", /cap is/);
+  });
+});
+
+describe("capsule attack: a partly-failed merge is not reported as complete", () => {
+  it("sets partial:true when a handler throws", async () => {
+    const [alice, receiver] = await Promise.all([
+      makeCapsuleIdentity("alice"),
+      makeCapsuleIdentity("receiver"),
+    ]);
+    const capsule = buildSessionCapsule({
+      sender: alice,
+      sessionId: "s", windowStart: "2026-01-01T00:00:00Z", windowEnd: "2026-01-02T00:00:00Z",
+      vesperVersion: "t", activeWorkspace: "general",
+      memory: [
+        capsuleMemoryEntry({ id: "m1", key: "coffee", value: "espresso" }),
+        capsuleMemoryEntry({ id: "m2", key: "language", value: "typescript" }),
+      ],
+      tasks: [], decisions: [], observations: [],
+      pending: { tasks: 0, confirmations: 0 },
+    });
+    const result = await ingestCapsule(capsule, {
+      self: receiver.publicIdentity(),
+      trustOf: async () => "trusted",
+      publicKeyOf: async () => alice.publicIdentity().publicKey,
+      onPreference: async (entry) => {
+        if (entry.key === "language") throw new Error("disk full");
+      },
+    });
+    assert.equal(result.accepted, true, "the capsule itself was admissible");
+    assert.equal(result.partial, true, "but the merge only partly landed");
+    assert.equal(result.ingested.preferences, 1);
+    assert.ok(result.refusedFor?.some((r) => r.includes("language")));
   });
 });
