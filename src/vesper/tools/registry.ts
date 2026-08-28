@@ -10,6 +10,7 @@ import type {
   ToolHandler,
   ToolSpec,
 } from "../types.ts";
+import type { AutonomyGovernor } from "../autonomy.ts";
 import { decideRemoteToolRequest, type RequestOrigin } from "./remote.ts";
 import { capScopesForTrust } from "../client/protocol.ts";
 import type { TrustState } from "../distributed/identity.ts";
@@ -71,6 +72,7 @@ export class ToolRegistry {
    * every direct `tools.invoke` — and every future caller — deciding on stale authority.
    */
   private readonly trustOf?: (deviceId: string) => Promise<TrustState>;
+  private governor: AutonomyGovernor | undefined;
 
   constructor(
     gate: PermissionGate,
@@ -82,6 +84,15 @@ export class ToolRegistry {
     this.log = log;
     this.confirmations = confirmations;
     this.trustOf = trustOf;
+  }
+
+  /**
+   * Attach an autonomy governor. The governor is consulted after the gate and can
+   * ONLY tighten decisions. Optional — a registry without a governor behaves exactly
+   * as before, keeping every existing test valid.
+   */
+  setAutonomyGovernor(governor: AutonomyGovernor | undefined): void {
+    this.governor = governor;
   }
 
   /**
@@ -200,7 +211,23 @@ export class ToolRegistry {
     const args = validation.args;
 
     const origin = await this.liveOrigin(input.origin);
-    const decision = this.gate.evaluate(registered.spec, args, input.workspaceId);
+    let decision = this.gate.evaluate(registered.spec, args, input.workspaceId);
+
+    // The autonomy governor is an ADDITIONAL layer that can only tighten. It runs
+    // after the gate so it always sees the gate's answer, never around it. If the
+    // governor refuses or elevates to confirm, the tightened decision replaces the
+    // gate's one downstream — but the underlying gate.evaluate() has already logged
+    // its own reason, so both records are in the audit trail.
+    if (this.governor) {
+      const gov = this.governor.evaluate({
+        tool: registered.spec,
+        args,
+        origin,
+        workspaceId: input.workspaceId,
+        gateDecision: decision,
+      });
+      decision = gov.decision;
+    }
 
     // Narrowing only, and only after the gate has spoken: a remote device can lose
     // access here but can never gain any. A conversation is a tool-calling loop, so

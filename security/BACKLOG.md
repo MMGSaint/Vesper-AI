@@ -84,6 +84,69 @@ prototype-resolution findings were fixed in `7b8d746` after this list was first 
 | 4.13 | **`optimizer_analyze` reports `ok: true` when the optimizer was unreachable** | LOW, and partly mitigated by the attribution work: the reply now quotes the optimizer rather than asserting on its behalf. The epistemic marker is still wrong. |
 | 4.14 | **`setOptimizerAvailable(false)` is a no-op against a live HTTP optimizer** | INFORMATIONAL. The off switch only affects the mock adapter. |
 
+## 4b. Phase-2 adversarial findings, deliberately not fixed
+
+Two attack workflows ran against the Phase 2 runtime (durable journal, task
+scheduler, autonomy governor, checkpoint/rollback, session capsule). 58 findings
+were confirmed and fixed across four commits. These are what remains, with what
+each costs.
+
+| # | Finding | Why deferred |
+|---|---|---|
+| 4b.1 | **`maxPerTick` is a per-call cap, not a rate limit.** Rapid or concurrent ticks can each start up to the cap. | LOW. The idle scheduler fires on a configured interval (30 s default) and `driveTasksOnIdle` is off by default, so there is no path today that ticks fast enough for this to matter. A real rate limiter belongs with the autonomy governor's budget machinery rather than duplicated in the scheduler. |
+| 4b.2 | **`stop()` does not fence an in-progress tick.** A `stop()` during the microtask window between the in-flight claim and the executor launch hands the executor a signal from a *new* AbortController if `enable()` is called before it reads one. | LOW, and only reachable from a stop/enable cycle inside one tick — which no call site performs. The executor's own `ctx.signal` is captured at launch, so the practical exposure is a task that ignores a stop it should have seen, not one that runs unauthorized. |
+| 4b.3 | **`BudgetState.record` is exported and callable from outside the governor.** Anyone holding the instance could inflate a budget's usage. | LOW. It is a poisoning primitive for *tightening* only — recording usage can refuse actions, never permit them, so it cannot escalate. Exported because `evaluateAutonomy` is a pure function tested independently of the class. |
+| 4b.4 | **`canonicalJson` mangles `Date` values and objects with no own keys.** A capsule field holding a Date serialises inconsistently between build and verify. | PLAUSIBLE, and unreachable from the capsule path: every capsule field is a string, number, boolean, array, or plain JsonObject, and `buildSessionCapsule` constructs each one explicitly. Recorded because a future field of a richer type would hit it. |
+| 4b.5 | **`decodeCapsule` does not verify the signature.** A caller who decodes and then forgets to call `verifyCapsule` gets an unauthenticated object. | LOW, a footgun rather than a defect — decode and verify are deliberately separate so a caller can inspect a malformed capsule for diagnostics. `ingestCapsule` always verifies, and it is the only path that acts on a capsule. |
+| 4b.6 | **Cross-process task claims are optimistic, not atomic.** `StorageAdapter` is get/set/delete/keys with no compare-and-swap, so two runtimes sharing one store can both write before either re-reads. `start()` writes a unique claim and re-reads to confirm it won, which yields one winner — but the window is narrowed, not closed. | Closing it needs a CAS or a lease primitive on the storage layer, which is a change to an interface every subsystem depends on. The current shape is honest about what it guarantees; the field's doc comment says so. |
+
+### A note on adversarial verification itself
+
+The phase-2 workflow's verifier agents "REFUTED" all 12 session-capsule findings
+on the grounds that `session-capsule.ts` does not exist and the findings were
+"fabricated against non-existent code". Every one was re-verified by hand and
+most were real, including a CRITICAL identity-spoofing bug that let any party
+impersonate any enrolled device.
+
+**The mechanism is worth stating precisely, because the obvious diagnosis is
+wrong.** The verifiers were not reading an empty or unrelated directory. They
+were reading `/home/user/Vesper-personal-assistant-`, which is a second working
+copy of *this same repository* — checked out at a **detached HEAD pinned to
+`3ee5d2b`**, several commits behind the branch tip.
+
+That explains the split in the results exactly:
+
+- `checkpoint.ts` landed *in* `3ee5d2b`, so it was present in that checkout and
+  every checkpoint finding verified normally.
+- `session-capsule.ts` landed in `849d629`, *after* the pinned commit, so it was
+  genuinely absent. The verifiers' greps were accurate; their conclusion was not.
+
+An agent that finds a file missing cannot distinguish "this code does not exist"
+from "this code does not exist *yet, at the commit I am standing on*". Both
+produce the same empty grep, and only one of them means the finding is false.
+
+Consequences for any future adversarial pass:
+
+1. Have agents report the absolute repository root **and `git rev-parse HEAD`**
+   they read, and check both against the tree under review before accepting a
+   verdict.
+2. Treat "the file does not exist" as a claim about the *harness* until the
+   commit is confirmed — never as a refutation on its own.
+3. Prefer passing an explicit, verified path into agent prompts over relying on
+   an inherited working directory, especially when more than one checkout of the
+   same repository is present on disk.
+
+## 4c. Round-1 confused-deputy findings still open
+
+Surfaced during the phase-2 closure pass: `security/red-team/CHECKPOINT.md` claimed
+this class was never reported, while `agent-findings.json` held four findings for it.
+The CRITICAL and the MEDIUM are fixed (see the table in that file). These two remain.
+
+| # | Finding | Why deferred |
+|---|---|---|
+| 4c.1 | **`task_create` records the HOST device as `createdBy`** for tasks a remote device created, erasing which device asked. | LOW. It is an attribution loss, not an authority grant — the task still routes and executes under the same capability checks, and `requiredCapabilities` is unchanged. It does corrupt the provenance a future correction-loop or session capsule would read, so it should be fixed before either consumes `createdBy`. |
+| 4c.2 | **Remote conversation text enters shared agent history as an unmarked `user` message**, so a later local turn cannot tell which device said it. | INFORMATIONAL. The untrusted-content boundary already governs what that text can *do*; this is about whether a later reader can tell who said it. Fixing it means adding provenance to history entries, which touches the context window and `fitContext` — worth doing deliberately rather than as a closure-pass patch. |
+
 ## 5. Defences that exist but are not mutation-proven
 
 Recorded per the load-bearing rule: a mechanism that mutation does not distinguish is

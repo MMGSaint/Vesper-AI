@@ -7,6 +7,11 @@ type Handler = (event: VesperEvent) => void;
 
 const STORAGE_KEY = "events.recent";
 
+export interface EventJournalAdmit {
+  admit(event: VesperEvent): unknown;
+  flush(): Promise<void>;
+}
+
 export class EventBus {
   private events: VesperEvent[] = [];
   private handlers = new Map<string, Set<Handler>>();
@@ -14,6 +19,7 @@ export class EventBus {
   private readonly log: Logger;
   private readonly limit: number;
   private readonly storage?: StorageAdapter;
+  private journal: EventJournalAdmit | undefined;
   /** Writes are serialized and coalesced so a burst of events cannot pile up. */
   private saving: Promise<void> = Promise.resolve();
   private saveQueued = false;
@@ -22,6 +28,16 @@ export class EventBus {
     this.log = log;
     this.limit = limit;
     this.storage = storage;
+  }
+
+  /**
+   * Attach the durable journal. Separate from the constructor because the runtime
+   * builds the bus first (many subsystems take a reference to it) and constructs the
+   * journal a few lines later; setting after construction keeps that order sensible.
+   * A bus with no journal keeps the ring behaviour exactly as before.
+   */
+  setJournal(journal: EventJournalAdmit | undefined): void {
+    this.journal = journal;
   }
 
   /**
@@ -57,6 +73,11 @@ export class EventBus {
   /** Flush pending writes, for a clean shutdown. */
   async flush(): Promise<void> {
     await this.saving;
+    if (this.journal) {
+      try { await this.journal.flush(); } catch {
+        // Same policy as the ring: a failed persist must not throw on shutdown.
+      }
+    }
   }
 
   private schedulePersist(): void {
@@ -86,11 +107,23 @@ export class EventBus {
       workspaceId: partial.workspaceId,
       severity: partial.severity,
       data: partial.data,
+      correlationId: partial.correlationId,
+      provenance: partial.provenance,
+      retention: partial.retention,
     };
     this.events.push(event);
     if (this.events.length > this.limit) this.events.splice(0, this.events.length - this.limit);
     this.log.info("event", event.title, { type: event.type, severity: event.severity });
     this.schedulePersist();
+    // A journal that throws must not crash a downstream handler. `admit` is expected to
+    // catch its own errors, but we defend anyway.
+    try {
+      this.journal?.admit(event);
+    } catch (error) {
+      this.log.warn("event", "Journal admit threw", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     this.handlers.get(event.type)?.forEach((handler) => handler(event));
     this.anyHandlers.forEach((handler) => handler(event));
     return event;

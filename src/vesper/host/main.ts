@@ -1,4 +1,6 @@
 import { createInterface } from "node:readline/promises";
+import { basename, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { stdin as input, stdout as output } from "node:process";
 import {
   createProductionHost,
@@ -17,6 +19,43 @@ import { formatCrashNote, writeCrashNoteSync } from "./crash.ts";
 
 /** Kept referenced while the daemon runs; it is the only thing holding the event loop. */
 const KEEP_ALIVE_MS = 60_000;
+
+/**
+ * Wait until everything written to stdout and stderr has actually reached the OS.
+ *
+ * `stream.write()` returning false means the data is buffered; the drain event says it
+ * has been handed over. On Linux a pipe write completes synchronously so this resolves
+ * immediately, which is why the missing flush was invisible in local runs and in the
+ * ubuntu CI job while the windows job failed on every commit for a month.
+ */
+async function flushStdio(): Promise<void> {
+  const settle = (stream: NodeJS.WriteStream): Promise<void> =>
+    new Promise((resolve) => {
+      // `writableNeedDrain` asks whether anything is still buffered WITHOUT appending
+      // to the stream. Probing with `write("")` would queue a chunk of its own, which
+      // on a backpressured stream is one more thing to wait for.
+      if (!stream.writableNeedDrain) {
+        resolve();
+        return;
+      }
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        stream.off("drain", finish);
+        resolve();
+      };
+      stream.once("drain", finish);
+      // Never hang a shutdown on a stream that will not drain (a closed pipe, a
+      // consumer that went away). Deliberately NOT unref'd: an unref'd timer cannot
+      // keep the loop alive, so on a stuck stream the promise would never settle, the
+      // loop would drain, and Node would exit 0 on its own — losing the exit code this
+      // shutdown was called with. `--ask` documents exit 3 for a pending confirmation,
+      // and a wrong exit code is worse than a bounded 2s wait.
+      setTimeout(finish, 2000);
+    });
+  await Promise.all([settle(process.stdout), settle(process.stderr)]);
+}
 
 async function main() {
   const command = parseCli(process.argv.slice(2));
@@ -75,9 +114,11 @@ async function main() {
   const skipDiscovery =
     command.kind === "export-memory"
       ? true
-      : "skipDiscovery" in command
-        ? command.skipDiscovery
-        : process.env.VESPER_SKIP_DISCOVERY === "1";
+      : command.kind === "first-boot-report"
+        ? false
+        : "skipDiscovery" in command
+          ? command.skipDiscovery
+          : process.env.VESPER_SKIP_DISCOVERY === "1";
 
   let host: ProductionHost;
   try {
@@ -105,6 +146,16 @@ async function main() {
     if (shuttingDown) return;
     shuttingDown = true;
     await host.shutdown(reason);
+    // Flush stdout/stderr BEFORE exiting.
+    //
+    // Node's stream-to-pipe writes are synchronous on Linux and macOS but
+    // ASYNCHRONOUS on Windows (documented under "process I/O"). Every one-shot
+    // command here writes its answer with console.log and then calls this helper,
+    // so on Windows `process.exit()` was terminating the process while the write
+    // was still queued — and the output was simply lost. Not a test artifact: any
+    // Windows user piping `vesper --ask "..."` into a file or another program got
+    // an empty result and a zero exit code, on the one OS Vesper targets.
+    await flushStdio();
     process.exit(code);
   };
   const sigintShutdown = () => void shutdown(0, "SIGINT");
@@ -158,6 +209,55 @@ async function main() {
     await shutdown(0, "export-memory");
     return;
   }
+  if (command.kind === "ask") {
+    const turn = await runtime.chat(command.text);
+
+    // A pending confirmation is reported, never answered here.
+    //
+    // `--ask` is one question from a script, and a script cannot be the person the
+    // confirmation is asking. Auto-approving would make a convenience flag into a way to
+    // run confirm-tier tools unattended, which is the "confirmation is not authorization"
+    // rule read backwards. The exit code says a human is needed; the action stays queued
+    // for the console.
+    const waiting = turn.pendingConfirmations;
+
+    if (command.json) {
+      console.log(
+        JSON.stringify(
+          {
+            reply: turn.reply,
+            epistemic: turn.epistemic,
+            workspaceId: turn.workspaceId,
+            toolCalls: turn.toolCalls.map((call) => ({
+              tool: call.toolName,
+              allowed: call.decision.allowed,
+              level: call.decision.level,
+              requiresConfirmation: call.decision.requiresConfirmation,
+              ok: call.result?.ok ?? null,
+              epistemic: call.result?.epistemic ?? null,
+              summary: call.result?.summary ?? null,
+            })),
+            pendingConfirmations: waiting.map((pending) => ({
+              id: pending.id,
+              tool: pending.toolName,
+              reason: pending.reason,
+            })),
+          },
+          null,
+          2,
+        ),
+      );
+    } else {
+      console.log(turn.reply);
+      for (const pending of waiting) {
+        console.error(`Waiting for your confirmation: ${pending.toolName} — ${pending.reason}`);
+      }
+    }
+
+    await shutdown(waiting.length > 0 ? 3 : 0, "ask");
+    return;
+  }
+
   if (command.kind === "client-hello") {
     console.log(
       JSON.stringify(
@@ -172,6 +272,23 @@ async function main() {
       ),
     );
     await shutdown(0, "client-hello");
+    return;
+  }
+
+  if (command.kind === "first-boot-report") {
+    // The report is produced by the background discovery pass that starts on
+    // `runtime.start()`. Waiting on it here is what turns "the discovery happened, and
+    // its result is written to a file somewhere" into "the discovery result is on your
+    // terminal, now." Exit 0 when the report exists, exit 4 when discovery failed and
+    // left the report null, per the pattern for one-shot commands with two outcomes.
+    const report = await runtime.waitForFirstBoot();
+    if (report) {
+      console.log(report.reportText);
+      await shutdown(0, "first-boot-report");
+    } else {
+      console.error("First-boot discovery did not produce a report (see logs).");
+      await shutdown(4, "first-boot-report-failed");
+    }
     return;
   }
 
@@ -263,7 +380,35 @@ async function runBackground(host: ProductionHost, shutdown: (code?: number, rea
   // main() returns here; the anchor keeps the event loop alive until a signal fires.
 }
 
-const entry = process.argv[1] ?? "";
-if (entry.endsWith("host/main.ts") || entry.endsWith("host/main.js") || entry.endsWith("vesper-host.mjs")) {
-  void main();
+/**
+ * Run main() only when this module IS the program, not when it is imported.
+ *
+ * The previous check compared `process.argv[1]` against a POSIX-shaped suffix:
+ * `entry.endsWith("host/main.ts")`. On Windows argv[1] is
+ * `D:\a\Vesper-AI\src\vesper\host\main.ts` — backslashes — so the suffix never
+ * matched, `main()` never ran, and the process exited 0 having printed nothing.
+ * Every child-process test in ask.test.ts saw `exit=0 stdout="" stderr=""` and the
+ * windows-latest CI job failed on every commit of this branch for a month, while
+ * ubuntu-latest stayed green because the forward-slash form matched there.
+ *
+ * That is also the real user-facing bug: `vesper --ask "..."` on Windows — the one
+ * OS Vesper targets — did nothing at all and reported success.
+ *
+ * Compare resolved paths instead of string suffixes. `fileURLToPath` and `resolve`
+ * both yield the platform's native separators, so the two sides are directly
+ * comparable on Windows and POSIX alike. The basename check keeps the packaged
+ * `vesper-host.mjs` entry point working.
+ */
+const entryArg = process.argv[1];
+if (entryArg) {
+  const thisFile = fileURLToPath(import.meta.url);
+  const invoked = resolve(entryArg);
+  // Windows filesystems are case-insensitive, so a launcher that spells the path
+  // with different casing is still this file.
+  const sameFile =
+    invoked === thisFile ||
+    (process.platform === "win32" && invoked.toLowerCase() === thisFile.toLowerCase());
+  if (sameFile || basename(invoked) === "vesper-host.mjs") {
+    void main();
+  }
 }

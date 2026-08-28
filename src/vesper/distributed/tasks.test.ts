@@ -270,3 +270,83 @@ test("task queue", async (t) => {
     assert.equal((await queue.cancel(b.id))?.state, "cancelled");
   });
 });
+
+test("task lifecycle events reach the runtime's event bus", async (t) => {
+  const { testRuntime } = await import("../test-helpers.ts");
+
+  await t.test("create → start → complete emits three events with the task ids", async () => {
+    // A background subscriber (the catchup summary, notification hub, or a future
+    // scheduler) needs to see every state transition, not just the ones a scheduler
+    // happens to poll for. Consequence-based: assert on the event bus, not on the
+    // callback's return.
+    const runtime = await testRuntime();
+    const before = runtime.events.recent({ limit: 100 }).length;
+
+    const task = await runtime.taskQueue.create({
+      description: "compose reply",
+      createdBy: "local",
+    });
+    await runtime.taskQueue.start(task.id);
+    await runtime.taskQueue.complete(task.id, "done");
+
+    const after = runtime.events.recent({ limit: 100 });
+    const taskEvents = after
+      .slice(before)
+      .filter((event) => event.type.startsWith("task."))
+      .map((event) => ({ type: event.type, title: event.title }));
+
+    assert.equal(taskEvents.length, 3, `expected 3 task events, got ${taskEvents.length}: ${JSON.stringify(taskEvents)}`);
+    assert.equal(taskEvents[0].type, "task.created");
+    assert.equal(taskEvents[1].type, "task.started");
+    assert.equal(taskEvents[2].type, "task.completed");
+    assert.match(taskEvents[0].title, /compose reply/);
+    assert.match(taskEvents[2].title, /Task done/);
+  });
+
+  await t.test("a failure that will retry differs from a failure that is final", async () => {
+    // The mission's honesty rule again: 'failed for now' is not the same news as
+    // 'given up'. Both must reach the bus, and the final one must be visible as such.
+    const runtime = await testRuntime();
+    const task = await runtime.taskQueue.create({
+      description: "flaky work",
+      createdBy: "local",
+      maxAttempts: 2,
+    });
+
+    await runtime.taskQueue.start(task.id);
+    await runtime.taskQueue.fail(task.id, "boom");
+    await runtime.taskQueue.start(task.id);
+    await runtime.taskQueue.fail(task.id, "boom again");
+
+    const failures = runtime.events
+      .recent({ limit: 100 })
+      .filter((event) => event.type === "task.failed");
+
+    assert.equal(failures.length, 2, `expected 2 failure events, got ${failures.length}`);
+    assert.match(failures[0].title, /will retry/);
+    assert.match(failures[1].title, /failed after/);
+    assert.equal(failures[0].severity, "info", "retry-eligible failure is info");
+    assert.equal(failures[1].severity, "warn", "final failure is warn");
+  });
+
+  await t.test("cancellation reaches the bus and the catchup summary counts it", async () => {
+    // If a user cancels a task, catchup should reflect that when they ask
+    // 'what happened while I was away'. This asserts on the whole path: cancel →
+    // event → catchup category badge.
+    const runtime = await testRuntime();
+    const task = await runtime.taskQueue.create({
+      description: "abandoned work",
+      createdBy: "local",
+    });
+    await runtime.taskQueue.cancel(task.id);
+
+    const cancelled = runtime.events
+      .recent({ limit: 100 })
+      .find((event) => event.type === "task.cancelled");
+    assert.ok(cancelled, "task.cancelled event was not emitted");
+
+    const catchup = await runtime.chat("catch me up");
+    assert.match(catchup.reply, /Tasks:.*1 queued/);
+    assert.match(catchup.reply, /Tasks:.*1 cancelled/);
+  });
+});

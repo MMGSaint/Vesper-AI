@@ -84,7 +84,9 @@ interface DirectIntent {
     | "diagnostics"
     | "gpu"
     | "thermal"
-    | "obs";
+    | "obs"
+    | "catchup"
+    | "capabilities";
   confidence: number;
   slots: Record<string, string>;
 }
@@ -790,11 +792,24 @@ export class Agent {
         );
       }
       case "recall": {
-        const record = await invoke("memory_search", { query: intent.slots.query });
+        // An empty query is the summarise path — the user asked what Vesper knows
+        // in general, not for a specific fact.
+        const q = intent.slots.query.trim();
+        if (q === "") {
+          const record = await invoke("memory_summarize", {});
+          const hits = Array.isArray(record.result?.data) ? record.result?.data : [];
+          const text = hits.length === 0
+            ? "I have not been told anything to remember yet."
+            : `I remember ${hits.length} thing${hits.length === 1 ? "" : "s"}:\n${(hits as { key: string; value: string; category: string }[])
+                .map((hit) => `• [${hit.category}] ${hit.key}: ${hit.value}`)
+                .join("\n")}`;
+          return this.turn(userText, text, ["checked"], toolCalls, [], at);
+        }
+        const record = await invoke("memory_search", { query: q });
         const hits = Array.isArray(record.result?.data) ? record.result?.data : [];
         const text =
           hits.length === 0
-            ? `I checked memory for '${intent.slots.query}' and found nothing.`
+            ? `I checked memory for '${q}' and found nothing.`
             : `I checked memory:\n${(hits as { key: string; value: string; category: string }[])
                 .map((hit) => `• ${hit.key}: ${hit.value}`)
                 .join("\n")}`;
@@ -939,9 +954,203 @@ export class Agent {
           .join(" ");
         return this.turn(userText, reply, ["checked"], toolCalls, [], at);
       }
+      case "catchup":
+        return this.catchupReply(userText, toolCalls, at);
+      case "capabilities":
+        return this.capabilitiesReply(userText, toolCalls, at);
       default:
         return this.groundedFallback(userText);
     }
+  }
+
+  /**
+   * "Catch me up" — the mission's own example question. What happened while I was away?
+   *
+   * Composed deterministically from things the runtime already knows: recent events, the
+   * count of pending confirmations, the current workspace, and the count of remembered
+   * facts. Nothing is fabricated; nothing is asked of the model. Categories are ordered
+   * by how much a user is likely to want them first — security first, then anything
+   * requiring the user's attention, then lifecycle and applications, then everything
+   * else. `lifecycle.idle_tick` is dropped because it is background noise, not news.
+   */
+  private async catchupReply(
+    userText: string,
+    toolCalls: ToolCallRecord[],
+    at: string,
+  ): Promise<AgentTurn> {
+    const events = this.deps.events.recent({ limit: 60 });
+    const pending = this.deps.confirmations.size;
+    const workspace = this.deps.workspaces.current();
+    const stats = await this.deps.memory.stats();
+
+    // A crash-recovered event on this boot is worth its own line, above the digest.
+    const crashRecovered = events.find((event) => event.type === "lifecycle.crash_recovered");
+
+    const security = events.filter((event) => event.type.startsWith("security."));
+    const applications = events.filter(
+      (event) =>
+        event.type === "application.started" ||
+        event.type === "application.stopped" ||
+        event.type === "game.started",
+    );
+    const workspaceChanges = events.filter((event) => event.type === "workspace.switch");
+    const optimizer = events.filter((event) => event.type === "optimizer.state");
+    const system = events.filter(
+      (event) => event.type === "system.state" || event.type === "obs.state",
+    );
+    // The idle_tick exclusion is defence-in-depth. The digest below only counts
+    // start / background_stop / pause, so an idle_tick would be dropped anyway;
+    // mutation-removing this filter does not fail any named test. Kept so that if a
+    // future author counts `lifecycle.length` directly, or adds a new lifecycle badge,
+    // background heartbeat noise does not immediately leak into the reply.
+    const lifecycle = events.filter(
+      (event) => event.type.startsWith("lifecycle.") && event.type !== "lifecycle.idle_tick",
+    );
+    const tasks = events.filter((event) => event.type.startsWith("task."));
+
+    const lines: string[] = [];
+
+    if (pending > 0) {
+      lines.push(
+        `${pending} action${pending === 1 ? "" : "s"} waiting for your confirmation. ` +
+          `Type '/status' in the console to see them, or answer the next \`--ask\`.`,
+      );
+    }
+    if (crashRecovered) {
+      lines.push(
+        `Recovered from an unclean shutdown at some point: ${crashRecovered.title}`,
+      );
+    }
+    if (security.length > 0) {
+      lines.push(
+        `Security notices (${security.length}): ${security
+          .slice(-3)
+          .map((event) => event.title)
+          .join(" · ")}`,
+      );
+    }
+    if (workspaceChanges.length > 0) {
+      const last = workspaceChanges[workspaceChanges.length - 1];
+      lines.push(`Workspace changes (${workspaceChanges.length}), most recent: ${last.title}`);
+    }
+    if (applications.length > 0) {
+      const summary = applications.slice(-5).map((event) => event.title).join(" · ");
+      lines.push(`Applications (${applications.length}): ${summary}`);
+    }
+    if (optimizer.length > 0) {
+      lines.push(
+        `Optimizer state changes (${optimizer.length}): ${optimizer.slice(-2).map((event) => event.title).join(" · ")}`,
+      );
+    }
+    if (tasks.length > 0) {
+      const created = tasks.filter((event) => event.type === "task.created").length;
+      const completed = tasks.filter((event) => event.type === "task.completed").length;
+      const failedFinal = tasks.filter(
+        (event) => event.type === "task.failed" && /failed after/.test(event.title),
+      ).length;
+      const cancelled = tasks.filter((event) => event.type === "task.cancelled").length;
+      const parts: string[] = [];
+      if (created) parts.push(`${created} queued`);
+      if (completed) parts.push(`${completed} completed`);
+      if (failedFinal) parts.push(`${failedFinal} failed`);
+      if (cancelled) parts.push(`${cancelled} cancelled`);
+      if (parts.length) lines.push(`Tasks: ${parts.join(", ")}.`);
+    }
+    if (system.length > 0) {
+      lines.push(`System/OBS state changes (${system.length}).`);
+    }
+    if (lifecycle.length > 0) {
+      const started = lifecycle.filter((event) => event.type === "lifecycle.start").length;
+      const stopped = lifecycle.filter((event) => event.type === "lifecycle.background_stop").length;
+      const paused = lifecycle.filter((event) => event.type === "lifecycle.pause").length;
+      const parts: string[] = [];
+      if (started) parts.push(`${started} start${started === 1 ? "" : "s"}`);
+      if (stopped) parts.push(`${stopped} stop${stopped === 1 ? "" : "s"}`);
+      if (paused) parts.push(`${paused} pause${paused === 1 ? "" : "s"}`);
+      if (parts.length) lines.push(`Lifecycle: ${parts.join(", ")}.`);
+    }
+
+    const context = `Current: workspace ${workspace.name}, ${stats.persistent} remembered fact${stats.persistent === 1 ? "" : "s"}.`;
+    lines.push(context);
+
+    // If the only line is the "current" summary, nothing has actually happened worth
+    // reporting since Vesper woke up. Say so plainly.
+    const reply = lines.length === 1
+      ? `Nothing to report — Vesper has been quiet. ${context}`
+      : lines.join("\n");
+
+    return this.turn(userText, reply, ["checked"], toolCalls, [], at);
+  }
+
+  /**
+   * "What can you do?" — answered from the live registry, never from a hand-written list.
+   *
+   * A static answer would drift the moment a tool is added or removed. Composing the
+   * reply from `deps.tools.list(workspaceId)` means it always reflects what is actually
+   * loaded for the *current* workspace. Tools are grouped by their permission tier so a
+   * user sees the safety picture at a glance: what runs freely versus what needs their
+   * OK versus what will never run autonomously. Providers and workspaces come from the
+   * router and the workspace manager, so both mirror real state too.
+   */
+  private async capabilitiesReply(
+    userText: string,
+    toolCalls: ToolCallRecord[],
+    at: string,
+  ): Promise<AgentTurn> {
+    const workspace = this.deps.workspaces.current();
+    const tools = this.deps.tools.list(workspace.id);
+    const byTier: Record<string, string[]> = { read: [], safe: [], confirm: [], trusted: [], never: [] };
+    for (const spec of tools) {
+      const bucket = byTier[spec.permission];
+      if (bucket) bucket.push(spec.name);
+    }
+
+    const modelStatus = this.deps.models.status();
+    // Advertise only real backends to the user. The `echo` provider exists so tests
+    // can drive the agent without a model; announcing it as "a model backend" would
+    // dilute the truthful "no backend reachable" reply that the mission depends on.
+    const reachable = modelStatus.available
+      .filter((entry) => entry.available && entry.kind !== "test")
+      .map((entry) => entry.id);
+    const workspaces = this.deps.workspaces.list().map((entry) => entry.name);
+    const stats = await this.deps.memory.stats();
+
+    const lines: string[] = [];
+    lines.push(
+      `Vesper has ${tools.length} tool${tools.length === 1 ? "" : "s"} in the ${workspace.name} workspace.`,
+    );
+    if (byTier.read.length > 0) {
+      lines.push(`  read (no approval): ${byTier.read.length} — ${sample(byTier.read)}`);
+    }
+    if (byTier.safe.length > 0) {
+      lines.push(`  safe side effects (no approval): ${byTier.safe.length} — ${sample(byTier.safe)}`);
+    }
+    if (byTier.confirm.length > 0) {
+      lines.push(`  needs your confirmation: ${byTier.confirm.length} — ${sample(byTier.confirm)}`);
+    }
+    if (byTier.trusted.length > 0) {
+      lines.push(`  trusted-only: ${byTier.trusted.length} — ${sample(byTier.trusted)}`);
+    }
+    if (byTier.never.length > 0) {
+      lines.push(`  never autonomous: ${byTier.never.length} — ${sample(byTier.never)}`);
+    }
+
+    if (reachable.length > 0) {
+      lines.push(`Local model backends reachable: ${reachable.join(", ")}.`);
+    } else {
+      lines.push(
+        `No local model backend is reachable. Deterministic intents (status, catch-up, memory, workspace) still work.`,
+      );
+    }
+    lines.push(
+      `Workspaces available: ${workspaces.join(", ")}. Say "switch to <name>" to change.`,
+    );
+    lines.push(
+      `Memory: ${stats.persistent} remembered fact${stats.persistent === 1 ? "" : "s"}. Ask "what do you know about me?" for a summary.`,
+    );
+    lines.push(`Try: "catch me up" · "what is happening" · "remember that ..." · "optimize this".`);
+
+    return this.turn(userText, lines.join("\n"), ["checked"], toolCalls, [], at);
   }
 
   private async groundedFallback(userText: string): Promise<AgentTurn> {
@@ -1112,6 +1321,13 @@ export class Agent {
   }
 }
 
+function sample(items: string[]): string {
+  // A capabilities listing is meant to inform, not exhaustively enumerate.
+  // Three names give the shape of the tier without turning the reply into a manifest.
+  if (items.length <= 3) return items.join(", ");
+  return `${items.slice(0, 3).join(", ")}, …`;
+}
+
 export function classifyIntent(text: string): DirectIntent | null {
   const trimmed = text.trim();
   const lower = trimmed.toLowerCase();
@@ -1144,8 +1360,31 @@ export function classifyIntent(text: string): DirectIntent | null {
   const forget = /^(forget|delete memory)\s+(.+)$/i.exec(trimmed);
   if (forget) return { kind: "forget", confidence: 0.95, slots: { key: forget[2].trim() } };
 
+  // "tell me what you know", "what do you know", "what do you remember" —
+  // meta-questions the user asks when they want to see everything Vesper has stored.
+  // These always route to a summary; a literal search would strip every content-bearing
+  // token as a stopword and turn up nothing.
+  if (
+    /^(?:tell me )?what do you (?:know|remember)\s*$/i.test(trimmed) ||
+    /^(?:tell me )?what do you (?:know|remember) about\s+(?:me|us|myself|yourself|it all|everything|anything)[?.!]*$/i.test(trimmed) ||
+    /^tell me what you know[?.!]*$/i.test(trimmed) ||
+    /^(?:list|show)\s+(?:my )?memories[?.!]*$/i.test(trimmed)
+  ) {
+    return { kind: "recall", confidence: 0.9, slots: { query: "" } };
+  }
   if (/what do you (remember|know) about\s+(.+)/i.test(trimmed) || /^recall\s+(.+)/i.test(trimmed)) {
-    const query = trimmed.replace(/what do you (remember|know) about\s+/i, "").replace(/^recall\s+/i, "");
+    const raw = trimmed
+      .replace(/what do you (remember|know) about\s+/i, "")
+      .replace(/^recall\s+/i, "");
+    // Trailing punctuation ("me?") reached the search verbatim before this, so
+    // memory_search looked for the literal token `me?` and missed a fact it had just
+    // stored. Trim quotation and terminal punctuation once at the intent boundary.
+    const query = raw.replace(/^["'`]|["'`.!?…,]+$/g, "").trim();
+    // If the cleaned query is a self-referential stopword, treat it as "summarise".
+    // Adding "me?" to a stopword set does not help — the punctuation must be gone first.
+    if (query === "" || /^(?:me|us|myself|yourself|everything|anything|it all)$/i.test(query)) {
+      return { kind: "recall", confidence: 0.9, slots: { query: "" } };
+    }
     return { kind: "recall", confidence: 0.9, slots: { query } };
   }
 
@@ -1158,6 +1397,21 @@ export function classifyIntent(text: string): DirectIntent | null {
     return { kind: "diagnostics", confidence: 0.96, slots: {} };
   }
 
+  if (
+    /^(?:catch me up|what did i miss|what happened while i was away|what'?s new)\b/i.test(trimmed) ||
+    /^(?:what happened)$/i.test(trimmed)
+  ) {
+    return { kind: "catchup", confidence: 0.94, slots: {} };
+  }
+  if (
+    /^(?:help|help me)[?.!]*$/i.test(trimmed) ||
+    /^(?:what can you do|what are you (?:able to|capable of))[?.!]*$/i.test(trimmed) ||
+    /^(?:list|show)\s+(?:your\s+)?(?:commands|capabilities|tools|abilities|skills)[?.!]*$/i.test(trimmed) ||
+    /^(?:tell me )?what (?:you can do|your capabilities are)[?.!]*$/i.test(trimmed) ||
+    /^(?:what tools|which tools) (?:do you have|are available)[?.!]*$/i.test(trimmed)
+  ) {
+    return { kind: "capabilities", confidence: 0.94, slots: {} };
+  }
   if (/what('?s| is) happening|status|how('?s| is) (the )?(pc|system|box)/i.test(lower)) {
     return { kind: "status", confidence: 0.93, slots: {} };
   }

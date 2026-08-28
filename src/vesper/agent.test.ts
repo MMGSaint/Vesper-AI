@@ -332,3 +332,174 @@ describe("agent", () => {
     assert.equal(intent?.slots.category, undefined);
   });
 });
+
+describe("agent — catch me up", () => {
+  it("classifies 'catch me up' as catchup, ahead of the general status regex", () => {
+    assert.equal(classifyIntent("catch me up")?.kind, "catchup");
+    assert.equal(classifyIntent("what did I miss")?.kind, "catchup");
+    assert.equal(classifyIntent("what's new")?.kind, "catchup");
+    assert.equal(classifyIntent("what happened")?.kind, "catchup");
+    assert.equal(classifyIntent("what happened while I was away")?.kind, "catchup");
+  });
+
+  it("summarises events by category, and drops idle_tick as background noise", async () => {
+    // The mission's own example question: "Vesper, catch me up." A catchup reply is
+    // built from what the runtime already knows — nothing is fabricated. Every category
+    // this test seeds must appear in the reply; idle_tick must not.
+    const runtime = await testRuntime();
+    runtime.events.emit({
+      type: "security.state_unreadable",
+      severity: "error",
+      title: "State was unreadable on startup",
+
+    });
+    runtime.events.emit({
+      type: "application.started",
+      severity: "info",
+      title: "Chrome started",
+
+    });
+    runtime.events.emit({
+      type: "game.started",
+      severity: "info",
+      title: "Squad launched",
+
+    });
+    runtime.events.emit({
+      type: "workspace.switch",
+      severity: "info",
+      title: "Switched to gaming",
+
+    });
+    runtime.events.emit({
+      type: "optimizer.state",
+      severity: "info",
+      title: "Optimizer engaged",
+
+    });
+    // Noise the catchup summary must drop.
+    for (let i = 0; i < 20; i++) {
+      runtime.events.emit({
+        type: "lifecycle.idle_tick",
+        severity: "info",
+        title: "Idle tick",
+
+      });
+    }
+
+    const turn = await runtime.chat("catch me up");
+
+    assert.match(turn.reply, /Security notices.*State was unreadable/);
+    assert.match(turn.reply, /Applications.*Squad launched/);
+    assert.match(turn.reply, /Workspace changes.*Switched to gaming/);
+    assert.match(turn.reply, /Optimizer state changes.*Optimizer engaged/);
+    // The 20 idle_ticks must not appear as lifecycle titles or as an inflated count.
+    // The whole lifecycle badge only counts start/stop/pause, so the digest should read
+    // "Lifecycle: 1 start." even though the ring holds 20 idle_ticks plus one start.
+    assert.ok(!/idle tick/i.test(turn.reply), "idle_tick events must not appear in the digest");
+    assert.match(turn.reply, /Lifecycle: 1 start\./);
+    assert.ok(!/Lifecycle:.*21/i.test(turn.reply), "the 20 idle_ticks must not inflate any count");
+    assert.match(turn.reply, /workspace .+, \d+ remembered fact/);
+  });
+
+  it("reports queued confirmations at the top of the catchup", async () => {
+    // A pending confirmation is user-owned business. The mission's rule "confirmation is
+    // not authorization" means the catchup must not silently ignore actions the user
+    // hasn't answered.
+    const runtime = await testRuntime();
+    const optimize = await runtime.chat("optimize this");
+    assert.ok(optimize.pendingConfirmations.length >= 1);
+    const turn = await runtime.chat("catch me up");
+    assert.match(turn.reply, /1 action waiting for your confirmation/);
+  });
+
+  it("summarises a quiet startup as a short lifecycle line plus context", async () => {
+    // A fresh runtime emits a lifecycle.start event on boot. Everything else is quiet.
+    // The catchup should report the start and the context, and nothing else — no
+    // security notices, no applications, no confirmations, no fabricated news.
+    const runtime = await testRuntime();
+    const turn = await runtime.chat("catch me up");
+    assert.match(turn.reply, /Lifecycle: 1 start/);
+    assert.match(turn.reply, /workspace .+, \d+ remembered fact/);
+    assert.ok(!/Security notices/.test(turn.reply));
+    assert.ok(!/Applications/.test(turn.reply));
+    assert.ok(!/waiting for your confirmation/.test(turn.reply));
+  });
+});
+
+describe("agent — what can you do", () => {
+  it("classifies help / what can you do / list tools as capabilities", () => {
+    assert.equal(classifyIntent("help")?.kind, "capabilities");
+    assert.equal(classifyIntent("help me")?.kind, "capabilities");
+    assert.equal(classifyIntent("what can you do")?.kind, "capabilities");
+    assert.equal(classifyIntent("what can you do?")?.kind, "capabilities");
+    assert.equal(classifyIntent("what are you capable of")?.kind, "capabilities");
+    assert.equal(classifyIntent("list your commands")?.kind, "capabilities");
+    assert.equal(classifyIntent("list your tools")?.kind, "capabilities");
+    assert.equal(classifyIntent("show your capabilities")?.kind, "capabilities");
+    assert.equal(classifyIntent("what tools do you have")?.kind, "capabilities");
+    assert.equal(classifyIntent("which tools are available")?.kind, "capabilities");
+  });
+
+  it("reports the current tool tier counts from the live registry", async () => {
+    // The reply is composed from `tools.list(workspace)` and the router — not from a
+    // hand-written list that could drift out of date. Every tier that the registry
+    // holds should be named, and the sum of tier counts should match the total.
+    const runtime = await testRuntime();
+    const turn = await runtime.chat("what can you do?");
+    const totalMatch = turn.reply.match(/Vesper has (\d+) tool/);
+    assert.ok(totalMatch, "tool count line missing");
+    const total = Number(totalMatch[1]);
+    assert.ok(total > 0);
+    // Sum the tier counts the reply itself names.
+    const tierSum = [...turn.reply.matchAll(/^ {2}[a-z].*?: (\d+) —/gm)].reduce(
+      (acc, m) => acc + Number(m[1]),
+      0,
+    );
+    assert.equal(tierSum, total, `tier counts (${tierSum}) do not sum to the total (${total})`);
+    // Never-autonomous tools are load-bearing to the safety story; must be named.
+    assert.match(turn.reply, /never autonomous.*disk_wipe|disk_wipe.*never autonomous/);
+  });
+
+  it("does not advertise the test backend as a reachable model", async () => {
+    // The `echo` provider exists so tests can drive the agent without a real model.
+    // Announcing it as "a local model backend" would dilute the truthful
+    // "no backend reachable" reply the mission depends on.
+    const runtime = await testRuntime();
+    const turn = await runtime.chat("what can you do");
+    assert.ok(!/echo/i.test(turn.reply), `test backend leaked into capabilities: ${turn.reply}`);
+    assert.match(turn.reply, /No local model backend is reachable|backends reachable:/);
+  });
+
+  it("names the current workspace's toolset, not another workspace's", async () => {
+    // A tool registered only for one workspace must appear when asked from that
+    // workspace, and not from another. This is what `tools.list(workspace.id)` is
+    // for; mutation-removing the workspace filter would show every tool everywhere.
+    // No production tool is currently workspace-scoped, so register one here — the
+    // load-bearingness of the filter has to be provable by test, not by inspection.
+    const runtime = await testRuntime();
+    runtime.tools.register(
+      {
+        name: "gaming_only_tool",
+        description: "Only visible in the gaming workspace",
+        permission: "read",
+        parameters: { type: "object", properties: {}, required: [] },
+        workspaces: ["gaming"],
+      },
+      async () => ({ ok: true, epistemic: "checked", summary: "ok" }),
+    );
+
+    const general = await runtime.chat("what can you do?");
+    const generalCount = Number(general.reply.match(/Vesper has (\d+) tool/)?.[1]);
+
+    await runtime.chat("switch to gaming");
+    const gaming = await runtime.chat("what can you do?");
+    assert.match(gaming.reply, /Gaming workspace/);
+    const gamingCount = Number(gaming.reply.match(/Vesper has (\d+) tool/)?.[1]);
+
+    // Removing the workspace filter would make both counts equal — the workspace-scoped
+    // tool would be visible from General too. The gap of exactly 1 is what the filter
+    // is meant to produce.
+    assert.equal(gamingCount, generalCount + 1, `gaming (${gamingCount}) should have one more tool than general (${generalCount})`);
+  });
+});

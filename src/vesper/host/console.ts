@@ -69,6 +69,13 @@ export const CONSOLE_HELP = `Conversation
   <anything>            Talk to Vesper
   /cancel               Stop the reply in progress (or press Ctrl-C)
 
+Ask Vesper directly (no model needed):
+  what can you do?      List tools, backends, workspaces, memory
+  what is happening     Runtime snapshot with epistemic tags
+  catch me up           Digest of what happened while you were away
+  what do you know about me?
+                        Summary of stored memories in this workspace
+
 Context
   /workspace            Show the active workspace
   /workspace <name>     Switch workspace

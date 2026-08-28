@@ -15,6 +15,10 @@ import {
 } from "./knowledge/embeddings.ts";
 import { WorkspaceManager } from "./workspaces.ts";
 import { EventBus } from "./events.ts";
+import { EventJournal } from "./event-journal.ts";
+import { TaskExecutorRegistry, TaskScheduler, registerBuiltinExecutors } from "./task-scheduler.ts";
+import { AutonomyGovernor, defaultAutonomyPolicy } from "./autonomy.ts";
+import { CheckpointStore } from "./checkpoint.ts";
 import { NotificationHub } from "./notifications.ts";
 import { createSimulatedHardware, type SimulatedHardware } from "./hardware/simulated.ts";
 import {
@@ -49,6 +53,7 @@ import {
 import { buildDiscoveryProbes } from "./distributed/discovery.ts";
 import type { RequestOrigin } from "./tools/remote.ts";
 import { describeStartupRegistration } from "./windows/startup.ts";
+import { MEMORY_CATEGORIES } from "./types.ts";
 import type {
   AgentTurn,
   CapabilityProfile,
@@ -97,6 +102,11 @@ export class VesperRuntime {
   readonly knowledge: KnowledgeIndex;
   readonly workspaces: WorkspaceManager;
   readonly events: EventBus;
+  readonly journal: EventJournal;
+  readonly taskExecutors: TaskExecutorRegistry;
+  readonly taskScheduler: TaskScheduler;
+  readonly autonomy: AutonomyGovernor;
+  readonly checkpoints: CheckpointStore;
   readonly notifications: NotificationHub;
   readonly hardware: SimulatedHardware;
   readonly optimizer: OptimizerAdapter;
@@ -117,6 +127,7 @@ export class VesperRuntime {
   readonly benchmark: BenchmarkHarness;
   capability: CapabilityProfile | null = null;
   firstBootReport: FirstBootReport | null = null;
+  private discoveryPromise: Promise<void> | null = null;
   started = false;
   private readonly skipDiscovery: boolean;
 
@@ -129,6 +140,11 @@ export class VesperRuntime {
       knowledge: KnowledgeIndex;
       workspaces: WorkspaceManager;
       events: EventBus;
+      journal: EventJournal;
+      taskExecutors: TaskExecutorRegistry;
+      taskScheduler: TaskScheduler;
+      autonomy: AutonomyGovernor;
+      checkpoints: CheckpointStore;
       notifications: NotificationHub;
       hardware: SimulatedHardware;
       optimizer: OptimizerAdapter;
@@ -156,6 +172,11 @@ export class VesperRuntime {
     this.knowledge = parts.knowledge;
     this.workspaces = parts.workspaces;
     this.events = parts.events;
+    this.journal = parts.journal;
+    this.taskExecutors = parts.taskExecutors;
+    this.taskScheduler = parts.taskScheduler;
+    this.autonomy = parts.autonomy;
+    this.checkpoints = parts.checkpoints;
     this.notifications = parts.notifications;
     this.hardware = parts.hardware;
     this.optimizer = parts.optimizer;
@@ -180,6 +201,9 @@ export class VesperRuntime {
     if (this.started) return this.capability;
     this.log.info("lifecycle", "Vesper starting", { instanceId: this.instanceId });
     const restoredEvents = await this.events.hydrate();
+    // A journal never grows unbounded: prune day-partitions older than the retention
+    // window before doing anything else that would consume storage bandwidth.
+    await this.journal.purgeOldPartitions();
     if (restoredEvents) {
       this.log.info("lifecycle", "Restored the event log", { events: restoredEvents });
     }
@@ -205,7 +229,7 @@ export class VesperRuntime {
       });
     }
     if (!this.skipDiscovery) {
-      void this.discoverInBackground();
+      this.discoveryPromise = this.discoverInBackground();
     }
     try {
       await this.knowledge.reindex();
@@ -308,6 +332,23 @@ export class VesperRuntime {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  /**
+   * Await the background discovery pass and return its report, or null if discovery
+   * was skipped or has not started yet. Callers who need the report for a one-shot
+   * command (--first-boot-report, --diagnostics with a --wait flag) use this instead
+   * of racing the background job.
+   */
+  async waitForFirstBoot(): Promise<FirstBootReport | null> {
+    if (this.discoveryPromise) {
+      try {
+        await this.discoveryPromise;
+      } catch {
+        // discoverInBackground already logged the error and left the report null.
+      }
+    }
+    return this.firstBootReport;
   }
 
   async stop() {
@@ -693,6 +734,43 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     self: deviceIdentity.publicIdentity(),
   });
   const taskQueue = new TaskQueue({ storage });
+  // Task lifecycle → event bus. Wired after the bus is constructed further down;
+  // the callback captures `events` by reference so the bus need not exist yet.
+  let eventBusRef: { emit: (e: Omit<import("./types.ts").VesperEvent, "id" | "at"> & { at?: string }) => unknown } | null = null;
+  taskQueue.setOnLifecycle((event) => {
+    if (!eventBusRef) return;
+    const shortId = event.task.id.slice(-8);
+    const title = (() => {
+      switch (event.kind) {
+        case "created":
+          return `Task queued: ${event.task.description}`;
+        case "assigned":
+          return `Task assigned to ${event.deviceId}: ${event.task.description}`;
+        case "blocked":
+          return `Task blocked (${event.reason}): ${event.task.description}`;
+        case "requeued":
+          return `Task requeued (${event.reason}): ${event.task.description}`;
+        case "started":
+          return `Task started (attempt ${event.task.retry.attempts}/${event.task.retry.maxAttempts}): ${event.task.description}`;
+        case "completed":
+          return `Task done: ${event.task.description}`;
+        case "failed":
+          return event.final
+            ? `Task failed after ${event.task.retry.attempts} attempt(s): ${event.task.description}`
+            : `Task failed, will retry: ${event.task.description}`;
+        case "cancelled":
+          return `Task cancelled: ${event.task.description}`;
+      }
+    })();
+    const severity: import("./types.ts").VesperEvent["severity"] =
+      event.kind === "failed" && event.final ? "warn" : "info";
+    eventBusRef.emit({
+      type: `task.${event.kind}`,
+      title,
+      severity,
+      data: { taskId: event.task.id, shortId } as import("./types.ts").JsonObject,
+    });
+  });
 
   const memory = new MemoryStore(storage);
   // The knowledge index is constructed before the model router, so the embedding
@@ -747,10 +825,66 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
       });
     },
   });
-  const workspaces = new WorkspaceManager(config);
+  const workspaces = new WorkspaceManager(config, { storage, log });
+  // Load-on-start rather than lazy-load per current(). current() is called on every
+  // tool decision and every reply; a synchronous cache miss surfaced only by an await
+  // there would surprise every caller.
+  const workspaceLoad = await workspaces.load();
   // The event log is persisted so correlation still works after a restart or crash,
   // which is exactly when 'what happened just before this?' matters most.
   const events = new EventBus(log, 500, storage);
+  const journal = new EventJournal({
+    storage,
+    log,
+    retentionDays: config.agent.journalRetentionDays,
+    maxPerDay: config.agent.journalMaxPerDay,
+    onWriteFailure: (error) => {
+      // Losing history is not availability loss, but the mission's "loss must be loud"
+      // rule still applies. Emit once per session; the flag inside EventJournal already
+      // debounces the callback, so we do not need to debounce here.
+      events.emit({
+        type: "security.journal_write_failed",
+        title: "Vesper could not write to its durable event journal",
+        detail: error instanceof Error ? error.message : String(error),
+        severity: "warn",
+        retention: "durable",
+        provenance: { author: "subsystem", source: "event-journal" },
+      });
+    },
+    onCorruptPartition: (key, error) => {
+      events.emit({
+        type: "security.journal_partition_corrupt",
+        title: `Corrupt event-journal partition: ${key}`,
+        detail: error instanceof Error ? error.message : String(error),
+        severity: "warn",
+        retention: "durable",
+        provenance: { author: "subsystem", source: "event-journal" },
+      });
+    },
+  });
+  events.setJournal(journal);
+  // Task lifecycle callback (installed above) now has a real bus to publish through.
+  eventBusRef = events;
+  // Two branches of workspace load must be visible, not silent, per round-2's
+  // "loss must be loud" rule: a stored id the config no longer knows about (a workspace
+  // was removed and the user is now silently reset to the default), and a store that
+  // could not be read at all. Both are informational for a lifecycle event; only the
+  // unreadable case gets an error-level notification because the user's saved choice
+  // was lost.
+  if (workspaceLoad.kind === "unknown_id") {
+    events.emit({
+      type: "workspace.reset_to_default",
+      title: `Workspace '${workspaceLoad.storedId}' is no longer configured; reset to ${workspaces.current().name}`,
+      severity: "info",
+    });
+  } else if (workspaceLoad.kind === "unreadable") {
+    events.emit({
+      type: "workspace.state_unreadable",
+      title: "Stored workspace choice was unreadable; using the configured default",
+      detail: workspaceLoad.error,
+      severity: "warn",
+    });
+  }
   const notifications = new NotificationHub(
     config.notifications.enabled,
     config.notifications.cooldownMs,
@@ -787,6 +921,19 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     log,
     startOnLogin: config.windows.startOnLogin,
   });
+  const taskExecutors = new TaskExecutorRegistry();
+  registerBuiltinExecutors(taskExecutors);
+  const taskScheduler = new TaskScheduler({
+    taskQueue,
+    registry: taskExecutors,
+    events,
+    log,
+    deviceId: deviceIdentity.deviceId,
+    devices: () => devices.list(),
+    enabled: config.agent.driveTasksOnIdle,
+    maxPerTick: config.agent.tasksPerTick,
+  });
+
   const scheduler = createIdleScheduler({
     events,
     log,
@@ -808,6 +955,18 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
         title: "Idle maintenance tick",
         severity: "info",
       });
+      // The task scheduler runs BELOW the idle tick's own gating (gaming throttle,
+      // background paused). Its .tick() is a no-op when disabled — the flag guards
+      // the whole feature so a runtime with no executors registered stays silent.
+      try {
+        await taskScheduler.tick();
+      } catch (error) {
+        // A scheduler failure must not crash the idle loop. The scheduler emits its
+        // own events for executor errors; a throw from tick() itself is unexpected.
+        log.warn("lifecycle", "task scheduler tick threw", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     },
   });
   const gate = createPermissionGate(config.permissions, log);
@@ -815,6 +974,12 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   const tools = new ToolRegistry(gate, log, confirmations, async (id) =>
     (await devices.get(id))?.trust ?? "unknown",
   );
+  const autonomy = new AutonomyGovernor({
+    policy: defaultAutonomyPolicy(),
+    events,
+    log,
+  });
+  tools.setAutonomyGovernor(autonomy);
   const models = createModelRouter({
     config,
     providers: options.providers,
@@ -827,7 +992,94 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   const history: ChatMessage[] = [];
 
   const runtimeRef: { current: VesperRuntime | null } = { current: null };
+
+  // Vesper-owned rollback: snapshots kept in `rollback.checkpoints` with per-record TTL.
+  const checkpoints = new CheckpointStore({ storage, log, events });
+  // Register reversers for the write paths that participate. Each reverser is a small
+  // shim over the underlying store; the checkpoint layer never knows the store's
+  // internals, only how to ask it to restore a value it once had.
+  checkpoints.registerReverser("memory_remember", {
+    async verify(record) {
+      // An absent post-image means the write never completed its verify() step — the
+      // process crashed between snapshot and verify, or apply threw. We do NOT know
+      // what the state should look like, so we cannot tell whether it has drifted.
+      // The safe reading of "unknown" is REFUSE, not "no drift": treating an unknown
+      // post-image as a match would let a rollback overwrite whatever the user did
+      // since. (Attack finding: drift detection was a no-op on every un-verified
+      // checkpoint.)
+      const after = record.after as { value?: string; id?: string } | undefined;
+      if (!after || typeof after.value !== "string") return false;
+      const results = await memory.search(record.target, { workspaceId: record.workspaceId, scope: "all" });
+      const current = results.find((entry) => entry.key === record.target);
+      if (!current) return false;
+      // Anchor on entry IDENTITY where we have it, not just value equality. A user who
+      // forgot this memory and re-created it with the same text has a different entry;
+      // rolling back would destroy their new one while the value check happily passed.
+      if (typeof after.id === "string") return current.id === after.id;
+      return current.value === after.value;
+    },
+    async restore(record) {
+      if (record.absentBefore) {
+        // The key did not exist before; forget the entry we created. `forget` returns
+        // false when nothing matched — reporting success then would claim a reversal
+        // that did not happen, which the mission's honesty rule forbids.
+        const forgotten = await memory.forget(record.target, { workspaceId: record.workspaceId });
+        if (!forgotten) {
+          throw new Error(`Nothing to forget for '${record.target}'; the memory was already gone.`);
+        }
+        return;
+      }
+      const before = record.before as
+        | { key?: unknown; category?: unknown; value?: unknown; workspaceId?: unknown }
+        | null;
+      if (!before || typeof before !== "object") {
+        throw new Error("memory_remember checkpoint has no `before` value");
+      }
+      // Validate the pre-image before feeding it back into the store. A hostile or
+      // corrupted `rollback.checkpoints` blob could otherwise plant an arbitrary
+      // key/value pair and have restore() write it as if Vesper had recorded it.
+      // The key must match the checkpoint's own target — a rollback restores the
+      // thing it snapshotted, nothing else.
+      if (typeof before.key !== "string" || typeof before.value !== "string" || typeof before.category !== "string") {
+        throw new Error("memory_remember checkpoint `before` is malformed; refusing to restore");
+      }
+      if (before.key !== record.target) {
+        throw new Error(
+          `memory_remember checkpoint targets '${record.target}' but its pre-image names '${before.key}'; refusing to restore`,
+        );
+      }
+      if (!(MEMORY_CATEGORIES as readonly string[]).includes(before.category)) {
+        throw new Error(`memory_remember checkpoint has an unknown category '${before.category}'; refusing to restore`);
+      }
+      const workspaceId = typeof before.workspaceId === "string" ? before.workspaceId : undefined;
+      await memory.remember({
+        category: before.category as never,
+        key: before.key,
+        value: before.value,
+        workspaceId,
+        source: "agent",
+        provenance: { origin: "agent", kind: "inferred" },
+      });
+    },
+  });
+  checkpoints.registerReverser("workspace_switch", {
+    async verify(record) {
+      // Same rule as memory_remember: an absent post-image means we cannot know
+      // whether the state drifted, so refuse rather than assume it matches.
+      const after = typeof record.after === "string" ? record.after : null;
+      if (!after) return false;
+      return workspaces.current().id === after;
+    },
+    async restore(record) {
+      const before = typeof record.before === "string" ? record.before : null;
+      if (!before) throw new Error("workspace_switch checkpoint has no `before` value");
+      const restored = workspaces.switchTo(before);
+      if (!restored) throw new Error(`Cannot restore workspace '${before}': not configured`);
+    },
+  });
+
   registerBuiltinTools({
+    checkpointStore: checkpoints,
     registry: tools,
     obs,
     deviceRegistry: devices,
@@ -903,6 +1155,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     knowledge,
     workspaces,
     events,
+    journal,
+    taskExecutors,
+    taskScheduler,
+    autonomy,
+    checkpoints,
     notifications,
     hardware,
     optimizer,

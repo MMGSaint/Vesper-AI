@@ -263,8 +263,28 @@ export const vesperConfigSchema = z.object({
       maxToolIterations: z.number().default(8),
       idleEventDriven: z.boolean().default(true),
       idleIntervalMs: z.number().default(30_000),
+      /** How many day-partitions the durable event journal keeps. */
+      journalRetentionDays: z.number().int().min(1).max(365).default(14),
+      /** Cap on events per day-partition — a floody subsystem cannot grow unbounded. */
+      journalMaxPerDay: z.number().int().min(50).max(50_000).default(1000),
+      /**
+       * Whether the idle-scheduler tick drives the task queue. Off by default —
+       * a runtime with no executors registered stays silent, so a fresh install does
+       * not appear to try to do work it cannot yet do.
+       */
+      driveTasksOnIdle: z.boolean().default(false),
+      /** Cap on how many tasks the scheduler starts on one tick. */
+      tasksPerTick: z.number().int().min(1).max(64).default(4),
     })
-    .default({ maxToolIterations: 8, idleEventDriven: true, idleIntervalMs: 30_000 }),
+    .default({
+      maxToolIterations: 8,
+      idleEventDriven: true,
+      idleIntervalMs: 30_000,
+      journalRetentionDays: 14,
+      journalMaxPerDay: 1000,
+      driveTasksOnIdle: false,
+      tasksPerTick: 4,
+    }),
 });
 
 export type VesperConfig = z.infer<typeof vesperConfigSchema>;

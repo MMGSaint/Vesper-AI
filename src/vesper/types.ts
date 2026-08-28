@@ -214,6 +214,21 @@ export interface WorkspaceDefinition {
   defaultModelRole?: ModelRole;
 }
 
+/**
+ * The event bus carries these. New optional fields (correlationId, provenance,
+ * retention) are additive: every existing emit site still compiles unchanged, and every
+ * hydrator that filters on `{id, at, type}` still accepts old rows.
+ *
+ * Retention:
+ *   - "transient" — never journaled; useful only inside the 500-entry hot ring
+ *   - "durable"   — journaled to disk with retention per the EventJournal policy
+ *   - "summary"   — reserved for future rolled-up snapshots produced by summarizers
+ *   - undefined   — the journal derives the answer from event type (see event-journal.ts)
+ *
+ * Provenance says who authored the event, which is not the same as which subsystem
+ * happens to be emitting on their behalf. Matches the shape VesperNotification already
+ * uses so a downstream reader has one mental model.
+ */
 export interface VesperEvent {
   id: string;
   type: string;
@@ -223,6 +238,16 @@ export interface VesperEvent {
   workspaceId?: string;
   severity: "info" | "warn" | "error";
   data?: JsonObject;
+  /** Groups related events across a single turn / session / task. */
+  correlationId?: string;
+  /** Who authored this event, in the same vocabulary as VesperNotification. */
+  provenance?: {
+    author: "subsystem" | "model" | "user" | "remote";
+    source?: string;
+    deviceId?: string;
+  };
+  /** Journal-behaviour hint. Absent → derived from `type` at journaling time. */
+  retention?: "transient" | "durable" | "summary";
 }
 
 export interface VesperNotification {
@@ -511,7 +536,9 @@ export interface AuditEntry {
     | "windows"
     | "voice"
     | "health"
-    | "diagnostics";
+    | "diagnostics"
+    | "rollback"
+    | "autonomy";
   level: "debug" | "info" | "warn" | "error";
   message: string;
   data?: JsonObject;

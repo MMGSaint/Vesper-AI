@@ -263,6 +263,15 @@ export async function createProductionHost(options?: {
     },
     async doctor() {
       const error = await runtime.lastError();
+      // Snapshot model reachability for the doctor so a user can see whether their
+      // local backend is running without hunting through logs.
+      const modelStatus = runtime.models.status();
+      const roles = Object.fromEntries(
+        Object.entries(runtime.config.models.roles).map(([role, target]) => [
+          role,
+          { provider: target.provider, model: target.model },
+        ]),
+      );
       return runDoctor({
         dirs,
         config: runtime.config,
@@ -270,6 +279,11 @@ export async function createProductionHost(options?: {
         configErrors: loaded.errors,
         storageReadable: true,
         lastError: error?.message ?? null,
+        models: {
+          active: modelStatus.active,
+          available: modelStatus.available,
+          roles,
+        },
       });
     },
     notify(title, body) {
