@@ -7,7 +7,8 @@ Nothing here is a claim that Vesper is or is not vulnerable to these. Each entry
 what has not been examined, and why it could not be settled in the environment where the
 campaign ran.
 
-Written 2026-08-27, during the round-2 adversarial campaign on `agent/distributed`.
+Written 2026-08-27 during the round-2 campaign on `agent/distributed`; revised 2026-08-28
+as findings moved from this list into the fixed set.
 
 ---
 
@@ -20,7 +21,7 @@ POSIX-shaped.
 
 | # | Item | Why it is not covered |
 |---|---|---|
-| 1.1 | **NTFS reparse points and directory junctions** | `openContained` relies on `O_NOFOLLOW`, which does not exist on Windows: the code uses `constants.O_NOFOLLOW ?? 0`, so on Windows the flag is simply absent and the syscall does not carry the check. The `lstat` pre-check still runs, which leaves the TOCTOU window open on that platform. A junction is not a symlink and `lstat` reports it differently. **Untested on a real Windows filesystem.** |
+| 1.1 | **NTFS reparse points and directory junctions** | `openContained` takes two deliberately different paths. On POSIX `O_NOFOLLOW` is the whole check and the kernel performs it as part of the open, so there is no window. Windows has no `O_NOFOLLOW` and Node exposes no equivalent (`FILE_FLAG_OPEN_REPARSE_POINT` is unreachable), so there an explicit `lstat` is the whole defence — checked on both sides of the open so a swap *during* it is caught, but **a swap-and-swap-back is not, and the TOCTOU window is genuinely open on that platform.** CodeQL's `js/file-system-race` flagged exactly this and was right about Windows. A junction is also not a symlink and `lstat` reports it differently. **Untested on a real Windows filesystem.** |
 | 1.2 | **Windows hard links** | The `nlink > 1` refusal is asserted on Linux. `fs.stat().nlink` is populated on NTFS but the campaign has never run the assertion against a real NTFS volume. |
 | 1.3 | **Extended-length paths (`\\?\C:\...`)** | `realpathSync.native` returns this form and broke knowledge indexing entirely when it was used (fixed by using plain `realpathSync` and stripping the prefix). Nothing tests that a path *supplied* in extended-length form is contained correctly. |
 | 1.4 | **Case-insensitive path comparison** | NTFS is case-insensitive by default; containment comparisons are byte-exact. `C:\Notes\..\NOTES\x.txt` versus an approved root written as `C:\notes` has not been tested. |
@@ -34,7 +35,7 @@ POSIX-shaped.
 
 | # | Item | State |
 |---|---|---|
-| 2.1 | **Filesystem race between `lstat` and `open`** | Closed on POSIX by `O_NOFOLLOW` (the check is part of the syscall). **Open on Windows**, per 1.1. No race harness exists on either platform. |
+| 2.1 | **Filesystem race between `lstat` and `open`** | Closed on POSIX, where there is no longer an `lstat` at all — `O_NOFOLLOW` is the check and it is part of the syscall. **Open on Windows**, per 1.1, narrowed but not closed. No race harness exists on either platform; the suite creates no window, so nothing here is proven against an actual race. |
 | 2.2 | **Concurrent turns against one runtime** | Two in-flight turns sharing the confirmation queue, the memory store and the registry have not been fuzzed. The stores use an exclusive queue; that has not been adversarially tested. |
 | 2.3 | **Interleaved enrol/revoke** | Revocation is now written before the registry so a crash between the two leaves the device revoked. A concurrent `enrol` racing a `setTrust(revoked)` has not been tested. |
 | 2.4 | **Storage write interruption** | A crash mid-`persist` is handled by the corrupt-file path, which was reproduced. Partial writes at other layers (audit log rotation, knowledge index) are untested. |
@@ -65,6 +66,9 @@ believed safe.
 Reproduced findings that were triaged and deliberately not fixed in this pass. Each is
 recorded with what it costs.
 
+Numbering is stable, so 4.6, 4.7 and 4.9 are absent rather than renumbered: those three
+prototype-resolution findings were fixed in `7b8d746` after this list was first written.
+
 | # | Finding | Why deferred |
 |---|---|---|
 | 4.1 | **Stored memories are lost when state.json is corrupt** | The loss is now loud — a `security.state_unreadable` event, an error-kind notification, and a `diagnostics.recentErrors` entry — and the corrupt file is preserved as `state.json.corrupt`. Recovering the entries needs a merge story that does not exist yet, and inventing one under time pressure risks losing more than it saves. Not a security boundary: no authority is granted by the loss. |
@@ -72,10 +76,7 @@ recorded with what it costs.
 | 4.3 | **Single-instance guard fails open on an unparseable lock body** | Including the window created by its own non-atomic write. Consequence is two hosts running, not an authority change. |
 | 4.4 | **`fitContext` can evict the user's own turn** | A compromised model that emits very large tool results can crowd the user's message out of the window. The system prompt is bounded (tested); the conversation is not. |
 | 4.5 | **The context budget cannot see `toolCalls`** | Only message content is measured, so a model can put a large payload in the tool-call arguments that the budget does not count. Bounded now by `MAX_TOOL_CALLS_PER_ROUND` and the confirmation argument cap, but not by the budget itself. |
-| 4.6 | **`validateToolArgs` resolves declarations through `Object.prototype`** | LOW. A tool spec whose properties map has an inherited key. Requires a hostile MCP server to reach. |
-| 4.7 | **`toToolSpec` lets an MCP server set the prototype of the properties map** | LOW, same reachability. |
 | 4.8 | **MCP `protocolVersion` is never validated** | LOW. A downgraded or absent version is accepted. |
-| 4.9 | **`canonicalJson` drops an own `__proto__` key** | LOW. A signed grant could carry content outside the signature. Not currently reachable — grants are produced locally — but it is a signing primitive and should be exact. |
 | 4.10 | **`*.localhost` is treated as loopback with no opt-in** | LOW. A resolver-controlled name. |
 | 4.11 | **MCP stdio transport has no frame size limit** | LOW. A hostile server can buffer unbounded newline-free output. |
 | 4.12 | **Unvalidated client-protocol payloads throw out of the gateway** | LOW. `ttlMs: NaN`, non-string key/value/token. An exception, not an authorization change. |
@@ -94,3 +95,4 @@ defence-in-depth, and must not be described as protecting anything.
 | `setTrust`'s consultation of the revocation list (`registry.ts`) | Unexercised. `load` has already corrected every record it holds. |
 | `notify` as host-only, for a **restricted** device | Unexercised. The scope ceiling refuses it either way. Load-bearing for a **trusted** device, which is where the mutation shows. |
 | The two named `never`-tier branches (`permissions.ts`, `registry.ts`) | Unexercised individually. The permission gate's final default-deny is what actually holds the never tier; all three must be removed together before a never-tier handler runs. |
+| The Windows branch of `openContained`, pre- and post-`open` checks (`filesystem.ts`) | Individually unexercised. Forcing that branch on Linux and removing *either* check leaves all 17 containment tests green; removing **both** fails 5, including the original CRITICAL. So each is sufficient for every case the suite creates and neither is proven to add anything over the other. The post-`open` check exists for a *race*, which no test here simulates — and could not, on the platform where the branch is live. |

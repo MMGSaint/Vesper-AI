@@ -74,33 +74,50 @@ export async function resolveApprovedPathReal(
  * symlinks resolved away by `resolveRealWithinRoot`, so a symlink still sitting at the
  * final component is either the dangling case or a swap, and neither should be followed.
  *
- * Windows has no `O_NOFOLLOW`. There the explicit lstat is the whole defence rather than
- * a nicety, and it is racy — stated plainly rather than papered over. Reparse-point
- * behaviour on a real Windows machine has never been exercised; see
- * docs/known-limitations.md.
+ * Windows has no `O_NOFOLLOW` and Node exposes no equivalent, so there an explicit check
+ * is the whole defence and it is racy. The two platforms therefore take deliberately
+ * different paths — see the body. Reparse-point behaviour on a real Windows machine has
+ * never been exercised; see docs/known-limitations.md and security/BACKLOG.md §1.1.
  */
 const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+const HAS_O_NOFOLLOW = O_NOFOLLOW !== 0;
+
+const REFUSED_LINK = "Refused to follow a symbolic link at the target path.";
 
 async function openContained(
   path: string,
   flags: number,
 ): Promise<{ ok: true; handle: Awaited<ReturnType<typeof open>> } | { ok: false; summary: string }> {
-  const link = await lstat(path).catch(() => null);
-  if (link?.isSymbolicLink()) {
-    return {
-      ok: false,
-      summary: "Refused to follow a symbolic link at the target path.",
-    };
-  }
-  try {
-    return { ok: true, handle: await open(path, flags | O_NOFOLLOW) };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ELOOP" || code === "EMLINK") {
-      return { ok: false, summary: "Refused to follow a symbolic link at the target path." };
+  if (HAS_O_NOFOLLOW) {
+    // No pre-check at all. `O_NOFOLLOW` *is* the check and the kernel performs it as part
+    // of the open, so inspecting the path first would add a check-then-use window without
+    // adding a check — which is exactly what CodeQL's js/file-system-race flagged here,
+    // correctly. The refusal arrives as ELOOP from the syscall itself.
+    try {
+      return { ok: true, handle: await open(path, flags | O_NOFOLLOW) };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ELOOP" || code === "EMLINK") return { ok: false, summary: REFUSED_LINK };
+      throw error;
     }
-    throw error;
   }
+
+  // Windows. There is no `O_NOFOLLOW` and Node exposes no equivalent
+  // (`FILE_FLAG_OPEN_REPARSE_POINT` is not reachable), so an explicit check is the whole
+  // defence — and an explicit check is inherently racy. Checked on both sides of the
+  // open so a swap *during* it is caught; a swap-and-swap-back is not, and nothing
+  // available here would catch it. Stated rather than papered over: see
+  // security/BACKLOG.md §1.1 and docs/known-limitations.md.
+  const before = await lstat(path).catch(() => null);
+  if (before?.isSymbolicLink()) return { ok: false, summary: REFUSED_LINK };
+
+  const handle = await open(path, flags);
+  const after = await lstat(path).catch(() => null);
+  if (after?.isSymbolicLink()) {
+    await handle.close().catch(() => undefined);
+    return { ok: false, summary: REFUSED_LINK };
+  }
+  return { ok: true, handle };
 }
 
 export async function listApproved(
