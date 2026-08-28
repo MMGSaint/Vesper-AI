@@ -84,11 +84,33 @@ const HAS_O_NOFOLLOW = O_NOFOLLOW !== 0;
 
 const REFUSED_LINK = "Refused to follow a symbolic link at the target path.";
 
+/**
+ * Exposed for the containment tests only.
+ *
+ * `raceHook` runs between the pre-check and the open, which is the window an attacker
+ * would use and which no test could otherwise create; `afterOpenHook` runs immediately
+ * after it, which is how an attacker would cover their tracks. `forceExplicit` takes the
+ * branch used where `O_NOFOLLOW` does not exist, because the suite runs where it does.
+ */
+export async function openContainedForTest(
+  path: string,
+  flags: number,
+  raceHook?: () => Promise<void>,
+  afterOpenHook?: () => Promise<void>,
+): ReturnType<typeof openContained> {
+  return openContained(path, flags, { forceExplicit: true, raceHook, afterOpenHook });
+}
+
 async function openContained(
   path: string,
   flags: number,
+  test?: {
+    forceExplicit?: boolean;
+    raceHook?: () => Promise<void>;
+    afterOpenHook?: () => Promise<void>;
+  },
 ): Promise<{ ok: true; handle: Awaited<ReturnType<typeof open>> } | { ok: false; summary: string }> {
-  if (HAS_O_NOFOLLOW) {
+  if (HAS_O_NOFOLLOW && !test?.forceExplicit) {
     // No pre-check at all. `O_NOFOLLOW` *is* the check and the kernel performs it as part
     // of the open, so inspecting the path first would add a check-then-use window without
     // adding a check — which is exactly what CodeQL's js/file-system-race flagged here,
@@ -103,17 +125,45 @@ async function openContained(
   }
 
   // Windows. There is no `O_NOFOLLOW` and Node exposes no equivalent
-  // (`FILE_FLAG_OPEN_REPARSE_POINT` is not reachable), so an explicit check is the whole
-  // defence — and an explicit check is inherently racy. Checked on both sides of the
-  // open so a swap *during* it is caught; a swap-and-swap-back is not, and nothing
-  // available here would catch it. Stated rather than papered over: see
-  // security/BACKLOG.md §1.1 and docs/known-limitations.md.
+  // (`FILE_FLAG_OPEN_REPARSE_POINT` is not reachable through fs), so the check cannot be
+  // part of the open and must be made around it.
+  //
+  // The pre-check cannot be dropped even though it is the racy half, because `O_CREAT`
+  // through a *dangling* link creates the out-of-root file before anything could inspect
+  // the result — refusing after the fact would be refusing after the escape.
+  //
+  // The post-check inspects the handle rather than the path, which is the part that does
+  // not race: if the path was swapped for a link between the two calls, `open` followed
+  // it and the handle now refers to the link's target, whose identity differs from what
+  // the path names. Swapping back afterwards does not help — the handle still points at
+  // the target, and mutation confirms this is the half that catches that case.
+  //
+  // The symlink test beside it is not redundant: it is what remains on a filesystem that
+  // reports no inode, where the identity comparison compares nothing. Mutation does not
+  // distinguish it on Linux for that reason.
+  //
+  // None of this makes the sequence atomic. It defeats the ordinary race and leaves the
+  // narrow one. Stated rather than papered over: security/BACKLOG.md §1.1 and
+  // docs/known-limitations.md.
   const before = await lstat(path).catch(() => null);
   if (before?.isSymbolicLink()) return { ok: false, summary: REFUSED_LINK };
 
+  await test?.raceHook?.();
+
   const handle = await open(path, flags);
-  const after = await lstat(path).catch(() => null);
-  if (after?.isSymbolicLink()) {
+  await test?.afterOpenHook?.();
+  const [named, opened] = await Promise.all([
+    lstat(path).catch(() => null),
+    handle.stat().catch(() => null),
+  ]);
+  const swapped =
+    named?.isSymbolicLink() === true ||
+    (named != null &&
+      opened != null &&
+      named.ino !== 0 &&
+      opened.ino !== 0 &&
+      (named.ino !== opened.ino || named.dev !== opened.dev));
+  if (swapped) {
     await handle.close().catch(() => undefined);
     return { ok: false, summary: REFUSED_LINK };
   }

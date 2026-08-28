@@ -284,3 +284,73 @@ describe("a knowledge source cannot index outside the approved roots", () => {
     await runtime.stop();
   });
 });
+
+describe("the platform without O_NOFOLLOW catches a swap it could not prevent", () => {
+  /**
+   * Windows has no `O_NOFOLLOW` and Node exposes no equivalent, so the symlink check
+   * cannot be part of the `open` and has to be made around it. CodeQL's
+   * `js/file-system-race` flags exactly that, and on Windows it is right: the sequence is
+   * not atomic and cannot be made atomic here.
+   *
+   * What *can* be done is inspect the handle rather than the path afterwards. If the path
+   * was swapped for a link between the check and the open, `open` followed it and the
+   * handle refers to the link's target — whose identity differs from what the path names.
+   * That is the part which does not race, and swapping back afterwards does not help.
+   *
+   * This test forces that branch on Linux and performs the swap by hand, because the
+   * branch is unreachable on the platform the suite runs on and the race is unreachable
+   * on the platform where the branch is live. It proves the *mechanism*, not the Windows
+   * behaviour — see security/BACKLOG.md §1.1 for what remains unproven there.
+   */
+  it("refuses when the opened handle is not the file the path named", async () => {
+    const { openContainedForTest } = await import("./filesystem.ts");
+    const { approved, outside } = await sandbox();
+    const target = join(approved, "raced.txt");
+    await writeFile(target, "the real file", "utf8");
+    await writeFile(join(outside, "attacker.txt"), OUTSIDE_SECRET, "utf8");
+
+    // The swap happens between the pre-check and the open, which is exactly the window.
+    const result = await openContainedForTest(target, 0, async () => {
+      await rm(target);
+      await symlink(join(outside, "attacker.txt"), target);
+    });
+    assert.equal(result.ok, false, "a raced swap was not detected");
+    if (!result.ok) assert.match(result.summary, /symbolic link/i);
+  });
+
+  it("refuses even when the attacker puts the real file back afterwards", async () => {
+    // The case a second look at the *path* cannot catch, and the reason the check
+    // inspects the handle: by the time anything re-reads the path it names the honest
+    // file again, while the handle still refers to what the link pointed at.
+    const { openContainedForTest } = await import("./filesystem.ts");
+    const { approved, outside } = await sandbox();
+    const target = join(approved, "raced-back.txt");
+    await writeFile(target, "the real file", "utf8");
+    await writeFile(join(outside, "attacker.txt"), OUTSIDE_SECRET, "utf8");
+
+    const result = await openContainedForTest(
+      target,
+      0,
+      async () => {
+        await rm(target);
+        await symlink(join(outside, "attacker.txt"), target);
+      },
+      async () => {
+        await rm(target);
+        await writeFile(target, "the real file", "utf8");
+      },
+    );
+    assert.equal(result.ok, false, "a swap-and-swap-back went undetected");
+  });
+
+  it("still opens an ordinary file when nothing races it", async () => {
+    // Narrowing, not severing: the identity comparison must not reject honest opens.
+    const { openContainedForTest } = await import("./filesystem.ts");
+    const { approved } = await sandbox();
+    const target = join(approved, "quiet.txt");
+    await writeFile(target, "nothing happened here", "utf8");
+    const result = await openContainedForTest(target, 0);
+    assert.equal(result.ok, true, "an unraced open was refused");
+    if (result.ok) await result.handle.close();
+  });
+});
