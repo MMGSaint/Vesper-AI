@@ -1,9 +1,15 @@
 # Assistant build — checkpoint
 
 Phase 1 (assistant foundation) and Phase 2 (durable runtime + governor +
-rollback + continuity + physical-PC prep) are both on this branch. The next
-session picks up from a runtime that has real durable state and a
-deterministic authorization ladder.
+rollback + continuity + physical-PC prep) are both **merged into `main`** at
+`e090130`. The next session picks up from a runtime that has real durable state
+and a deterministic authorization ladder.
+
+How it was integrated: the branch was a strict descendant of `main`, merged with
+`--no-ff`, so all 34 commits keep their SHAs — no rebase, no squash, no
+cherry-pick, no force-push. The merged tree is identical to the branch tip that
+CI validated green on Linux and Windows (`git diff` between them is empty), and
+the merge commit itself was re-validated before pushing.
 
 Last touched 2026-08-28. Everything below is observed output or a repo fact.
 
@@ -16,8 +22,8 @@ Last touched 2026-08-28. Everything below is observed output or a repo fact.
 | Authoritative repo | **`MMGSaint/vesper-ai`**, working copy `/home/user/vesper-ai` |
 | Not the target | `/home/user/Vesper-personal-assistant-` is a **second working copy of this same repository**, sitting on a detached HEAD several commits behind the tip. It is not an empty scaffold — earlier checkpoints said so and were wrong. **Do all work in `/home/user/vesper-ai`.** A stale second checkout is an active hazard: it made four adversarial verifier agents report real code as "non-existent" (see `security/BACKLOG.md` §4b). |
 | Work branch | `claude/vesper-local-ai-build-ti8ofa` |
-| HEAD | `6e958c1`, pushed, **33 commits ahead of `origin/main`** |
-| `origin/main` | `9b7d924` — the round-2 security campaign is merged there |
+| HEAD | `e090130` — **merged into `main`**; the branch and `main` point at the same commit |
+| `origin/main` | `e090130` — phase 2 landed here, CI and CodeQL green on it |
 
 Verify git state rather than trusting this table if any time has passed.
 
@@ -237,7 +243,11 @@ Publishing a release · exposing any network listener (nothing in this repo
 binds one today; the loopback test server binds `127.0.0.1:0` inside a test
 and closes when it ends) · destructive host operations · modifying Windows
 security settings · deleting user data · granting new real-world privileges ·
-changing the security model · merging this branch to main.
+changing the security model.
+
+The phase-2 merge to `main` was on this list and was carried out under explicit
+user instruction, after the gate in §3 passed on the final commit. No release
+was published and nothing was deployed.
 
 ---
 
