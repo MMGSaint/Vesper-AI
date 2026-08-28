@@ -1,5 +1,6 @@
 export type CliCommand =
   | { kind: "repl"; skipDiscovery: boolean }
+  | { kind: "ask"; text: string; json: boolean; skipDiscovery: boolean }
   | { kind: "help" }
   | { kind: "version" }
   | { kind: "diagnostics"; skipDiscovery: boolean }
@@ -23,12 +24,31 @@ const COMMANDS = new Set([
   "--config-check",
   "--export-memory",
   "--client-hello",
+  "--ask",
 ]);
 
 export function parseCli(argv: string[]): CliCommand {
   const args = argv.filter((item) => item.length > 0);
   const skipDiscovery = args.includes("--skip-discovery");
-  const flags = args.filter((item) => item !== "--skip-discovery");
+  const json = args.includes("--json");
+  const flags = args.filter((item) => item !== "--skip-discovery" && item !== "--json");
+
+  // `--ask` is the only command that takes a value, so it is matched before the
+  // single-flag rule below. One question, one answer, one exit code — the shape a script
+  // or another program can actually use, and the shape an end-to-end test can drive.
+  const askAt = flags.indexOf("--ask");
+  if (askAt !== -1) {
+    const rest = flags.filter((_, index) => index !== askAt);
+    const text = rest.join(" ").trim();
+    if (rest.length === 0 || text.length === 0) {
+      return { kind: "unknown", reason: "--ask needs something to ask: --ask \"what is happening?\"" };
+    }
+    return { kind: "ask", text, json, skipDiscovery };
+  }
+
+  if (json) {
+    return { kind: "unknown", reason: "--json only applies to --ask." };
+  }
   if (flags.length === 0) return { kind: "repl", skipDiscovery };
   if (flags.length > 1) {
     return { kind: "unknown", reason: `Unexpected extra arguments: ${flags.slice(1).join(" ")}` };
@@ -71,6 +91,7 @@ Usage:
 
 Commands:
   (none)            Start the interactive console (or background mode with no TTY)
+  --ask "<text>"    Ask one question, print the answer, exit
   --help, -h        Show this help
   --version, -V     Print version
   --diagnostics     Print a diagnostics report and exit
@@ -83,6 +104,13 @@ Commands:
 
 Flags:
   --skip-discovery  Skip first-boot backend probes
+  --json            With --ask, print the whole turn as JSON (reply, epistemic
+                    tags, tool calls, pending confirmations)
+
+Exit codes for --ask:
+  0  answered
+  3  an action is waiting for your confirmation; nothing was run. Answer it in
+     the console. --ask never approves on your behalf.
 
 In the console, type /help for conversation, memory, workspace, and system
 commands. Ctrl-C stops the reply in progress; press it again to exit.

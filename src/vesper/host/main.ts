@@ -158,6 +158,55 @@ async function main() {
     await shutdown(0, "export-memory");
     return;
   }
+  if (command.kind === "ask") {
+    const turn = await runtime.chat(command.text);
+
+    // A pending confirmation is reported, never answered here.
+    //
+    // `--ask` is one question from a script, and a script cannot be the person the
+    // confirmation is asking. Auto-approving would make a convenience flag into a way to
+    // run confirm-tier tools unattended, which is the "confirmation is not authorization"
+    // rule read backwards. The exit code says a human is needed; the action stays queued
+    // for the console.
+    const waiting = turn.pendingConfirmations;
+
+    if (command.json) {
+      console.log(
+        JSON.stringify(
+          {
+            reply: turn.reply,
+            epistemic: turn.epistemic,
+            workspaceId: turn.workspaceId,
+            toolCalls: turn.toolCalls.map((call) => ({
+              tool: call.toolName,
+              allowed: call.decision.allowed,
+              level: call.decision.level,
+              requiresConfirmation: call.decision.requiresConfirmation,
+              ok: call.result?.ok ?? null,
+              epistemic: call.result?.epistemic ?? null,
+              summary: call.result?.summary ?? null,
+            })),
+            pendingConfirmations: waiting.map((pending) => ({
+              id: pending.id,
+              tool: pending.toolName,
+              reason: pending.reason,
+            })),
+          },
+          null,
+          2,
+        ),
+      );
+    } else {
+      console.log(turn.reply);
+      for (const pending of waiting) {
+        console.error(`Waiting for your confirmation: ${pending.toolName} — ${pending.reason}`);
+      }
+    }
+
+    await shutdown(waiting.length > 0 ? 3 : 0, "ask");
+    return;
+  }
+
   if (command.kind === "client-hello") {
     console.log(
       JSON.stringify(
