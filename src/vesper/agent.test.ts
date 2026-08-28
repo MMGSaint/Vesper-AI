@@ -426,3 +426,80 @@ describe("agent — catch me up", () => {
     assert.ok(!/waiting for your confirmation/.test(turn.reply));
   });
 });
+
+describe("agent — what can you do", () => {
+  it("classifies help / what can you do / list tools as capabilities", () => {
+    assert.equal(classifyIntent("help")?.kind, "capabilities");
+    assert.equal(classifyIntent("help me")?.kind, "capabilities");
+    assert.equal(classifyIntent("what can you do")?.kind, "capabilities");
+    assert.equal(classifyIntent("what can you do?")?.kind, "capabilities");
+    assert.equal(classifyIntent("what are you capable of")?.kind, "capabilities");
+    assert.equal(classifyIntent("list your commands")?.kind, "capabilities");
+    assert.equal(classifyIntent("list your tools")?.kind, "capabilities");
+    assert.equal(classifyIntent("show your capabilities")?.kind, "capabilities");
+    assert.equal(classifyIntent("what tools do you have")?.kind, "capabilities");
+    assert.equal(classifyIntent("which tools are available")?.kind, "capabilities");
+  });
+
+  it("reports the current tool tier counts from the live registry", async () => {
+    // The reply is composed from `tools.list(workspace)` and the router — not from a
+    // hand-written list that could drift out of date. Every tier that the registry
+    // holds should be named, and the sum of tier counts should match the total.
+    const runtime = await testRuntime();
+    const turn = await runtime.chat("what can you do?");
+    const totalMatch = turn.reply.match(/Vesper has (\d+) tool/);
+    assert.ok(totalMatch, "tool count line missing");
+    const total = Number(totalMatch[1]);
+    assert.ok(total > 0);
+    // Sum the tier counts the reply itself names.
+    const tierSum = [...turn.reply.matchAll(/^ {2}[a-z].*?: (\d+) —/gm)].reduce(
+      (acc, m) => acc + Number(m[1]),
+      0,
+    );
+    assert.equal(tierSum, total, `tier counts (${tierSum}) do not sum to the total (${total})`);
+    // Never-autonomous tools are load-bearing to the safety story; must be named.
+    assert.match(turn.reply, /never autonomous.*disk_wipe|disk_wipe.*never autonomous/);
+  });
+
+  it("does not advertise the test backend as a reachable model", async () => {
+    // The `echo` provider exists so tests can drive the agent without a real model.
+    // Announcing it as "a local model backend" would dilute the truthful
+    // "no backend reachable" reply the mission depends on.
+    const runtime = await testRuntime();
+    const turn = await runtime.chat("what can you do");
+    assert.ok(!/echo/i.test(turn.reply), `test backend leaked into capabilities: ${turn.reply}`);
+    assert.match(turn.reply, /No local model backend is reachable|backends reachable:/);
+  });
+
+  it("names the current workspace's toolset, not another workspace's", async () => {
+    // A tool registered only for one workspace must appear when asked from that
+    // workspace, and not from another. This is what `tools.list(workspace.id)` is
+    // for; mutation-removing the workspace filter would show every tool everywhere.
+    // No production tool is currently workspace-scoped, so register one here — the
+    // load-bearingness of the filter has to be provable by test, not by inspection.
+    const runtime = await testRuntime();
+    runtime.tools.register(
+      {
+        name: "gaming_only_tool",
+        description: "Only visible in the gaming workspace",
+        permission: "read",
+        parameters: { type: "object", properties: {}, required: [] },
+        workspaces: ["gaming"],
+      },
+      async () => ({ ok: true, epistemic: "checked", summary: "ok" }),
+    );
+
+    const general = await runtime.chat("what can you do?");
+    const generalCount = Number(general.reply.match(/Vesper has (\d+) tool/)?.[1]);
+
+    await runtime.chat("switch to gaming");
+    const gaming = await runtime.chat("what can you do?");
+    assert.match(gaming.reply, /Gaming workspace/);
+    const gamingCount = Number(gaming.reply.match(/Vesper has (\d+) tool/)?.[1]);
+
+    // Removing the workspace filter would make both counts equal — the workspace-scoped
+    // tool would be visible from General too. The gap of exactly 1 is what the filter
+    // is meant to produce.
+    assert.equal(gamingCount, generalCount + 1, `gaming (${gamingCount}) should have one more tool than general (${generalCount})`);
+  });
+});

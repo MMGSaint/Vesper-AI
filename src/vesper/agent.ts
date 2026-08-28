@@ -85,7 +85,8 @@ interface DirectIntent {
     | "gpu"
     | "thermal"
     | "obs"
-    | "catchup";
+    | "catchup"
+    | "capabilities";
   confidence: number;
   slots: Record<string, string>;
 }
@@ -955,6 +956,8 @@ export class Agent {
       }
       case "catchup":
         return this.catchupReply(userText, toolCalls, at);
+      case "capabilities":
+        return this.capabilitiesReply(userText, toolCalls, at);
       default:
         return this.groundedFallback(userText);
     }
@@ -1062,6 +1065,77 @@ export class Agent {
       : lines.join("\n");
 
     return this.turn(userText, reply, ["checked"], toolCalls, [], at);
+  }
+
+  /**
+   * "What can you do?" — answered from the live registry, never from a hand-written list.
+   *
+   * A static answer would drift the moment a tool is added or removed. Composing the
+   * reply from `deps.tools.list(workspaceId)` means it always reflects what is actually
+   * loaded for the *current* workspace. Tools are grouped by their permission tier so a
+   * user sees the safety picture at a glance: what runs freely versus what needs their
+   * OK versus what will never run autonomously. Providers and workspaces come from the
+   * router and the workspace manager, so both mirror real state too.
+   */
+  private async capabilitiesReply(
+    userText: string,
+    toolCalls: ToolCallRecord[],
+    at: string,
+  ): Promise<AgentTurn> {
+    const workspace = this.deps.workspaces.current();
+    const tools = this.deps.tools.list(workspace.id);
+    const byTier: Record<string, string[]> = { read: [], safe: [], confirm: [], trusted: [], never: [] };
+    for (const spec of tools) {
+      const bucket = byTier[spec.permission];
+      if (bucket) bucket.push(spec.name);
+    }
+
+    const modelStatus = this.deps.models.status();
+    // Advertise only real backends to the user. The `echo` provider exists so tests
+    // can drive the agent without a model; announcing it as "a model backend" would
+    // dilute the truthful "no backend reachable" reply that the mission depends on.
+    const reachable = modelStatus.available
+      .filter((entry) => entry.available && entry.kind !== "test")
+      .map((entry) => entry.id);
+    const workspaces = this.deps.workspaces.list().map((entry) => entry.name);
+    const stats = await this.deps.memory.stats();
+
+    const lines: string[] = [];
+    lines.push(
+      `Vesper has ${tools.length} tool${tools.length === 1 ? "" : "s"} in the ${workspace.name} workspace.`,
+    );
+    if (byTier.read.length > 0) {
+      lines.push(`  read (no approval): ${byTier.read.length} — ${sample(byTier.read)}`);
+    }
+    if (byTier.safe.length > 0) {
+      lines.push(`  safe side effects (no approval): ${byTier.safe.length} — ${sample(byTier.safe)}`);
+    }
+    if (byTier.confirm.length > 0) {
+      lines.push(`  needs your confirmation: ${byTier.confirm.length} — ${sample(byTier.confirm)}`);
+    }
+    if (byTier.trusted.length > 0) {
+      lines.push(`  trusted-only: ${byTier.trusted.length} — ${sample(byTier.trusted)}`);
+    }
+    if (byTier.never.length > 0) {
+      lines.push(`  never autonomous: ${byTier.never.length} — ${sample(byTier.never)}`);
+    }
+
+    if (reachable.length > 0) {
+      lines.push(`Local model backends reachable: ${reachable.join(", ")}.`);
+    } else {
+      lines.push(
+        `No local model backend is reachable. Deterministic intents (status, catch-up, memory, workspace) still work.`,
+      );
+    }
+    lines.push(
+      `Workspaces available: ${workspaces.join(", ")}. Say "switch to <name>" to change.`,
+    );
+    lines.push(
+      `Memory: ${stats.persistent} remembered fact${stats.persistent === 1 ? "" : "s"}. Ask "what do you know about me?" for a summary.`,
+    );
+    lines.push(`Try: "catch me up" · "what is happening" · "remember that ..." · "optimize this".`);
+
+    return this.turn(userText, lines.join("\n"), ["checked"], toolCalls, [], at);
   }
 
   private async groundedFallback(userText: string): Promise<AgentTurn> {
@@ -1232,6 +1306,13 @@ export class Agent {
   }
 }
 
+function sample(items: string[]): string {
+  // A capabilities listing is meant to inform, not exhaustively enumerate.
+  // Three names give the shape of the tier without turning the reply into a manifest.
+  if (items.length <= 3) return items.join(", ");
+  return `${items.slice(0, 3).join(", ")}, …`;
+}
+
 export function classifyIntent(text: string): DirectIntent | null {
   const trimmed = text.trim();
   const lower = trimmed.toLowerCase();
@@ -1306,6 +1387,15 @@ export function classifyIntent(text: string): DirectIntent | null {
     /^(?:what happened)$/i.test(trimmed)
   ) {
     return { kind: "catchup", confidence: 0.94, slots: {} };
+  }
+  if (
+    /^(?:help|help me)[?.!]*$/i.test(trimmed) ||
+    /^(?:what can you do|what are you (?:able to|capable of))[?.!]*$/i.test(trimmed) ||
+    /^(?:list|show)\s+(?:your\s+)?(?:commands|capabilities|tools|abilities|skills)[?.!]*$/i.test(trimmed) ||
+    /^(?:tell me )?what (?:you can do|your capabilities are)[?.!]*$/i.test(trimmed) ||
+    /^(?:what tools|which tools) (?:do you have|are available)[?.!]*$/i.test(trimmed)
+  ) {
+    return { kind: "capabilities", confidence: 0.94, slots: {} };
   }
   if (/what('?s| is) happening|status|how('?s| is) (the )?(pc|system|box)/i.test(lower)) {
     return { kind: "status", confidence: 0.93, slots: {} };
