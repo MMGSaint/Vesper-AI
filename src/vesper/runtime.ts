@@ -751,10 +751,30 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   // Load-on-start rather than lazy-load per current(). current() is called on every
   // tool decision and every reply; a synchronous cache miss surfaced only by an await
   // there would surprise every caller.
-  await workspaces.load();
+  const workspaceLoad = await workspaces.load();
   // The event log is persisted so correlation still works after a restart or crash,
   // which is exactly when 'what happened just before this?' matters most.
   const events = new EventBus(log, 500, storage);
+  // Two branches of workspace load must be visible, not silent, per round-2's
+  // "loss must be loud" rule: a stored id the config no longer knows about (a workspace
+  // was removed and the user is now silently reset to the default), and a store that
+  // could not be read at all. Both are informational for a lifecycle event; only the
+  // unreadable case gets an error-level notification because the user's saved choice
+  // was lost.
+  if (workspaceLoad.kind === "unknown_id") {
+    events.emit({
+      type: "workspace.reset_to_default",
+      title: `Workspace '${workspaceLoad.storedId}' is no longer configured; reset to ${workspaces.current().name}`,
+      severity: "info",
+    });
+  } else if (workspaceLoad.kind === "unreadable") {
+    events.emit({
+      type: "workspace.state_unreadable",
+      title: "Stored workspace choice was unreadable; using the configured default",
+      detail: workspaceLoad.error,
+      severity: "warn",
+    });
+  }
   const notifications = new NotificationHub(
     config.notifications.enabled,
     config.notifications.cooldownMs,

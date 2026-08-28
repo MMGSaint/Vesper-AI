@@ -25,6 +25,20 @@ interface StoredCurrent {
   currentId: string;
 }
 
+/**
+ * What `WorkspaceManager.load()` found. The runtime uses this to make the two
+ * silent-loss branches visible via events and notifications, per the round-2 rule
+ * "loss must be loud".
+ */
+export type LoadOutcome =
+  | { kind: "already_loaded" }
+  | { kind: "no_storage" }
+  | { kind: "empty" }
+  | { kind: "malformed" }
+  | { kind: "restored"; storedId: string }
+  | { kind: "unknown_id"; storedId: string }
+  | { kind: "unreadable"; error: string };
+
 export class WorkspaceManager {
   private currentId: string;
   private readonly workspaces: Map<string, WorkspaceDefinition>;
@@ -47,15 +61,21 @@ export class WorkspaceManager {
    * Read the last stored choice, if any. Idempotent, safe to call from anywhere — but
    * `current()` and `switchTo` also call it lazily so a caller does not have to. Never
    * throws: an unreadable store falls back to the configured default.
+   *
+   * Returns an outcome the caller can react to — the runtime uses it to emit a visible
+   * event on the two branches that would otherwise be silent: a stored id that no
+   * longer exists in the config, and an unreadable store. The rule "loss must be loud"
+   * from the round-2 campaign applies here too.
    */
-  async load(): Promise<void> {
-    if (this.loaded) return;
+  async load(): Promise<LoadOutcome> {
+    if (this.loaded) return { kind: "already_loaded" };
     this.loaded = true;
-    if (!this.storage) return;
+    if (!this.storage) return { kind: "no_storage" };
     try {
       const raw = await this.storage.get(STORAGE_KEY);
-      if (!raw || typeof raw !== "object") return;
+      if (!raw || typeof raw !== "object") return { kind: "empty" };
       const id = (raw as Partial<StoredCurrent>).currentId;
+      if (typeof id !== "string") return { kind: "malformed" };
       // Ignore an id the current config does not know about. A workspace can be removed
       // from the config file at any time; the stored value must not resurrect it.
       //
@@ -65,15 +85,17 @@ export class WorkspaceManager {
       // file catches the difference. Kept because a future edit that removes the
       // fallback in `current()` would otherwise silently start honouring stored ids
       // that no longer exist.
-      if (typeof id === "string" && this.workspaces.has(id)) {
-        this.currentId = id;
-      }
+      if (!this.workspaces.has(id)) return { kind: "unknown_id", storedId: id };
+      this.currentId = id;
+      return { kind: "restored", storedId: id };
     } catch (error) {
       // Best-effort. Fall back to the configured default and stay quiet unless the
       // caller passed a logger.
+      const message = error instanceof Error ? error.message : String(error);
       this.log?.warn?.("lifecycle", "Could not read the stored workspace choice", {
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
       });
+      return { kind: "unreadable", error: message };
     }
   }
 
