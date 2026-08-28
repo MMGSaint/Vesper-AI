@@ -121,6 +121,34 @@ if (files.some((f) => f.rel === ".env" || (f.rel.startsWith(".env.") && f.rel !=
   errors.push("A .env file is tracked");
 }
 
+/**
+ * Stray files written into the repository by a test.
+ *
+ * `defaultConfig()` approves `notes`, `docs` and `knowledge` as filesystem roots, and a
+ * relative root resolves against the working directory — so a test calling `fs_write`
+ * with `notes/x.txt` writes into the repository. One did, and the stray file survived
+ * several rounds of review because nothing was looking for it.
+ *
+ * `notes/` has no legitimate contents here. `docs/` and `knowledge/mortis/` do — the
+ * Mortis boundary note is a deliberately seeded knowledge source — so only material
+ * appearing *elsewhere* under `knowledge/` is flagged.
+ */
+const strays = files
+  .map((f) => f.rel)
+  .filter(
+    (rel) =>
+      rel === "notes" ||
+      rel.startsWith("notes/") ||
+      (rel.startsWith("knowledge/") && !rel.startsWith("knowledge/mortis/")),
+  );
+for (const rel of strays) {
+  errors.push(
+    `${rel} is tracked. The default config approves this directory as a filesystem root, so ` +
+      `this is almost certainly a test writing into the repo with a relative path — use an ` +
+      `absolute path under the OS temp directory instead.`,
+  );
+}
+
 if (errors.length) {
   console.error("Hygiene failed:");
   for (const err of errors) console.error(` - ${err}`);

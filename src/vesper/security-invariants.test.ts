@@ -440,9 +440,13 @@ describe("invariant: untrusted text never changes deterministic policy", () => {
       "read",
       "the override never reached the gate, so this test proves nothing",
     );
+    // An absolute path under the OS temp directory, never a relative one. The default
+    // config approves `notes`, which resolves against the working directory — so a test
+    // using a relative path writes into the repository if the tool ever runs, and one of
+    // them did (a stray `notes/x.txt` was committed).
     const record = await runtime.tools.invoke({
       name: "fs_write",
-      args: { path: "notes/x.txt", content: "x" },
+      args: { path: join(await mkdtemp(join(tmpdir(), "vesper-ovr-")), "x.txt"), content: "x" },
       workspaceId: "general",
     });
     assert.equal(
@@ -1670,7 +1674,9 @@ describe("invariant: a failed turn reports what happened, not what is convenient
         const toolCalls: ModelToolCall[] = [
           { id: "c1", name: "memory_remember", arguments: { key: "pin", value: "0000", category: "fact" } as never },
           { id: "c2", name: "workspace_switch", arguments: { name: "gaming" } as never },
-          { id: "c3", name: "fs_write", arguments: { path: "notes/x.txt", content: "hi" } as never },
+          // Absolute, under the OS temp directory: a relative path resolves against the
+          // working directory and the default config approves `notes`.
+          { id: "c3", name: "fs_write", arguments: { path: join(tmpdir(), "vesper-recovery-probe.txt"), content: "hi" } as never },
         ];
         return { text: "", toolCalls, providerId: "breaks", model, role: request.role };
       },
