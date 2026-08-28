@@ -15,6 +15,7 @@ import {
 } from "./knowledge/embeddings.ts";
 import { WorkspaceManager } from "./workspaces.ts";
 import { EventBus } from "./events.ts";
+import { EventJournal } from "./event-journal.ts";
 import { NotificationHub } from "./notifications.ts";
 import { createSimulatedHardware, type SimulatedHardware } from "./hardware/simulated.ts";
 import {
@@ -97,6 +98,7 @@ export class VesperRuntime {
   readonly knowledge: KnowledgeIndex;
   readonly workspaces: WorkspaceManager;
   readonly events: EventBus;
+  readonly journal: EventJournal;
   readonly notifications: NotificationHub;
   readonly hardware: SimulatedHardware;
   readonly optimizer: OptimizerAdapter;
@@ -130,6 +132,7 @@ export class VesperRuntime {
       knowledge: KnowledgeIndex;
       workspaces: WorkspaceManager;
       events: EventBus;
+      journal: EventJournal;
       notifications: NotificationHub;
       hardware: SimulatedHardware;
       optimizer: OptimizerAdapter;
@@ -157,6 +160,7 @@ export class VesperRuntime {
     this.knowledge = parts.knowledge;
     this.workspaces = parts.workspaces;
     this.events = parts.events;
+    this.journal = parts.journal;
     this.notifications = parts.notifications;
     this.hardware = parts.hardware;
     this.optimizer = parts.optimizer;
@@ -181,6 +185,9 @@ export class VesperRuntime {
     if (this.started) return this.capability;
     this.log.info("lifecycle", "Vesper starting", { instanceId: this.instanceId });
     const restoredEvents = await this.events.hydrate();
+    // A journal never grows unbounded: prune day-partitions older than the retention
+    // window before doing anything else that would consume storage bandwidth.
+    await this.journal.purgeOldPartitions();
     if (restoredEvents) {
       this.log.info("lifecycle", "Restored the event log", { events: restoredEvents });
     }
@@ -810,6 +817,36 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   // The event log is persisted so correlation still works after a restart or crash,
   // which is exactly when 'what happened just before this?' matters most.
   const events = new EventBus(log, 500, storage);
+  const journal = new EventJournal({
+    storage,
+    log,
+    retentionDays: config.agent.journalRetentionDays,
+    maxPerDay: config.agent.journalMaxPerDay,
+    onWriteFailure: (error) => {
+      // Losing history is not availability loss, but the mission's "loss must be loud"
+      // rule still applies. Emit once per session; the flag inside EventJournal already
+      // debounces the callback, so we do not need to debounce here.
+      events.emit({
+        type: "security.journal_write_failed",
+        title: "Vesper could not write to its durable event journal",
+        detail: error instanceof Error ? error.message : String(error),
+        severity: "warn",
+        retention: "durable",
+        provenance: { author: "subsystem", source: "event-journal" },
+      });
+    },
+    onCorruptPartition: (key, error) => {
+      events.emit({
+        type: "security.journal_partition_corrupt",
+        title: `Corrupt event-journal partition: ${key}`,
+        detail: error instanceof Error ? error.message : String(error),
+        severity: "warn",
+        retention: "durable",
+        provenance: { author: "subsystem", source: "event-journal" },
+      });
+    },
+  });
+  events.setJournal(journal);
   // Task lifecycle callback (installed above) now has a real bus to publish through.
   eventBusRef = events;
   // Two branches of workspace load must be visible, not silent, per round-2's
@@ -984,6 +1021,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     knowledge,
     workspaces,
     events,
+    journal,
     notifications,
     hardware,
     optimizer,

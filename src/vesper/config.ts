@@ -263,8 +263,18 @@ export const vesperConfigSchema = z.object({
       maxToolIterations: z.number().default(8),
       idleEventDriven: z.boolean().default(true),
       idleIntervalMs: z.number().default(30_000),
+      /** How many day-partitions the durable event journal keeps. */
+      journalRetentionDays: z.number().int().min(1).max(365).default(14),
+      /** Cap on events per day-partition — a floody subsystem cannot grow unbounded. */
+      journalMaxPerDay: z.number().int().min(50).max(50_000).default(1000),
     })
-    .default({ maxToolIterations: 8, idleEventDriven: true, idleIntervalMs: 30_000 }),
+    .default({
+      maxToolIterations: 8,
+      idleEventDriven: true,
+      idleIntervalMs: 30_000,
+      journalRetentionDays: 14,
+      journalMaxPerDay: 1000,
+    }),
 });
 
 export type VesperConfig = z.infer<typeof vesperConfigSchema>;
