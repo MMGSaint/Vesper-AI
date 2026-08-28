@@ -35,6 +35,7 @@
  *     can consume it
  */
 
+import { randomUUID } from "node:crypto";
 import type { EventBus } from "./events.ts";
 import type { Logger } from "./logging.ts";
 import type {
@@ -395,11 +396,35 @@ export class AutonomyGovernor {
   private readonly clock: () => number;
   private budgets = new BudgetState();
 
+  /**
+   * A per-session secret stamped into every decision the governor emits.
+   *
+   * The event bus is shared, so any in-process code holding a reference can emit an
+   * event that *looks* like an autonomy decision — provenance fields are data the
+   * caller writes, not a binding to the object that wrote them. A forged
+   * `autonomy.decision` would make the audit trail lie about what Vesper authorised.
+   * The nonce is not a cryptographic signature and does not survive a restart; it is
+   * exactly what it claims to be — a within-session check that a record came from
+   * this governor instance. `isAuthentic()` is how a reader asks.
+   */
+  private readonly sessionNonce = randomUUID();
+
   constructor(options: AutonomyGovernorOptions) {
     this.policy = options.policy;
     this.events = options.events;
     this.log = options.log;
     this.clock = options.now ?? (() => Date.now());
+  }
+
+  /**
+   * True when this event carries this governor's session nonce — i.e. this instance
+   * emitted it. An audit reader uses this to tell a genuine decision record from one
+   * another subsystem placed on the bus. Returns false for events from a previous
+   * process, which is correct: this instance cannot vouch for those.
+   */
+  isAuthentic(event: { data?: JsonObject | undefined }): boolean {
+    const stamped = event.data?.["governorNonce"];
+    return typeof stamped === "string" && stamped === this.sessionNonce;
   }
 
   /**
@@ -492,6 +517,7 @@ export class AutonomyGovernor {
       correlationId: input.correlationId,
       retention: "durable",
       provenance: { author: "subsystem", source: "autonomy-governor" },
+      data: { governorNonce: this.sessionNonce } as unknown as JsonObject,
     });
     this.log.info("autonomy", "autonomy no-op", { action, reason });
   }
@@ -533,6 +559,7 @@ export class AutonomyGovernor {
         governorConfirm: result.decision.requiresConfirmation,
         originKind,
         tightened: result.tightened,
+        governorNonce: this.sessionNonce,
       } as unknown as JsonObject,
     });
   }

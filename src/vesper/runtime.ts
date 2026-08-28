@@ -1007,11 +1007,16 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
       // post-image as a match would let a rollback overwrite whatever the user did
       // since. (Attack finding: drift detection was a no-op on every un-verified
       // checkpoint.)
-      const after = record.after as { value?: string } | undefined;
+      const after = record.after as { value?: string; id?: string } | undefined;
       if (!after || typeof after.value !== "string") return false;
       const results = await memory.search(record.target, { workspaceId: record.workspaceId, scope: "all" });
       const current = results.find((entry) => entry.key === record.target);
-      return !!current && current.value === after.value;
+      if (!current) return false;
+      // Anchor on entry IDENTITY where we have it, not just value equality. A user who
+      // forgot this memory and re-created it with the same text has a different entry;
+      // rolling back would destroy their new one while the value check happily passed.
+      if (typeof after.id === "string") return current.id === after.id;
+      return current.value === after.value;
     },
     async restore(record) {
       if (record.absentBefore) {

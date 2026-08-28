@@ -291,11 +291,16 @@ export class TaskScheduler {
     };
     try {
       const result = await executor(task, ctx);
-      // Even before writing the result: a task that was cancelled while the executor
-      // ran is no longer this scheduler's business. Do not overwrite a `cancelled`
-      // state with `done` — that would silently un-cancel it.
+      // Before writing the result: the task must still be ours AND still running.
+      // A task cancelled while the executor ran is no longer this scheduler's
+      // business, and one re-assigned elsewhere belongs to another device now.
+      // Writing `done` in either case would silently un-cancel or steal a result.
+      // (The queue's own complete()/fail() guards refuse a terminal task too — this
+      // is the earlier, more specific check that also covers reassignment.)
       const fresh = await this.opts.taskQueue.get(task.id);
       if (!fresh || TERMINAL_STATES.has(fresh.state)) return;
+      if (fresh.state !== "running") return;
+      if (fresh.assignedTo !== this.opts.deviceId) return;
       const payload = result.data
         ? JSON.stringify({ summary: result.summary, data: result.data })
         : result.summary;
@@ -307,6 +312,8 @@ export class TaskScheduler {
     } catch (error) {
       const fresh = await this.opts.taskQueue.get(task.id);
       if (!fresh || TERMINAL_STATES.has(fresh.state)) return;
+      if (fresh.state !== "running") return;
+      if (fresh.assignedTo !== this.opts.deviceId) return;
       const message = error instanceof Error ? error.message : String(error);
       // Executor throws are also emitted so a debugger sees the raw message even if
       // the retry policy re-queues.

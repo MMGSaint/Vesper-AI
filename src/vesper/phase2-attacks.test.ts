@@ -809,3 +809,119 @@ describe("capsule attack: a partly-failed merge is not reported as complete", ()
     assert.ok(result.refusedFor?.some((r) => r.includes("language")));
   });
 });
+
+// ---------------------------------------------------------------------------
+// Second-pass fixes: findings #4, #5, #7, #13, #27
+// ---------------------------------------------------------------------------
+
+describe("governor attack #13: a forged autonomy.decision is distinguishable", () => {
+  it("isAuthentic() rejects an event another emitter placed on the bus", () => {
+    const events = new EventBus(silentLog());
+    const gov = new AutonomyGovernor({ policy: { default: "FULL" }, events, log: silentLog() });
+    gov.evaluate({
+      tool: tool("fs_read", "read"),
+      args: {},
+      origin: localOrigin,
+      workspaceId: "general",
+      gateDecision: decision({ level: "read" }),
+    });
+    const genuine = events.recent({ type: "autonomy.decision", limit: 1 })[0];
+    assert.ok(gov.isAuthentic(genuine), "the governor's own record must verify");
+
+    // A forger emits a look-alike, copying every visible field including provenance.
+    events.emit({
+      type: "autonomy.decision",
+      title: "fs_write → allowed [FULL]",
+      severity: "info",
+      retention: "durable",
+      provenance: { author: "subsystem", source: "autonomy-governor" },
+      data: { tool: "fs_write", governorAllowed: true, governorLevel: "FULL" } as never,
+    });
+    const forged = events.recent({ type: "autonomy.decision", limit: 1 })[0];
+    assert.equal(gov.isAuthentic(forged), false, "a forged record must not verify");
+  });
+});
+
+describe("scheduler attack #4/#5: a result is only written for a task still ours and still running", () => {
+  it("does not un-cancel a task cancelled while the executor was running", async () => {
+    const storage = new MemoryStorage();
+    const queue = new TaskQueue({ storage });
+    const registry = new TaskExecutorRegistry();
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => { release = r; });
+    registry.register("noop", async () => {
+      await held;
+      return { ok: true, summary: "finished anyway" };
+    });
+    const scheduler = new TaskScheduler({
+      taskQueue: queue,
+      registry,
+      events: new EventBus(silentLog()),
+      log: silentLog(),
+      deviceId: "self",
+      devices: async () => [device({ id: "self", capabilities: ["task_execute"] })],
+      enabled: true,
+    });
+    const t = await queue.create({
+      description: "long", createdBy: "u",
+      requiredCapabilities: ["task_execute"], kind: "noop",
+    });
+    await scheduler.tick();
+    await new Promise((r) => setTimeout(r, 20));
+    // Cancel mid-flight, then let the executor finish.
+    await queue.cancel(t.id);
+    release();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal((await queue.get(t.id))?.state, "cancelled", "a completed executor must not un-cancel");
+  });
+});
+
+describe("scheduler attack #7: the retry budget is bounded from both ends", () => {
+  it("start() refuses once attempts have reached maxAttempts, even without a fail()", async () => {
+    // A hard crash between start() and fail() bumps attempts without reaching the cap
+    // check in fail(), so a crash loop would restart forever.
+    // The realistic crash loop: start() bumps attempts, the process dies before
+    // fail() runs, and the next process's load() requeues the mid-flight task.
+    // Repeat. Without a cap in start(), that loop never terminates.
+    const storage = new MemoryStorage();
+    const t = await new TaskQueue({ storage }).create({
+      description: "crashy", createdBy: "u", kind: "noop", maxAttempts: 2,
+    });
+    // Each "process" is a fresh queue over the same storage — load() requeues the
+    // task it finds in `running`, exactly as a crash-restart would.
+    assert.ok(await new TaskQueue({ storage }).start(t.id), "attempt 1");
+    assert.ok(await new TaskQueue({ storage }).start(t.id), "attempt 2");
+    const third = await new TaskQueue({ storage }).start(t.id);
+    assert.equal(third, undefined, "the third start must be refused — the budget is spent");
+    assert.equal(
+      (await new TaskQueue({ storage }).get(t.id))?.state,
+      "failed",
+      "the task lands in failed, not an endless crash loop",
+    );
+  });
+});
+
+describe("checkpoint attack #27: rollback does not destroy a re-created memory", () => {
+  it("drift detection anchors on entry identity, not value equality", async () => {
+    const store = new CheckpointStore({ storage: new MemoryStorage(), log: silentLog() });
+    let forgotten = 0;
+    store.registerReverser("memory_remember", {
+      async verify(record) {
+        const after = record.after as { id?: string } | undefined;
+        if (!after?.id) return false;
+        // Stand in for the runtime reverser: the CURRENT entry has a different id,
+        // because the user forgot and re-created it with the same text.
+        const currentId = "mem_recreated";
+        return currentId === after.id;
+      },
+      async restore() { forgotten += 1; },
+    });
+    const rec = await store.snapshot({
+      tool: "memory_remember", target: "coffee", before: null, absentBefore: true,
+    });
+    await store.verify(rec.id, { id: "mem_original", value: "espresso" });
+    const result = await store.rollback(rec.id);
+    assert.equal(result.applied, false, "a re-created entry must not be destroyed by rollback");
+    assert.equal(forgotten, 0);
+  });
+});

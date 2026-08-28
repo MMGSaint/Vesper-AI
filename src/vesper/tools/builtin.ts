@@ -316,6 +316,10 @@ export function registerBuiltinTools(input: {
       if (checkpoint && checkpointStore) {
         // Record the post-image so a later rollback can detect drift.
         await checkpointStore.verify(checkpoint.id, {
+          // `id` lets the reverser anchor drift detection on entry identity rather
+          // than value equality — a user who re-created the same text after forgetting
+          // it has a different entry, and a rollback must not destroy it.
+          id: entry.id,
           key: entry.key,
           category: entry.category,
           value: entry.value,

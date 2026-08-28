@@ -307,12 +307,22 @@ export class TaskQueue {
     try {
       const raw = await this.storage.get(KEY);
       if (!Array.isArray(raw)) return;
+      let recovered = 0;
       for (const item of raw) {
         // requeueInFlight=true: this is process start, so a task caught mid-flight by
         // a crash is requeued rather than assumed finished.
         const parsed = this.parseStoredTask(item, true);
-        if (parsed) this.tasks.set(parsed.id, parsed);
+        if (!parsed) continue;
+        const storedState = (item as Partial<VesperTask>).state;
+        if (storedState !== parsed.state) recovered += 1;
+        this.tasks.set(parsed.id, parsed);
       }
+      // PERSIST the crash recovery. Holding the requeue only in memory made it
+      // invisible to `refreshFromStorage`, which re-reads the raw `running` row and
+      // overwrites the recovered `queued` — so the very next mutation undid the
+      // recovery and every subsequent start() was refused as "already running".
+      // A recovery that is not written down is not a recovery.
+      if (recovered > 0) await this.persist();
     } catch {
       // A corrupt queue costs pending work, not the ability to accept new work.
       this.tasks = new Map();
@@ -458,6 +468,16 @@ export class TaskQueue {
     const updated = await this.mutate(id, (task) => {
       if (task.state !== "assigned" && task.state !== "queued") {
         refusedFrom = task.state;
+        return;
+      }
+      // The retry budget is spent. A crash between start() and fail() bumps attempts
+      // without ever reaching the cap check in fail(), so a crash loop would restart
+      // the task forever. Enforcing the cap here too bounds it from both ends.
+      if (task.retry.attempts >= task.retry.maxAttempts) {
+        refusedFrom = task.state;
+        task.state = "failed";
+        task.assignedTo = null;
+        task.error = task.error ?? `Retry budget exhausted after ${task.retry.attempts} attempt(s).`;
         return;
       }
       task.state = "running";
