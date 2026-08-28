@@ -32,15 +32,24 @@ function evt(type: string, at: string, extra: Partial<VesperEvent> = {}): Vesper
 }
 
 describe("classifyRetention", () => {
-  it("respects an explicit retention field", () => {
+  it("respects an explicit retention field for un-listed types, but the mission's two hard rules are absolute", () => {
     assert.equal(
       classifyRetention({ type: "anything.at_all", retention: "transient" }),
       "transient",
     );
+    // security.* is ALWAYS durable — a caller cannot promote a security notice to
+    // transient and quietly lose it. (Attack workflow found this was a real bypass.)
+    assert.equal(
+      classifyRetention({ type: "security.state_unreadable", retention: "transient" }),
+      "durable",
+      "security.* is always durable, no matter what the caller passes",
+    );
+    // A named transient type is ALWAYS transient — a floody subsystem cannot escalate
+    // its noise by passing retention: 'durable'.
     assert.equal(
       classifyRetention({ type: "lifecycle.idle_tick", retention: "durable" }),
-      "durable",
-      "an explicit retention beats the transient denylist",
+      "transient",
+      "denylisted types stay transient regardless of the caller's hint",
     );
   });
 
@@ -179,7 +188,8 @@ describe("EventJournal — durable events survive past the ring", () => {
 
   it("filters by type, correlationId, and time window", async () => {
     const { log } = makeLog();
-    const journal = new EventJournal({ storage: new MemoryStorage(), log, now: () => new Date("2026-08-28T00:00:00Z") });
+    // Clock is AFTER the events so normalise() does not clamp their timestamps.
+    const journal = new EventJournal({ storage: new MemoryStorage(), log, now: () => new Date("2026-08-29T00:00:00Z") });
     journal.admit(evt("task.completed", "2026-08-27T12:00:00Z", { correlationId: "turn-A" }));
     journal.admit(evt("task.completed", "2026-08-28T09:00:00Z", { correlationId: "turn-B" }));
     journal.admit(evt("security.state_unreadable", "2026-08-28T10:00:00Z", { correlationId: "turn-B" }));
@@ -208,9 +218,10 @@ describe("EventJournal — durable events survive past the ring", () => {
     assert.equal(found[0].id, "keep");
   });
 
-  it("fires onWriteFailure exactly once per session, not per failed event", async () => {
-    // A storage subsystem that stays broken for the whole session must not spam the
-    // bus with N notifications. Debounce is per-JournalInstance.
+  it("fires onWriteFailure on EVERY failed write (loss must be loud even when sustained)", async () => {
+    // Attack workflow finding: a storage subsystem that stays broken for the whole
+    // session must not go quiet after the first alert. Every failure fires the
+    // callback so the bus can announce sustained loss.
     const { log } = makeLog();
     let failureCount = 0;
     const storage = {
@@ -221,14 +232,14 @@ describe("EventJournal — durable events survive past the ring", () => {
     };
     const journal = new EventJournal({
       storage, log,
-      now: () => new Date("2026-08-28T00:00:00Z"),
+      now: () => new Date("2026-08-29T00:00:00Z"),
       onWriteFailure: () => { failureCount += 1; },
     });
     for (let i = 0; i < 5; i++) {
       journal.admit(evt("task.completed", "2026-08-28T00:00:00Z", { id: `e${i}` }));
       await journal.flush();
     }
-    assert.equal(failureCount, 1, `onWriteFailure debounced, got ${failureCount}`);
+    assert.ok(failureCount >= 5, `onWriteFailure fires per attempt, got ${failureCount}`);
   });
 
   it("fires onCorruptPartition only once per corrupt partition", async () => {
