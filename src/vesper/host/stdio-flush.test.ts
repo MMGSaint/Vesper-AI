@@ -154,3 +154,73 @@ describe("the one-shot exit path flushes before it exits", () => {
     );
   });
 });
+
+describe("the entry guard recognises this module on every platform", () => {
+  /**
+   * The bug that kept windows-latest red on every commit of this branch.
+   *
+   * The guard was `process.argv[1].endsWith("host/main.ts")`. On Windows argv[1] is
+   * `D:\a\...\src\vesper\host\main.ts` — backslashes — so the suffix never matched,
+   * `main()` never ran, and the process exited 0 having printed nothing. All seven
+   * child-process tests saw `exit=0 stdout="" stderr=""`. Not a test artifact:
+   * `vesper --ask "..."` on Windows did nothing and reported success.
+   *
+   * These tests run the SAME decision the guard makes, against both separator styles,
+   * so the Windows shape is checked from Linux.
+   */
+
+  /** The guard's rule, extracted so the test exercises the decision rather than prose. */
+  function isEntry(argv1: string, thisFile: string, platform: string): boolean {
+    // Mirrors main.ts: resolved-path comparison, case-insensitive on win32, plus the
+    // packaged-launcher basename escape hatch.
+    const invoked = argv1;
+    const same =
+      invoked === thisFile ||
+      (platform === "win32" && invoked.toLowerCase() === thisFile.toLowerCase());
+    const base = invoked.split(/[\\/]/).pop() ?? "";
+    return same || base === "vesper-host.mjs";
+  }
+
+  it("matches a Windows-shaped argv against a Windows-shaped module path", () => {
+    const win = "D:\\a\\Vesper-AI\\Vesper-AI\\src\\vesper\\host\\main.ts";
+    assert.equal(isEntry(win, win, "win32"), true, "the Windows path must be recognised");
+  });
+
+  it("matches regardless of drive-letter casing, as NTFS does", () => {
+    const a = "D:\\a\\Vesper-AI\\src\\vesper\\host\\main.ts";
+    const b = "d:\\A\\Vesper-AI\\src\\vesper\\host\\Main.ts";
+    assert.equal(isEntry(b, a, "win32"), true, "case differences must not hide the entry point");
+    assert.equal(isEntry(b, a, "linux"), false, "POSIX is case-sensitive and must stay so");
+  });
+
+  it("still matches a POSIX path", () => {
+    const posix = "/home/user/vesper-ai/src/vesper/host/main.ts";
+    assert.equal(isEntry(posix, posix, "linux"), true);
+  });
+
+  it("still honours the packaged launcher on both separators", () => {
+    const other = "/opt/vesper/lib/main.ts";
+    assert.equal(isEntry("/usr/local/bin/vesper-host.mjs", other, "linux"), true);
+    assert.equal(isEntry("C:\\Program Files\\Vesper\\vesper-host.mjs", other, "win32"), true);
+  });
+
+  it("does not fire for an unrelated entry point", () => {
+    const me = "/home/user/vesper-ai/src/vesper/host/main.ts";
+    assert.equal(isEntry("/home/user/vesper-ai/scripts/package.mjs", me, "linux"), false);
+    assert.equal(isEntry("C:\\other\\tool.mjs", me, "win32"), false);
+  });
+
+  it("the shipped guard compares resolved paths, not a POSIX-shaped suffix", async () => {
+    // The specific regression: a `.endsWith("host/main.ts")` check is unreachable on
+    // Windows. Assert the source no longer relies on one.
+    const source = await readFile(MAIN, "utf8");
+    const guard = source.slice(source.indexOf("const entryArg"));
+    assert.ok(guard.length > 0, "the entry guard must be present");
+    assert.ok(
+      !/endsWith\(["'`][^"'`]*\//.test(guard),
+      "the guard must not test a slash-bearing suffix — that form cannot match on Windows",
+    );
+    assert.match(guard, /fileURLToPath\(import\.meta\.url\)/, "must resolve this module's own path");
+    assert.match(guard, /resolve\(entryArg\)/, "must resolve the invoked path before comparing");
+  });
+});

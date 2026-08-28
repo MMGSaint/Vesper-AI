@@ -75,8 +75,27 @@ Severity across round 2: **5 HIGH, 28 MEDIUM, 18 LOW, 6 INFORMATIONAL**, no CRIT
 The campaign's one CRITICAL — arbitrary file write through a dangling symlink — is from
 round 1 and was fixed in `9e9ffb0`.
 
-**`confused-deputy` was started in round 1 and never reported.** Its probe scripts exist
-under `security/red-team/probes/`; the class is not counted above and is not covered.
+**`confused-deputy` — the record was wrong, and the correction matters.**
+
+This document previously said the class "was started in round 1 and never reported",
+that it "is not counted above and is not covered". `agent-findings.json` contains a
+`confused-deputy` entry with four findings, including a **reproduced CRITICAL**
+(origin laundering through the client gateway's decline branch). The class was
+reported; this file said otherwise.
+
+Anyone reading only this file would have concluded there was nothing to check. The
+findings were re-verified against HEAD during the phase-2 closure pass:
+
+| Finding | Severity | State at closure |
+|---|---|---|
+| Origin laundering via `confirm(approve=false)` | CRITICAL | **Fixed twice.** An ownership check (a device may only decline what it requested) had blocked the reported payload; the closure pass found the *mechanism* still live — the decline still started an un-originated, tool-capable turn — and removed it by routing the decline through the agent's own confirm branch. Three mutation-checked regression tests. |
+| Remote device can destroy any pending confirmation | MEDIUM | Fixed by the same ownership check; covered by the alternate-path test. |
+| `task_create` records the HOST device as `createdBy` | LOW | Open. Recorded in `BACKLOG.md`. |
+| Remote conversation text enters shared history unmarked | INFORMATIONAL | Open. Recorded in `BACKLOG.md`. |
+
+The lesson is the same one the phase-2 verifier failure taught from the other
+direction: **a security document that says "not covered" is a claim, and claims decay.**
+Check the artefact, not the summary of it.
 
 **Never attacked.** Recorded in `BACKLOG.md` §3 with reasons. The largest gaps are the
 updater and package integrity, model and plugin supply chain, USB continuity on a foreign
