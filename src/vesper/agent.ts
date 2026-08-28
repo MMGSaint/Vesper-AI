@@ -1006,6 +1006,7 @@ export class Agent {
     const lifecycle = events.filter(
       (event) => event.type.startsWith("lifecycle.") && event.type !== "lifecycle.idle_tick",
     );
+    const tasks = events.filter((event) => event.type.startsWith("task."));
 
     const lines: string[] = [];
 
@@ -1040,6 +1041,20 @@ export class Agent {
       lines.push(
         `Optimizer state changes (${optimizer.length}): ${optimizer.slice(-2).map((event) => event.title).join(" · ")}`,
       );
+    }
+    if (tasks.length > 0) {
+      const created = tasks.filter((event) => event.type === "task.created").length;
+      const completed = tasks.filter((event) => event.type === "task.completed").length;
+      const failedFinal = tasks.filter(
+        (event) => event.type === "task.failed" && /failed after/.test(event.title),
+      ).length;
+      const cancelled = tasks.filter((event) => event.type === "task.cancelled").length;
+      const parts: string[] = [];
+      if (created) parts.push(`${created} queued`);
+      if (completed) parts.push(`${completed} completed`);
+      if (failedFinal) parts.push(`${failedFinal} failed`);
+      if (cancelled) parts.push(`${cancelled} cancelled`);
+      if (parts.length) lines.push(`Tasks: ${parts.join(", ")}.`);
     }
     if (system.length > 0) {
       lines.push(`System/OBS state changes (${system.length}).`);

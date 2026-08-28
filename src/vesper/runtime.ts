@@ -711,6 +711,43 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     self: deviceIdentity.publicIdentity(),
   });
   const taskQueue = new TaskQueue({ storage });
+  // Task lifecycle → event bus. Wired after the bus is constructed further down;
+  // the callback captures `events` by reference so the bus need not exist yet.
+  let eventBusRef: { emit: (e: Omit<import("./types.ts").VesperEvent, "id" | "at"> & { at?: string }) => unknown } | null = null;
+  taskQueue.setOnLifecycle((event) => {
+    if (!eventBusRef) return;
+    const shortId = event.task.id.slice(-8);
+    const title = (() => {
+      switch (event.kind) {
+        case "created":
+          return `Task queued: ${event.task.description}`;
+        case "assigned":
+          return `Task assigned to ${event.deviceId}: ${event.task.description}`;
+        case "blocked":
+          return `Task blocked (${event.reason}): ${event.task.description}`;
+        case "requeued":
+          return `Task requeued (${event.reason}): ${event.task.description}`;
+        case "started":
+          return `Task started (attempt ${event.task.retry.attempts}/${event.task.retry.maxAttempts}): ${event.task.description}`;
+        case "completed":
+          return `Task done: ${event.task.description}`;
+        case "failed":
+          return event.final
+            ? `Task failed after ${event.task.retry.attempts} attempt(s): ${event.task.description}`
+            : `Task failed, will retry: ${event.task.description}`;
+        case "cancelled":
+          return `Task cancelled: ${event.task.description}`;
+      }
+    })();
+    const severity: import("./types.ts").VesperEvent["severity"] =
+      event.kind === "failed" && event.final ? "warn" : "info";
+    eventBusRef.emit({
+      type: `task.${event.kind}`,
+      title,
+      severity,
+      data: { taskId: event.task.id, shortId } as import("./types.ts").JsonObject,
+    });
+  });
 
   const memory = new MemoryStore(storage);
   // The knowledge index is constructed before the model router, so the embedding
@@ -773,6 +810,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   // The event log is persisted so correlation still works after a restart or crash,
   // which is exactly when 'what happened just before this?' matters most.
   const events = new EventBus(log, 500, storage);
+  // Task lifecycle callback (installed above) now has a real bus to publish through.
+  eventBusRef = events;
   // Two branches of workspace load must be visible, not silent, per round-2's
   // "loss must be loud" rule: a stored id the config no longer knows about (a workspace
   // was removed and the user is now silently reset to the default), and a store that

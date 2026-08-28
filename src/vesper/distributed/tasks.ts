@@ -161,6 +161,21 @@ export function routeTask(input: {
   };
 }
 
+/**
+ * Emitted by TaskQueue on every state transition so the runtime can surface tasks in
+ * events, catchup, and notifications. The queue does not depend on any event bus: it
+ * calls a small callback and lets the runtime translate.
+ */
+export type TaskLifecycleEvent =
+  | { kind: "created"; task: VesperTask }
+  | { kind: "assigned"; task: VesperTask; deviceId: string }
+  | { kind: "blocked"; task: VesperTask; reason: string }
+  | { kind: "requeued"; task: VesperTask; reason: string }
+  | { kind: "started"; task: VesperTask }
+  | { kind: "completed"; task: VesperTask }
+  | { kind: "failed"; task: VesperTask; error: string; final: boolean }
+  | { kind: "cancelled"; task: VesperTask };
+
 export class TaskQueue {
   private readonly storage: StorageAdapter;
   private readonly now: () => string;
@@ -168,9 +183,32 @@ export class TaskQueue {
   private loaded = false;
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor(options: { storage: StorageAdapter; now?: () => string }) {
+  private onLifecycle: ((event: TaskLifecycleEvent) => void) | undefined;
+
+  constructor(options: { storage: StorageAdapter; now?: () => string; onLifecycle?: (event: TaskLifecycleEvent) => void }) {
     this.storage = options.storage;
     this.now = options.now ?? (() => new Date().toISOString());
+    this.onLifecycle = options.onLifecycle;
+  }
+
+  /**
+   * Install a lifecycle callback after construction. The runtime uses this because the
+   * event bus is created *after* the task queue at startup; the queue calls this once
+   * the bus exists, and every subsequent transition reaches the bus.
+   */
+  setOnLifecycle(fn: ((event: TaskLifecycleEvent) => void) | undefined): void {
+    this.onLifecycle = fn;
+  }
+
+  private emit(event: TaskLifecycleEvent): void {
+    // The callback is user code. A throw from it must not corrupt the queue's own state
+    // — the transition has already been persisted before we call.
+    try {
+      this.onLifecycle?.(event);
+    } catch {
+      // Silently swallow. The runtime's own subscriber logs; test callbacks are
+      // trusted enough not to matter here.
+    }
   }
 
   private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
@@ -263,7 +301,9 @@ export class TaskQueue {
       };
       this.tasks.set(task.id, task);
       await this.persist();
-      return { ...task };
+      const snapshot = { ...task };
+      this.emit({ kind: "created", task: snapshot });
+      return snapshot;
     });
   }
 
@@ -306,39 +346,59 @@ export class TaskQueue {
           item.state = outcome.kind === "blocked" ? "blocked" : "queued";
         }
       });
-      if (updated) results.push({ task: updated, outcome });
+      if (updated) {
+        results.push({ task: updated, outcome });
+        if (outcome.kind === "assigned") {
+          this.emit({ kind: "assigned", task: updated, deviceId: outcome.deviceId });
+        } else if (outcome.kind === "blocked") {
+          this.emit({ kind: "blocked", task: updated, reason: outcome.reason });
+        } else if (outcome.kind === "queued") {
+          this.emit({ kind: "requeued", task: updated, reason: outcome.reason });
+        }
+      }
     }
     return results;
   }
 
   async start(id: string): Promise<VesperTask | undefined> {
-    return this.mutate(id, (task) => {
+    const updated = await this.mutate(id, (task) => {
       task.state = "running";
       task.retry.attempts += 1;
     });
+    if (updated) this.emit({ kind: "started", task: updated });
+    return updated;
   }
 
   async complete(id: string, result: string): Promise<VesperTask | undefined> {
-    return this.mutate(id, (task) => {
+    const updated = await this.mutate(id, (task) => {
       task.state = "done";
       task.result = result;
       task.error = null;
     });
+    if (updated) this.emit({ kind: "completed", task: updated });
+    return updated;
   }
 
   /** A failure retries until the policy is exhausted, then stops and says why. */
   async fail(id: string, error: string): Promise<VesperTask | undefined> {
-    return this.mutate(id, (task) => {
+    const updated = await this.mutate(id, (task) => {
       task.error = error;
       task.assignedTo = null;
       task.state = task.retry.attempts >= task.retry.maxAttempts ? "failed" : "queued";
     });
+    if (updated) {
+      const final = updated.state === "failed";
+      this.emit({ kind: "failed", task: updated, error, final });
+    }
+    return updated;
   }
 
   async cancel(id: string): Promise<VesperTask | undefined> {
-    return this.mutate(id, (task) => {
+    const updated = await this.mutate(id, (task) => {
       task.state = "cancelled";
       task.assignedTo = null;
     });
+    if (updated) this.emit({ kind: "cancelled", task: updated });
+    return updated;
   }
 }
