@@ -146,3 +146,45 @@ describe("--ask makes a workspace switch survive the next --ask", () => {
     );
   });
 });
+
+describe("--first-boot-report surfaces what the discovery pass found", () => {
+  // A helper that runs *without* `--skip-discovery`, because the point of this command
+  // is precisely to run discovery to completion.
+  async function withDiscovery(args: string[], cwd: string) {
+    return new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+      execFile(
+        process.execPath,
+        ["--experimental-strip-types", MAIN, ...args],
+        // Do not pass VESPER_SKIP_DISCOVERY here; the whole point is to run discovery.
+        { cwd, timeout: 120_000, env: { ...process.env, VESPER_SKIP_DISCOVERY: undefined } },
+        (error, stdout, stderr) => {
+          const code =
+            error && typeof (error as NodeJS.ErrnoException & { code?: number }).code === "number"
+              ? (error as unknown as { code: number }).code
+              : error
+                ? 1
+                : 0;
+          resolve({ code, stdout: String(stdout), stderr: String(stderr) });
+        },
+      );
+    });
+  }
+
+  it("prints the report and exits 0", async () => {
+    // Consequence-based: assert on properties of the report the mission actually
+    // depends on — the target GPU (BLOCKED-PC), the safe defaults line (never
+    // fabricated benchmark numbers), and the honest "no physical validation" footer.
+    const cwd = await sandbox();
+    const result = await withDiscovery(["--first-boot-report"], cwd);
+    assert.equal(result.code, 0, `exited ${result.code}: ${result.stderr}`);
+    assert.match(result.stdout, /Vesper first-boot report/);
+    assert.match(result.stdout, /Detect OS/);
+    assert.match(result.stdout, /RX 7900 XT/, "the target GPU line was missing");
+    assert.match(result.stdout, /Safe defaults:/);
+    assert.match(
+      result.stdout,
+      /No physical validation of the Ryzen/,
+      "the honest 'no physical validation' footer was missing",
+    );
+  });
+});

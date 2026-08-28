@@ -117,6 +117,7 @@ export class VesperRuntime {
   readonly benchmark: BenchmarkHarness;
   capability: CapabilityProfile | null = null;
   firstBootReport: FirstBootReport | null = null;
+  private discoveryPromise: Promise<void> | null = null;
   started = false;
   private readonly skipDiscovery: boolean;
 
@@ -205,7 +206,7 @@ export class VesperRuntime {
       });
     }
     if (!this.skipDiscovery) {
-      void this.discoverInBackground();
+      this.discoveryPromise = this.discoverInBackground();
     }
     try {
       await this.knowledge.reindex();
@@ -308,6 +309,23 @@ export class VesperRuntime {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  /**
+   * Await the background discovery pass and return its report, or null if discovery
+   * was skipped or has not started yet. Callers who need the report for a one-shot
+   * command (--first-boot-report, --diagnostics with a --wait flag) use this instead
+   * of racing the background job.
+   */
+  async waitForFirstBoot(): Promise<FirstBootReport | null> {
+    if (this.discoveryPromise) {
+      try {
+        await this.discoveryPromise;
+      } catch {
+        // discoverInBackground already logged the error and left the report null.
+      }
+    }
+    return this.firstBootReport;
   }
 
   async stop() {

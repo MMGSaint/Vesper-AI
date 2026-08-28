@@ -10,6 +10,7 @@ export type CliCommand =
   | { kind: "config-check" }
   | { kind: "export-memory" }
   | { kind: "client-hello"; skipDiscovery: boolean }
+  | { kind: "first-boot-report" }
   | { kind: "unknown"; reason: string };
 
 const COMMANDS = new Set([
@@ -25,6 +26,7 @@ const COMMANDS = new Set([
   "--export-memory",
   "--client-hello",
   "--ask",
+  "--first-boot-report",
 ]);
 
 export function parseCli(argv: string[]): CliCommand {
@@ -74,6 +76,8 @@ export function parseCli(argv: string[]): CliCommand {
       return { kind: "export-memory" };
     case "--client-hello":
       return { kind: "client-hello", skipDiscovery };
+    case "--first-boot-report":
+      return { kind: "first-boot-report" };
     default:
       return {
         kind: "unknown",
@@ -101,6 +105,8 @@ Commands:
   --config-check    Parse config and exit
   --export-memory   Write persistent memories to data/memory-export.json
   --client-hello    Print the companion protocol hello (no listener, no token)
+  --first-boot-report
+                    Run first-boot discovery to completion and print the report
 
 Flags:
   --skip-discovery  Skip first-boot backend probes
@@ -111,6 +117,10 @@ Exit codes for --ask:
   0  answered
   3  an action is waiting for your confirmation; nothing was run. Answer it in
      the console. --ask never approves on your behalf.
+
+Exit codes for --first-boot-report:
+  0  report printed
+  4  discovery did not complete (see logs)
 
 In the console, type /help for conversation, memory, workspace, and system
 commands. Ctrl-C stops the reply in progress; press it again to exit.

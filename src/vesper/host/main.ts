@@ -75,9 +75,11 @@ async function main() {
   const skipDiscovery =
     command.kind === "export-memory"
       ? true
-      : "skipDiscovery" in command
-        ? command.skipDiscovery
-        : process.env.VESPER_SKIP_DISCOVERY === "1";
+      : command.kind === "first-boot-report"
+        ? false
+        : "skipDiscovery" in command
+          ? command.skipDiscovery
+          : process.env.VESPER_SKIP_DISCOVERY === "1";
 
   let host: ProductionHost;
   try {
@@ -221,6 +223,23 @@ async function main() {
       ),
     );
     await shutdown(0, "client-hello");
+    return;
+  }
+
+  if (command.kind === "first-boot-report") {
+    // The report is produced by the background discovery pass that starts on
+    // `runtime.start()`. Waiting on it here is what turns "the discovery happened, and
+    // its result is written to a file somewhere" into "the discovery result is on your
+    // terminal, now." Exit 0 when the report exists, exit 4 when discovery failed and
+    // left the report null, per the pattern for one-shot commands with two outcomes.
+    const report = await runtime.waitForFirstBoot();
+    if (report) {
+      console.log(report.reportText);
+      await shutdown(0, "first-boot-report");
+    } else {
+      console.error("First-boot discovery did not produce a report (see logs).");
+      await shutdown(4, "first-boot-report-failed");
+    }
     return;
   }
 
