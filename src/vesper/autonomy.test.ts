@@ -48,7 +48,7 @@ const localOrigin: RequestOrigin = { kind: "local" };
 const remoteOrigin: RequestOrigin = {
   kind: "remote",
   deviceId: "peer",
-  sessionId: "sess",
+  
   trust: "trusted",
 };
 

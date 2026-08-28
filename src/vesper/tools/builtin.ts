@@ -22,6 +22,7 @@ import type { BackgroundRuntime } from "../windows/runtime.ts";
 import type { ModelRouter } from "../models/router.ts";
 import type { IdleScheduler } from "../scheduler.ts";
 import type { BenchmarkHarness } from "../models/benchmark.ts";
+import type { CheckpointStore } from "../checkpoint.ts";
 import { listApproved, readApproved, writeApproved } from "./filesystem.ts";
 import { mcpBridgeStatus } from "../integrations/mcp.ts";
 import { detectApprovedApps } from "../windows/apps.ts";
@@ -69,8 +70,10 @@ export function registerBuiltinTools(input: {
   scheduler?: IdleScheduler;
   benchmark?: BenchmarkHarness;
   getDiagnostics?: () => Promise<DiagnosticReport>;
+  checkpointStore?: CheckpointStore;
 }) {
   const {
+    checkpointStore,
     registry,
     config,
     hardware,
@@ -283,6 +286,20 @@ export function registerBuiltinTools(input: {
         };
       }
 
+      // Pre-image capture, when a checkpoint store is attached. The store is optional
+      // — a runtime without one gets exactly the previous behaviour. A checkpoint
+      // makes an unattended remember reversible via the rollback_apply tool.
+      const preImage = existing ? { key: existing.key, category: existing.category, value: existing.value, workspaceId: existing.workspaceId ?? null } : null;
+      const checkpoint = checkpointStore
+        ? await checkpointStore.snapshot({
+            tool: "memory_remember",
+            target: key,
+            before: preImage as JsonObject | null,
+            absentBefore: !existing,
+            workspaceId: context.workspaceId,
+          })
+        : null;
+
       const entry = await memory.remember({
         category,
         key,
@@ -296,7 +313,19 @@ export function registerBuiltinTools(input: {
         // turn, which is how an invented fact becomes a remembered one.
         provenance: { origin: "agent", kind: "inferred" },
       });
-      return { ok: true, epistemic: "changed", summary: `Remembered ${entry.key}.`, data: { id: entry.id, key: entry.key, category: entry.category } };
+      if (checkpoint && checkpointStore) {
+        // Record the post-image so a later rollback can detect drift.
+        await checkpointStore.verify(checkpoint.id, {
+          key: entry.key,
+          category: entry.category,
+          value: entry.value,
+          workspaceId: entry.workspaceId ?? null,
+        } as JsonObject);
+      }
+      const memData: JsonObject = checkpoint
+        ? { id: entry.id, key: entry.key, category: entry.category, checkpointId: checkpoint.id }
+        : { id: entry.id, key: entry.key, category: entry.category };
+      return { ok: true, epistemic: "changed", summary: `Remembered ${entry.key}.`, data: memData };
     },
   );
 
@@ -368,6 +397,8 @@ export function registerBuiltinTools(input: {
       ["name"],
     ),
     async (args) => {
+      // Pre-image is the previous workspace id — enough to reverse the switch.
+      const previous = workspaces.current();
       const ws = workspaces.switchTo(str(args, "name"));
       if (!ws) {
         return {
@@ -376,15 +407,82 @@ export function registerBuiltinTools(input: {
           summary: `Unknown workspace '${str(args, "name")}'.`,
         };
       }
+      const checkpoint = checkpointStore
+        ? await checkpointStore.snapshot({
+            tool: "workspace_switch",
+            target: ws.id,
+            before: previous.id,
+            absentBefore: false,
+          })
+        : null;
+      if (checkpoint && checkpointStore) {
+        await checkpointStore.verify(checkpoint.id, ws.id);
+      }
       events.emit({
         type: "workspace.switch",
         title: `Workspace ${ws.name}`,
         severity: "info",
         workspaceId: ws.id,
       });
-      return { ok: true, epistemic: "changed", summary: `Switched to ${ws.name}.`, data: ws as unknown as JsonObject };
+      const wsData: JsonObject = checkpoint
+        ? { ...(ws as unknown as JsonObject), checkpointId: checkpoint.id }
+        : (ws as unknown as JsonObject);
+      return { ok: true, epistemic: "changed", summary: `Switched to ${ws.name}.`, data: wsData };
     },
   );
+
+  // Rollback tools: view the recent checkpoints and reverse one by id.
+  if (checkpointStore) {
+    registry.register(
+      spec(
+        "rollback_list",
+        "List recent Vesper-owned checkpoints that could be reversed.",
+        "read",
+        { limit: { type: "number", description: "Max records to return" } },
+      ),
+      async (args) => {
+        const limit = typeof args.limit === "number" ? Math.max(1, Math.min(50, Math.floor(args.limit))) : 20;
+        const records = await checkpointStore.list({ limit });
+        return {
+          ok: true,
+          epistemic: "checked",
+          summary: records.length
+            ? records
+                .map((r) => `${r.id.slice(-8)} ${r.tool} on '${r.target}' at ${r.at}`)
+                .join("; ")
+            : "No checkpoints available for rollback.",
+          data: { checkpoints: records } as unknown as JsonObject,
+        };
+      },
+    );
+
+    registry.register(
+      spec(
+        "rollback_apply",
+        "Reverse a Vesper-owned change identified by checkpoint id.",
+        "confirm",
+        { id: { type: "string", description: "The checkpoint id to reverse" } },
+        ["id"],
+      ),
+      async (args) => {
+        const id = str(args, "id");
+        const result = await checkpointStore.rollback(id);
+        if (result.applied) {
+          return {
+            ok: true,
+            epistemic: "changed",
+            summary: `Rolled back ${result.record.tool} on '${result.record.target}'.`,
+            data: { checkpointId: result.record.id, tool: result.record.tool, target: result.record.target } as JsonObject,
+          };
+        }
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary: `Rollback refused: ${result.reason}`,
+        };
+      },
+    );
+  }
 
   registry.register(
     spec(

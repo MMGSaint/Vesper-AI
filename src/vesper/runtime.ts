@@ -18,6 +18,7 @@ import { EventBus } from "./events.ts";
 import { EventJournal } from "./event-journal.ts";
 import { TaskExecutorRegistry, TaskScheduler, registerBuiltinExecutors } from "./task-scheduler.ts";
 import { AutonomyGovernor, defaultAutonomyPolicy } from "./autonomy.ts";
+import { CheckpointStore } from "./checkpoint.ts";
 import { NotificationHub } from "./notifications.ts";
 import { createSimulatedHardware, type SimulatedHardware } from "./hardware/simulated.ts";
 import {
@@ -104,6 +105,7 @@ export class VesperRuntime {
   readonly taskExecutors: TaskExecutorRegistry;
   readonly taskScheduler: TaskScheduler;
   readonly autonomy: AutonomyGovernor;
+  readonly checkpoints: CheckpointStore;
   readonly notifications: NotificationHub;
   readonly hardware: SimulatedHardware;
   readonly optimizer: OptimizerAdapter;
@@ -141,6 +143,7 @@ export class VesperRuntime {
       taskExecutors: TaskExecutorRegistry;
       taskScheduler: TaskScheduler;
       autonomy: AutonomyGovernor;
+      checkpoints: CheckpointStore;
       notifications: NotificationHub;
       hardware: SimulatedHardware;
       optimizer: OptimizerAdapter;
@@ -172,6 +175,7 @@ export class VesperRuntime {
     this.taskExecutors = parts.taskExecutors;
     this.taskScheduler = parts.taskScheduler;
     this.autonomy = parts.autonomy;
+    this.checkpoints = parts.checkpoints;
     this.notifications = parts.notifications;
     this.hardware = parts.hardware;
     this.optimizer = parts.optimizer;
@@ -987,7 +991,56 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   const history: ChatMessage[] = [];
 
   const runtimeRef: { current: VesperRuntime | null } = { current: null };
+
+  // Vesper-owned rollback: snapshots kept in `rollback.checkpoints` with per-record TTL.
+  const checkpoints = new CheckpointStore({ storage, log, events });
+  // Register reversers for the write paths that participate. Each reverser is a small
+  // shim over the underlying store; the checkpoint layer never knows the store's
+  // internals, only how to ask it to restore a value it once had.
+  checkpoints.registerReverser("memory_remember", {
+    async verify(record) {
+      // If the stored `after` matches the current key's value, no drift.
+      const results = await memory.search(record.target, { workspaceId: record.workspaceId, scope: "all" });
+      const current = results.find((entry) => entry.key === record.target);
+      const after = record.after as { value?: string } | undefined;
+      if (!after) return true; // No post-image recorded — best effort.
+      return !!current && current.value === after.value;
+    },
+    async restore(record) {
+      if (record.absentBefore) {
+        // The key did not exist before; forget any current entry with that key.
+        await memory.forget(record.target, { workspaceId: record.workspaceId });
+        return;
+      }
+      const before = record.before as { key: string; category: string; value: string; workspaceId: string | null } | null;
+      if (!before) throw new Error("memory_remember checkpoint has no `before` value");
+      await memory.remember({
+        category: before.category as never,
+        key: before.key,
+        value: before.value,
+        workspaceId: before.workspaceId ?? undefined,
+        source: "agent",
+        provenance: { origin: "agent", kind: "inferred" },
+      });
+    },
+  });
+  checkpoints.registerReverser("workspace_switch", {
+    async verify(record) {
+      // Drift detection: is the current workspace still the id we switched to?
+      const after = typeof record.after === "string" ? record.after : null;
+      if (!after) return true;
+      return workspaces.current().id === after;
+    },
+    async restore(record) {
+      const before = typeof record.before === "string" ? record.before : null;
+      if (!before) throw new Error("workspace_switch checkpoint has no `before` value");
+      const restored = workspaces.switchTo(before);
+      if (!restored) throw new Error(`Cannot restore workspace '${before}': not configured`);
+    },
+  });
+
   registerBuiltinTools({
+    checkpointStore: checkpoints,
     registry: tools,
     obs,
     deviceRegistry: devices,
@@ -1067,6 +1120,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     taskExecutors,
     taskScheduler,
     autonomy,
+    checkpoints,
     notifications,
     hardware,
     optimizer,

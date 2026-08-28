@@ -536,7 +536,9 @@ export interface AuditEntry {
     | "windows"
     | "voice"
     | "health"
-    | "diagnostics";
+    | "diagnostics"
+    | "rollback"
+    | "autonomy";
   level: "debug" | "info" | "warn" | "error";
   message: string;
   data?: JsonObject;
