@@ -16,7 +16,7 @@ Last touched 2026-08-28. Everything below is observed output or a repo fact.
 | Authoritative repo | **`MMGSaint/vesper-ai`**, working copy `/home/user/vesper-ai` |
 | Not the target | `/home/user/Vesper-personal-assistant-` is an empty scaffold — one commit, a README, no code. **Do not migrate or restart the project there.** |
 | Work branch | `claude/vesper-local-ai-build-ti8ofa` |
-| HEAD | `92edb97`, pushed, **22 commits ahead of `origin/main`** |
+| HEAD | `dba22dd`, pushed, **29 commits ahead of `origin/main`** |
 | `origin/main` | `9b7d924` — the round-2 security campaign is merged there |
 
 Verify git state rather than trusting this table if any time has passed.
@@ -79,12 +79,12 @@ user text → deterministic intent OR model → autonomy governor → permission
 
 | Check | Result |
 |---|---|
-| `npm test` | **838 pass, 0 fail** (was 671 at session-start of Phase 1) |
+| `npm test` | **880 pass, 0 fail** (was 671 at session-start of Phase 1) |
 | `npm run security:quick` | **294 pass, 0 fail** |
 | `npm run hygiene` | clean, 341 files |
 | `npx tsc --noEmit` | clean |
 | Journal adversarial workflow | 30 CONFIRMED findings — all HIGH fixed with regression tests |
-| Phase-2 attack suite | running against scheduler / governor / checkpoint / capsule after these fixes |
+| Phase-2 attack suite | 28 CONFIRMED (1 CRITICAL, 10 HIGH) across scheduler / governor / checkpoint, **plus 12 capsule findings the verifiers wrongly refuted** — all fixed, 37 regression tests |
 
 Every load-bearing defence added this session is either mutation-proven or
 attack-proven. Three defences are honestly labelled defence-in-depth rather
@@ -217,7 +217,28 @@ retry-eligible failure is not a final failure. Loss must be loud.
 - No new listener may open in the continuity code. `.listen(` in the tree is
   ollama-loopback.ts + live-backend.test.ts only.
 
+**Capsule invariants (added after the phase-2 attack pass):**
+- A capsule is verified against the key the RECEIVER has registered for the
+  claimed deviceId — never the key embedded in the capsule. A device is a key,
+  not a label.
+- A replayed capsule is refused when a seen-set is wired.
+- Credential screening runs at ingest over decision/observation prose and data
+  bags, not only over memory at build time.
+- A restricted sender's decisions and observations are declined, not only its
+  preferences — otherwise the trust ceiling is bypassed by choice of field.
+- `accepted` means the capsule was admissible; `partial` says whether every
+  item landed. Never conflate them.
+
+**On adversarial verification.** The phase-2 workflow's verifier agents refuted
+all 12 capsule findings because they read the wrong repository — the session cwd
+is an empty scaffold, not the source tree. A CRITICAL identity-spoofing bug was
+nearly dismissed on that basis. Any future adversarial pass should have its
+agents state which repository root they read, and a refutation of the form "the
+file does not exist" should be read as a signal about the harness, not the code.
+Recorded in `security/BACKLOG.md` §4b.
+
 Keep `npm run security:quick` as a permanent regression gate. Do not restart
 the red-team campaign as part of the build mission; track platform/security
-gaps in `security/BACKLOG.md`. The Phase 2 journal-attack findings are
-recorded in this session's commits (63c96ba specifically).
+gaps in `security/BACKLOG.md`. Phase-2 attack findings and their fixes are in
+commits 63c96ba, 2441148, d593562, and dba22dd; what was deliberately not
+fixed is in `security/BACKLOG.md` §4b.

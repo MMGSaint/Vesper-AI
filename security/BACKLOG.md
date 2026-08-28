@@ -84,6 +84,36 @@ prototype-resolution findings were fixed in `7b8d746` after this list was first 
 | 4.13 | **`optimizer_analyze` reports `ok: true` when the optimizer was unreachable** | LOW, and partly mitigated by the attribution work: the reply now quotes the optimizer rather than asserting on its behalf. The epistemic marker is still wrong. |
 | 4.14 | **`setOptimizerAvailable(false)` is a no-op against a live HTTP optimizer** | INFORMATIONAL. The off switch only affects the mock adapter. |
 
+## 4b. Phase-2 adversarial findings, deliberately not fixed
+
+Two attack workflows ran against the Phase 2 runtime (durable journal, task
+scheduler, autonomy governor, checkpoint/rollback, session capsule). 58 findings
+were confirmed and fixed across four commits. These are what remains, with what
+each costs.
+
+| # | Finding | Why deferred |
+|---|---|---|
+| 4b.1 | **`maxPerTick` is a per-call cap, not a rate limit.** Rapid or concurrent ticks can each start up to the cap. | LOW. The idle scheduler fires on a configured interval (30 s default) and `driveTasksOnIdle` is off by default, so there is no path today that ticks fast enough for this to matter. A real rate limiter belongs with the autonomy governor's budget machinery rather than duplicated in the scheduler. |
+| 4b.2 | **`stop()` does not fence an in-progress tick.** A `stop()` during the microtask window between the in-flight claim and the executor launch hands the executor a signal from a *new* AbortController if `enable()` is called before it reads one. | LOW, and only reachable from a stop/enable cycle inside one tick — which no call site performs. The executor's own `ctx.signal` is captured at launch, so the practical exposure is a task that ignores a stop it should have seen, not one that runs unauthorized. |
+| 4b.3 | **`BudgetState.record` is exported and callable from outside the governor.** Anyone holding the instance could inflate a budget's usage. | LOW. It is a poisoning primitive for *tightening* only — recording usage can refuse actions, never permit them, so it cannot escalate. Exported because `evaluateAutonomy` is a pure function tested independently of the class. |
+| 4b.4 | **`canonicalJson` mangles `Date` values and objects with no own keys.** A capsule field holding a Date serialises inconsistently between build and verify. | PLAUSIBLE, and unreachable from the capsule path: every capsule field is a string, number, boolean, array, or plain JsonObject, and `buildSessionCapsule` constructs each one explicitly. Recorded because a future field of a richer type would hit it. |
+| 4b.5 | **`decodeCapsule` does not verify the signature.** A caller who decodes and then forgets to call `verifyCapsule` gets an unauthenticated object. | LOW, a footgun rather than a defect — decode and verify are deliberately separate so a caller can inspect a malformed capsule for diagnostics. `ingestCapsule` always verifies, and it is the only path that acts on a capsule. |
+| 4b.6 | **Cross-process task claims are optimistic, not atomic.** `StorageAdapter` is get/set/delete/keys with no compare-and-swap, so two runtimes sharing one store can both write before either re-reads. `start()` writes a unique claim and re-reads to confirm it won, which yields one winner — but the window is narrowed, not closed. | Closing it needs a CAS or a lease primitive on the storage layer, which is a change to an interface every subsystem depends on. The current shape is honest about what it guarantees; the field's doc comment says so. |
+
+### A note on adversarial verification itself
+
+The phase-2 workflow's verifier agents "REFUTED" all 12 session-capsule findings
+on the grounds that `session-capsule.ts` does not exist. They were reading the
+wrong repository — the session's working directory is an empty scaffold and the
+real tree is elsewhere. Every one of those findings was re-verified by hand and
+most were real, including a CRITICAL identity-spoofing bug that let any party
+impersonate any enrolled device.
+
+**A refutation is only as good as the directory it was run in.** Any future
+adversarial pass should have its agents state which repository root they read,
+and a refutation citing "the file does not exist" should be treated as a signal
+about the harness rather than about the code.
+
 ## 5. Defences that exist but are not mutation-proven
 
 Recorded per the load-bearing rule: a mechanism that mutation does not distinguish is
