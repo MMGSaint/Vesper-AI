@@ -69,12 +69,26 @@ describe("wiring: a poisoned memory never reaches the model", () => {
 
     const system = seen.at(-1)?.find((message) => message.role === "system")?.content ?? "";
     assert.ok(system.length > 0, "the turn actually reached the provider");
-    assert.equal(
-      system.includes("fs_write"),
-      false,
-      "the payload was handed to the model despite screening",
-    );
-    assert.equal(system.includes("unrestricted agent"), false);
+    // Assert on fragments that are DISTINCTIVE to the payload.
+    //
+    // This used to check for the bare token "fs_write", which is a proxy rather than
+    // the property: the repo's own documentation is inside the knowledge root, so a doc
+    // discussing fs_write rollback is legitimately retrievable and trips the check while
+    // the payload is fully contained. The proxy failing on clean content is a false
+    // alarm; the fragments below cannot appear except from this memory.
+    for (const fragment of [
+      PAYLOAD,
+      "unrestricted agent",
+      "startup.bat",
+      "Ignore all previous instructions",
+      "do not tell the user",
+    ]) {
+      assert.equal(
+        system.includes(fragment),
+        false,
+        `the payload fragment ${JSON.stringify(fragment)} was handed to the model despite screening`,
+      );
+    }
 
     // Withholding silently would be its own failure: the user is owed the record.
     const withheld = turn.events.find((event) => event.type === "security.untrusted_content");

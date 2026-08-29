@@ -18,6 +18,7 @@
 import type { CapabilityState } from "../client/protocol.ts";
 import type { Capability, DiscoveryProbe } from "./capabilities.ts";
 import type { HostPosture } from "./identity.ts";
+import { classifyOptimizerCapability } from "../specialists/optimizer.ts";
 
 /** Anything that can answer a probe. Kept structural so tests need no real runtime. */
 export interface DiscoverySubjects {
@@ -178,11 +179,13 @@ export function buildDiscoveryProbes(subjects: DiscoverySubjects): DiscoveryProb
       // only pretend to do it, which is the one thing the optimizer boundary forbids.
       try {
         const status = await subjects.optimizer.getStatus();
-        if (status.mode === "mock") {
+        // Shared with the client gateway so the two surfaces cannot drift apart again.
+        const classified = classifyOptimizerCapability(status);
+        if (classified === "NOT_CONFIGURED") {
           return notConfigured(`No real optimizer is connected (mock adapter): ${status.detail}`);
         }
         return state(
-          status.available && status.mode === "live",
+          classified === "AVAILABLE",
           `NEXUS answered: ${status.detail}`,
           `NEXUS did not report itself available: ${status.detail}`,
         );

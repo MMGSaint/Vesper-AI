@@ -60,10 +60,17 @@ export async function discoverCapabilityProfile(config: VesperConfig): Promise<C
     targetProfile: config.hardware.target,
     backends: discovered.backends,
     models: discovered.models,
+    preferredBackend: discovered.preferredBackend,
     telemetry: "mocked_simulated",
     audio: "documented_not_implemented",
     windowsIntegration: platform() === "win32" ? "implemented_hardware_dependent" : "mocked_simulated",
-    optimizer: config.optimizer.mode === "live" ? "implemented_hardware_dependent" : "mocked_simulated",
+    // Mode alone is not enough: "live" with no endpoint still builds a mock adapter in
+    // the runtime, so classifying it as hardware-dependent claims a connection that
+    // does not exist. Same rule as the first-boot report's optimizer step.
+    optimizer:
+      config.optimizer.mode === "live" && config.optimizer.endpoint
+        ? "implemented_hardware_dependent"
+        : "mocked_simulated",
     voice: config.voice.enabled ? "implemented_hardware_dependent" : "documented_not_implemented",
     notes: [
       "No physical validation of the Ryzen 9 9950X / RX 7900 XT machine was performed.",

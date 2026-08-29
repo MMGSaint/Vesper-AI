@@ -44,6 +44,16 @@ export interface TaskExecutionResult {
   summary: string;
   /** Optional structured data. Preserved on the task's result string as JSON. */
   data?: JsonObject;
+  /**
+   * Whether this failure is worth another attempt. Default true — the existing
+   * behaviour, and the right default for anything that might be transient.
+   *
+   * An executor sets this false when the answer will not change on a retry. A
+   * permission refusal is the motivating case: re-running it exhausts the retry budget
+   * producing identical refusals and identical audit noise, which reads to anyone
+   * watching the journal like a system trying repeatedly to get past a policy.
+   */
+  retryable?: boolean;
 }
 
 export interface TaskExecutorContext {
@@ -307,7 +317,9 @@ export class TaskScheduler {
       if (result.ok) {
         await this.opts.taskQueue.complete(task.id, payload);
       } else {
-        await this.opts.taskQueue.fail(task.id, result.summary);
+        await this.opts.taskQueue.fail(task.id, result.summary, {
+          retryable: result.retryable !== false,
+        });
       }
     } catch (error) {
       const fresh = await this.opts.taskQueue.get(task.id);

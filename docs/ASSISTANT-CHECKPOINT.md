@@ -1,17 +1,15 @@
 # Assistant build — checkpoint
 
-Phase 1 (assistant foundation) and Phase 2 (durable runtime + governor +
-rollback + continuity + physical-PC prep) are both **merged into `main`** at
-`e090130`. The next session picks up from a runtime that has real durable state
-and a deterministic authorization ladder.
+Phase 1 (assistant foundation), Phase 2 (durable runtime + governor + rollback +
+continuity + physical-PC prep) and Phase 3 (closing the loops) are on this branch.
+Phases 1 and 2 are merged into `main` at `e090130`.
 
-How it was integrated: the branch was a strict descendant of `main`, merged with
-`--no-ff`, so all 34 commits keep their SHAs — no rebase, no squash, no
-cherry-pick, no force-push. The merged tree is identical to the branch tip that
-CI validated green on Linux and Windows (`git diff` between them is empty), and
-the merge commit itself was re-validated before pushing.
+**Phase 3 closed the loops Phase 2 left open.** Several phase-2 subsystems were, in this
+project's own classification, *implemented and tested but not wired* — real modules with
+no call site asking for the guarantee they offered. That is not a capability the product
+has, and phase 3 is the wiring. See `docs/phase-3-runtime.md`.
 
-Last touched 2026-08-28. Everything below is observed output or a repo fact.
+Last touched 2026-08-29. Everything below is observed output or a repo fact.
 
 ---
 
@@ -22,8 +20,8 @@ Last touched 2026-08-28. Everything below is observed output or a repo fact.
 | Authoritative repo | **`MMGSaint/vesper-ai`**, working copy `/home/user/vesper-ai` |
 | Not the target | `/home/user/Vesper-personal-assistant-` is a **second working copy of this same repository**, sitting on a detached HEAD several commits behind the tip. It is not an empty scaffold — earlier checkpoints said so and were wrong. **Do all work in `/home/user/vesper-ai`.** A stale second checkout is an active hazard: it made four adversarial verifier agents report real code as "non-existent" (see `security/BACKLOG.md` §4b). |
 | Work branch | `claude/vesper-local-ai-build-ti8ofa` |
-| HEAD | `e090130` — **merged into `main`**; the branch and `main` point at the same commit |
-| `origin/main` | `e090130` — phase 2 landed here, CI and CodeQL green on it |
+| HEAD | phase-3 work on the branch, ahead of `main` |
+| `origin/main` | `e23f245` — phases 1 and 2 landed here, CI and CodeQL green on it |
 
 Verify git state rather than trusting this table if any time has passed.
 
@@ -81,13 +79,59 @@ user text → deterministic intent OR model → autonomy governor → permission
 
 ---
 
+## 2b. Phase 3 additions
+
+Each of these existed as a module before this phase and had no call site.
+
+| Loop | What closed it |
+|---|---|
+| **fs_write rollback** | pre-image captured before the write, restore back through `writeApproved`, delete through a contained primitive that is deliberately not a tool. Refuses on drift, on a missing file, on an absent post-image, and on a target that has left the approved roots. |
+| **Scheduler → tools** | a `tool_call` executor going through `ToolRegistry.invoke` under a new `scheduled` origin that reaches strictly less than a person at the keyboard. Confirm-tier is refused, not deferred. A refusal is terminal rather than retried. |
+| **Correction records** | a durable store plus a producer that compares what Vesper expected against what the optimizer observed. Three outcomes, including "the assumption held" and "inconclusive". |
+| **Catch-up** | outstanding work read from the queue, autonomy decisions including deliberate no-action, corrections, and an explicit statement of how far back the digest can see. |
+| **First boot** | the probe registry is consulted instead of six hard-coded strings; a real Windows probe now outranks the placeholder regardless of registration order. |
+| **NEXUS boundary** | one capability classifier shared by the client gateway and the capability manifest, which previously disagreed about the same adapter. |
+
+**Defects found while wiring, each with a regression test:**
+
+- `fs_write` opened with `O_TRUNC`, so a file with more than one hard link was already
+  emptied when the hard-link check ran — an `ok: false` that had destroyed the data.
+- The probe ids (`gpu.live`) and first-boot step ids (`gpu`) are different vocabularies
+  while the module's comment said they matched; a direct lookup returns `undefined` for
+  all six and silently keeps the hard-coded text.
+- Probe priority was insertion order and the placeholders claim `win32`, so a real
+  Windows probe registered afterwards would never have run — on the one machine where it
+  was implemented.
+- `decideRemoteToolRequest` treated every non-`remote` origin as fully authorized, so
+  adding any origin kind would have granted it the authority of the person at the
+  keyboard.
+- The first-boot optimizer step classified on `mode` alone while its detail also required
+  an endpoint: one line disagreeing with itself.
+- `preferredBackend` was re-derived knowing only two backends, so a Vulkan-only host got
+  two different answers to one question.
+- `voiceEnabled` was hard-coded false in the first-boot report.
+- `hardware.mode: "live"` is recorded in four places and branched on in none.
+- The doctor's `cloud-not-required` check was `x === false || true` — a constant wearing
+  the shape of a computation.
+- The client gateway and the capability manifest classified the same mock optimizer
+  differently (`DEGRADED` vs `NOT_CONFIGURED`).
+
+**One test assertion was a proxy and is now the property.** `injection-wiring.test.ts`
+checked that the token `fs_write` never reached the system prompt. The repo's own docs
+are inside the knowledge root, so a document *about* fs_write rollback is legitimately
+retrievable and tripped the check while the payload was fully contained. It now asserts
+on fragments distinctive to the payload; mutation confirms it still catches a real
+screening bypass.
+
+---
+
 ## 3. Verified continuously
 
 | Check | Result |
 |---|---|
-| `npm test` | **894 pass, 0 fail, 0 skipped** (was 671 at session-start of Phase 1) |
-| `npm run security:quick` | **297 pass, 0 fail** |
-| `npm run hygiene` | clean, 345 files |
+| `npm test` | **1023 pass, 0 fail, 0 skipped** (671 at Phase 1 start, 894 at Phase 2 end) |
+| `npm run security:quick` | **361 pass, 0 fail** (297 at Phase 2 end; the gate grew, nothing was weakened) |
+| `npm run hygiene` | clean, 359 files |
 | `npx tsc --noEmit` | clean |
 | Journal adversarial workflow | 30 CONFIRMED findings — all HIGH fixed with regression tests |
 | Phase-2 attack suite | 28 CONFIRMED (1 CRITICAL, 10 HIGH) across scheduler / governor / checkpoint, **plus 12 capsule findings the verifiers wrongly refuted** — all fixed, 37 regression tests |
@@ -187,20 +231,17 @@ commits landing the assistant foundation.
 
 ### P1 — what a scheduled or background flow needs next
 
-- **fs_write rollback integration** — the CheckpointStore abstraction fits;
-  the integration touches filesystem containment, so it deserves its own commit.
-- **Decision-correction records** — the mission's "correction loop" is scoped
-  in `CapsuleCorrectionEntry` and the capsule accepts it; nothing yet produces
-  corrections. A small subsystem that watches optimizer/model outcomes and
-  writes corrections would close the loop.
+- ~~fs_write rollback integration~~ — **done in Phase 3.**
+- ~~Decision-correction records~~ — **done in Phase 3.** A store plus an optimizer
+  producer; the capsule slot now has something to carry.
 - **Cross-device transport** — capsules exist, no transport carries them.
   Needs an explicit user decision because opening a listener on a personal
   machine is not Vesper's call.
-- **Executor implementations beyond noop** — reminder-style, timer-based,
-  and one that invokes a tool call under the same permission gate.
-- **Governor decision journal reads** — the decisions are already durable in
-  the event journal, but nothing yet queries them for `--diagnostics` or a
-  future "why did Vesper do X" tool.
+- ~~An executor that invokes a tool under the same permission gate~~ — **done in
+  Phase 3.** Timer-based and reminder-style executors are still open.
+- ~~Governor decision reads~~ — **partly done in Phase 3:** catch-up now reports
+  autonomy decisions including deliberate no-action. A "why did Vesper do X" tool that
+  queries the journal by correlation id is still open.
 
 ### P2 / P3
 
@@ -212,9 +253,12 @@ real, in-process only) · skills/plugins, model migration, outcome learning
 
 ## 6. Exact next actions
 
-**In order of value verifiable without the physical PC:**
+**The next milestone is the FIRST REAL PC BOOT, not another architecture change.**
+The ordered workflow is `docs/first-pc-boot.md`. Everything below is what remains
+verifiable without that machine.
 
-1. **fs_write rollback integration** — smallest, closes a real gap.
+1. **Real Windows hardware probes** — the interface, the checklist and the priority rule
+   are ready; the six probes are not written because the machine has been off.
 2. **Correction record producer** — a small watcher that turns optimizer
    observations into `CapsuleCorrectionEntry` values. Closes the mission's
    correction-loop hook.
@@ -332,7 +376,15 @@ should be read as "Vesper is secure" — it says which specific attacks were
 tried, which defences are mutation-proven, and what is still unexamined.
 
 Keep `npm run security:quick` as a permanent regression gate. It must not be
-weakened, and tests must not be removed to make it pass.
+weakened, and tests must not be removed to make it pass. Phase 3 added four files to it
+(`tools/filesystem-rollback`, `tool-executor`, `security-corrections`,
+`security-nexus-boundary`) and widened the auto-detect pattern so the rollback tests
+cannot be dropped silently. 297 → 361.
+
+**Phase 3 did not run a red-team campaign, by instruction.** It added targeted security
+regression tests alongside each new seam, which is a different thing and is stated as
+such: the coverage is "these specific bypasses are closed and mutation-proven", not
+"this subsystem has been attacked.
 
 **Transport is still not wired.** Session capsules have a shape, a signature,
 and a verify/ingest path; nothing carries them between machines. `.listen(` in

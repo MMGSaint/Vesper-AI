@@ -28,12 +28,16 @@ const SUITE = [
   ["src/vesper/injection-redteam.test.ts", "prompt injection: containment"],
   ["src/vesper/injection-wiring.test.ts", "prompt injection: the product actually uses it"],
   ["src/vesper/tools/remote.test.ts", "remote authority limits at the tool gate"],
+  ["src/vesper/tool-executor.test.ts", "a scheduled task reaches tools only through the authorization chain"],
   ["src/vesper/tools/scope-enforcement.test.ts", "a scope governs its data on every route"],
   ["src/vesper/tools/filesystem-containment.test.ts", "writes and reads never escape an approved root"],
+  ["src/vesper/tools/filesystem-rollback.test.ts", "an undo never escapes an approved root either"],
   ["src/vesper/client/gateway.test.ts", "gateway method scopes and session authentication"],
   ["src/vesper/client/device-binding.test.ts", "device identity, trust, revocation"],
   ["src/vesper/client/confirmation-authority.test.ts", "the confirmation queue as a trust boundary"],
+  ["src/vesper/security-corrections.test.ts", "a correction is evidence and never authority"],
   ["src/vesper/memory/scopes.test.ts", "memory scope visibility and attribution"],
+  ["src/vesper/security-nexus-boundary.test.ts", "the optimizer specialist is data, never authority"],
   ["src/vesper/distributed/discovery.test.ts", "capabilities are discovered, never assumed"],
   ["src/vesper/logging.test.ts", "secret redaction on the audit path"],
   ["src/vesper/resource-bounds.test.ts", "nothing untrusted chooses how much the host allocates"],
@@ -60,7 +64,7 @@ const MUST_BE_LISTED = [
   /^src\/vesper\/resource-bounds\.test\.ts$/,
   /^src\/vesper\/prompt-integrity\.test\.ts$/,
   /^src\/vesper\/client\/.*\.test\.ts$/,
-  /^src\/vesper\/tools\/(remote|scope-enforcement|filesystem-containment)\.test\.ts$/,
+  /^src\/vesper\/tools\/(remote|scope-enforcement|filesystem-containment|filesystem-rollback)\.test\.ts$/,
 ];
 
 const listed = new Set(SUITE.map(([file]) => file));

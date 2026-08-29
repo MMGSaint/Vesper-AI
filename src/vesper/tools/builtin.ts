@@ -23,7 +23,10 @@ import type { ModelRouter } from "../models/router.ts";
 import type { IdleScheduler } from "../scheduler.ts";
 import type { BenchmarkHarness } from "../models/benchmark.ts";
 import type { CheckpointStore } from "../checkpoint.ts";
+import type { CorrectionStore } from "../corrections.ts";
+import type { OptimizerCorrectionProducer } from "../correction-producer.ts";
 import { listApproved, readApproved, writeApproved } from "./filesystem.ts";
+import { TOOL_CALL_TASK_KIND } from "../tool-executor.ts";
 import { mcpBridgeStatus } from "../integrations/mcp.ts";
 import { detectApprovedApps } from "../windows/apps.ts";
 import { classifyDeviceIntent, resolveTarget } from "../distributed/intent.ts";
@@ -71,9 +74,14 @@ export function registerBuiltinTools(input: {
   benchmark?: BenchmarkHarness;
   getDiagnostics?: () => Promise<DiagnosticReport>;
   checkpointStore?: CheckpointStore;
+  /** Optional like checkpointStore: a runtime without one keeps the previous behaviour. */
+  corrections?: CorrectionStore;
+  correctionProducer?: OptimizerCorrectionProducer;
 }) {
   const {
     checkpointStore,
+    corrections,
+    correctionProducer,
     registry,
     config,
     hardware,
@@ -608,7 +616,11 @@ export function registerBuiltinTools(input: {
       { path: { type: "string" }, content: { type: "string" } },
       ["path", "content"],
     ),
-    async (args, context) => writeApproved(config.approvedRoots, str(args, "path"), str(args, "content"), context.dryRun),
+    async (args, context) =>
+      writeApproved(config.approvedRoots, str(args, "path"), str(args, "content"), context.dryRun, {
+        checkpointStore,
+        workspaceId: context.workspaceId,
+      }),
   );
 
   registry.register(
@@ -712,15 +724,37 @@ export function registerBuiltinTools(input: {
     ),
     async (args) => {
       const action = str(args, "action");
+      const profile = str(args, "profile") || undefined;
+      // What Vesper believes right now, recorded BEFORE the request. Reading the
+      // bottleneck afterwards and calling it the expectation would make the producer
+      // incapable of ever being wrong.
+      const expectedBound = correctionProducer
+        ? await optimizer
+            .analyze()
+            .then((analysis) => analysis.bound)
+            .catch(() => "unknown" as const)
+        : "unknown";
       const result =
         action === "rollback"
           ? await optimizer.requestRollback()
-          : await optimizer.requestOptimization({ profile: str(args, "profile") || undefined });
+          : await optimizer.requestOptimization({ profile });
       if (result.accepted) {
         events.emit({
           type: "optimizer.state",
           title: `Optimizer ${action} confirmed`,
           severity: "info",
+        });
+      }
+      // Only an optimize request forms an expectation worth checking later. A rollback
+      // is a reversal, not a prediction. `accepted` is passed through exactly as the
+      // adapter reported it, so a refused request produces a correction about the
+      // request rather than about an effect that never occurred.
+      if (correctionProducer && action !== "rollback") {
+        correctionProducer.expect({
+          profile: profile ?? "default",
+          expectedBound,
+          because: `the optimizer reported a ${expectedBound}-bound workload`,
+          accepted: result.accepted,
         });
       }
       return {
@@ -730,6 +764,42 @@ export function registerBuiltinTools(input: {
       };
     },
   );
+
+  if (corrections) {
+    registry.register(
+      spec(
+        "corrections_list",
+        "List recorded corrections — where Vesper's expectations met contrary evidence.",
+        "read",
+        {
+          limit: { type: "number", description: "How many to return (1-50)" },
+          subsystem: {
+            type: "string",
+            description: "Filter to one subsystem, e.g. optimizer",
+          },
+        },
+      ),
+      async (args) => {
+        const limitRaw = typeof args.limit === "number" ? args.limit : 10;
+        const limit = Math.max(1, Math.min(50, Math.floor(limitRaw)));
+        const subsystem = str(args, "subsystem");
+        const records = await corrections.list({
+          limit,
+          subsystem: subsystem ? (subsystem as never) : undefined,
+        });
+        const tally = await corrections.tally();
+        return {
+          ok: true,
+          epistemic: "checked",
+          summary:
+            records.length === 0
+              ? "No corrections have been recorded."
+              : `${records.length} correction(s). Overall: ${tally.assumption_wrong} wrong, ${tally.assumption_held} held, ${tally.inconclusive} inconclusive.`,
+          data: { records, tally } as unknown as JsonObject,
+        };
+      },
+    );
+  }
 
   registry.register(
     spec("context_status", "Read VRChat, OBS, and game context from the host adapter.", "read", {}),
@@ -952,6 +1022,15 @@ export function registerBuiltinTools(input: {
           type: "string",
           description: "The device the user named, e.g. 'my desktop'. Treated as a requirement.",
         },
+        tool: {
+          type: "string",
+          description:
+            "Optional. A tool to run when the task comes due. It runs unattended, so it must be one that needs no confirmation.",
+        },
+        toolArgs: {
+          type: "object",
+          description: "Optional. Arguments for `tool`, validated against that tool's own schema when it runs.",
+        },
       },
       ["description"],
     ),
@@ -987,12 +1066,28 @@ export function registerBuiltinTools(input: {
         eligibleDevices = [resolved.device.identity.deviceId];
       }
 
+      // A task that names a tool gets the executor kind; one that does not stays a
+      // description-only reminder that no scheduler will start on its own.
+      //
+      // This does not widen what the caller can do. Whoever can call `task_create` can
+      // already call any tool they are permitted; queueing one only defers it, and the
+      // deferred call runs under a `scheduled` origin, which reaches strictly LESS than
+      // a live request — no confirm-tier tool, nothing that administers trust, nothing
+      // on the trusted-only list. The task record is not a stored permission: the whole
+      // chain is re-evaluated at execution time against the state that holds then.
+      const namedTool = str(args, "tool");
+      const toolArgs =
+        args.toolArgs && typeof args.toolArgs === "object" && !Array.isArray(args.toolArgs)
+          ? (args.toolArgs as JsonObject)
+          : {};
       const created = await tasks.create({
         description: str(args, "description"),
         createdBy: selfDeviceId ?? "unknown",
         requiredCapabilities: required,
         preferredDevice: str(args, "preferredDevice") || undefined,
         eligibleDevices,
+        kind: namedTool ? TOOL_CALL_TASK_KIND : undefined,
+        args: namedTool ? ({ tool: namedTool, args: toolArgs } as JsonObject) : undefined,
       });
       // Route immediately so the reply says where it will run, or honestly that it will not yet.
       const scheduled = await tasks.schedule(await deviceRegistry.list());

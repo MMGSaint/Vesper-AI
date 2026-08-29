@@ -15,12 +15,76 @@ import type {
 } from "./types.ts";
 import type { Logger } from "./logging.ts";
 import { isolateFailure } from "./recover.ts";
+import type { HardwareProbeRegistry } from "./hardware/probes.ts";
 
 export interface FirstBootOptions {
   storage?: StorageAdapter;
   reportPath?: string;
   selfCheck?: () => Promise<{ ok: boolean; detail: string }>;
   now?: () => Date;
+  /**
+   * Probes for the six steps that need real hardware.
+   *
+   * Optional so an embedder without one still gets a report, but the runtime always
+   * supplies it. Before this, the registry existed, was tested, and nothing imported
+   * it — the six steps were hard-coded strings, so registering a real Windows probe
+   * changed nothing a user would see. That is "implemented and tested, not wired",
+   * which is not a capability the product has.
+   */
+  probes?: HardwareProbeRegistry;
+}
+
+/**
+ * Step id -> probe id.
+ *
+ * The two vocabularies differ and the probe module's own comment claimed they matched:
+ * steps are `gpu`, `vram`, `telemetry`, `audio`, `windows`, `benchmark`, while probes
+ * are `gpu.live`, `vram.live`, `telemetry.amd`, `audio.wasapi`, `windows.tray`,
+ * `benchmark.harness`. A direct lookup returns undefined for all six and silently falls
+ * back to the hard-coded text — the failure would have looked exactly like success.
+ * One table, stated once.
+ */
+const PROBE_FOR_STEP: Readonly<Record<string, string>> = {
+  gpu: "gpu.live",
+  vram: "vram.live",
+  telemetry: "telemetry.amd",
+  audio: "audio.wasapi",
+  windows: "windows.tray",
+  benchmark: "benchmark.harness",
+};
+
+/**
+ * Build a step from a probe result, or from the caller's fallback when no probe
+ * answered.
+ *
+ * The probe's answer wins whenever one was produced, including a negative one: "the
+ * probe ran and could not read the GPU" is a different fact from "no probe exists", and
+ * flattening them is how a machine with a broken driver would look identical to a
+ * machine that was never asked.
+ */
+async function probedStep(
+  probes: HardwareProbeRegistry | undefined,
+  id: string,
+  title: string,
+  fallback: { ok: boolean; detail: string; status: FeatureStatus },
+  log: Logger,
+): Promise<FirstBootStep> {
+  const probeId = PROBE_FOR_STEP[id];
+  if (!probes || !probeId || !probes.known().includes(probeId)) {
+    return step(id, title, fallback.ok, fallback.detail, fallback.status);
+  }
+  const result = await probes.run(probeId, { platform: platform(), log: probeLogger(log) });
+  return step(id, title, result.ok, result.detail, result.classification);
+}
+
+/** Adapt Vesper's logger to the minimal shape a portable probe expects. */
+function probeLogger(log: Logger) {
+  return {
+    debug: (message: string) => log.debug("lifecycle", message),
+    info: (message: string) => log.info("lifecycle", message),
+    warn: (message: string) => log.warn("lifecycle", message),
+    error: (message: string) => log.error("lifecycle", message),
+  };
 }
 
 export async function firstBoot(config: VesperConfig, log: Logger): Promise<CapabilityProfile> {
@@ -50,22 +114,18 @@ export async function runFirstBootAutomation(
     ),
   );
   steps.push(
-    step(
-      "gpu",
-      "Detect GPU",
-      false,
-      "Live GPU identity was not read. Target GPU is AMD Radeon RX 7900 XT (20 GB).",
-      "implemented_hardware_dependent",
-    ),
+    await probedStep(options.probes, "gpu", "Detect GPU", {
+      ok: false,
+      detail: "Live GPU identity was not read. Target GPU is AMD Radeon RX 7900 XT (20 GB).",
+      status: "implemented_hardware_dependent",
+    }, log),
   );
   steps.push(
-    step(
-      "vram",
-      "Detect VRAM",
-      false,
-      "Live VRAM was not read. Target VRAM is 20 GB.",
-      "implemented_hardware_dependent",
-    ),
+    await probedStep(options.probes, "vram", "Detect VRAM", {
+      ok: false,
+      detail: "Live VRAM was not read. Target VRAM is 20 GB.",
+      status: "implemented_hardware_dependent",
+    }, log),
   );
   steps.push(
     step(
@@ -110,44 +170,46 @@ export async function runFirstBootAutomation(
     ),
   );
   steps.push(
-    step(
-      "audio",
-      "Inspect audio devices",
-      false,
-      "Audio device enumeration is hardware-dependent and was not opened.",
-      "documented_not_implemented",
-    ),
+    await probedStep(options.probes, "audio", "Inspect audio devices", {
+      ok: false,
+      detail: "Audio device enumeration is hardware-dependent and was not opened.",
+      status: "documented_not_implemented",
+    }, log),
   );
   const onWindows = platform() === "win32";
   steps.push(
-    step(
-      "windows",
-      "Inspect Windows capabilities",
-      true,
-      onWindows
+    await probedStep(options.probes, "windows", "Inspect Windows capabilities", {
+      ok: true,
+      detail: onWindows
         ? "Host reports win32. Tray/startup/toast still require first-PC validation."
         : `Host is ${platform()}. Windows tray, startup, and toasts are simulated.`,
-      onWindows ? "implemented_hardware_dependent" : "mocked_simulated",
-    ),
+      status: onWindows ? "implemented_hardware_dependent" : "mocked_simulated",
+    }, log),
   );
   steps.push(
-    step(
-      "telemetry",
-      "Inspect telemetry capabilities",
-      false,
-      "AMD ADLX/ADL telemetry, clocks, and power were not read.",
-      "mocked_simulated",
-    ),
+    await probedStep(options.probes, "telemetry", "Inspect telemetry capabilities", {
+      ok: false,
+      detail: "AMD ADLX/ADL telemetry, clocks, and power were not read.",
+      status: "mocked_simulated",
+    }, log),
   );
+  // Both halves must agree. The classification used to test `mode === "live"` alone
+  // while the detail text also required an endpoint, so `mode: "live"` with no endpoint
+  // printed "Optimizer adapter is mock" and classified itself
+  // implemented_hardware_dependent — the report contradicting itself on one line. The
+  // runtime requires both before it builds a live adapter, so the report should too.
+  const optimizerLive = config.optimizer.mode === "live" && Boolean(config.optimizer.endpoint);
   steps.push(
     step(
       "optimizer",
       "Detect optimizer",
       true,
-      config.optimizer.mode === "live" && config.optimizer.endpoint
+      optimizerLive
         ? `Live optimizer endpoint configured: ${config.optimizer.endpoint}`
-        : "Optimizer adapter is mock. The specialist API is not connected.",
-      config.optimizer.mode === "live" ? "implemented_hardware_dependent" : "mocked_simulated",
+        : config.optimizer.mode === "live"
+          ? "Optimizer mode is 'live' but no endpoint is configured, so the adapter is still a mock."
+          : "Optimizer adapter is mock. The specialist API is not connected.",
+      optimizerLive ? "implemented_hardware_dependent" : "mocked_simulated",
     ),
   );
 
@@ -170,31 +232,48 @@ export async function runFirstBootAutomation(
     ),
   );
   steps.push(
-    step(
-      "benchmark",
-      "Model benchmark harness",
-      true,
-      "Harness is installed. It refuses to invent TTFT/throughput unless a local backend actually generates tokens. Not run automatically because this host has no proven local model.",
-      "documented_not_implemented",
-    ),
+    await probedStep(options.probes, "benchmark", "Model benchmark harness", {
+      ok: true,
+      detail:
+        "Harness is installed. It refuses to invent TTFT/throughput unless a local backend actually generates tokens. Not run automatically because this host has no proven local model.",
+      status: "documented_not_implemented",
+    }, log),
   );
 
-  const preferredBackend =
-    profile.backends.find((backend) => backend.id === "ollama" && backend.available)?.id ??
-    profile.backends.find((backend) => backend.id === "llamacpp" && backend.available)?.id ??
-    null;
+  // Use the profile's own answer rather than re-deriving one here. The local version
+  // knew about `ollama` and `llamacpp` only, so on a Vulkan-only host discovery said
+  // "llamacpp-vulkan" and this report said "llamacpp" — two answers to one question,
+  // for the backend CLAUDE.md names as the preferred AMD RDNA3 path.
+  const preferredBackend = profile.preferredBackend ?? null;
   const defaults = {
     hardwareMode: config.hardware.mode,
     optimizerMode: config.optimizer.mode,
-    voiceEnabled: false,
+    // Read from config rather than hard-coded false. A user with voice enabled was
+    // still told "voice=off" by their own first-boot report.
+    voiceEnabled: config.voice.enabled,
     preferredBackend,
   };
+  // `hardware.mode` is recorded everywhere and branched on nowhere: the runtime builds
+  // a simulated hardware source unconditionally, so setting "live" changes no
+  // behaviour. Until a live source exists, saying so is the whole of the honest answer
+  // — a user who set "live" is otherwise entitled to believe it took effect.
+  steps.push(
+    step(
+      "hardware-mode",
+      "Hardware source",
+      true,
+      config.hardware.mode === "live"
+        ? "hardware.mode is 'live', but no live hardware source is implemented yet — readings are still simulated. This setting will take effect on the target PC."
+        : `hardware.mode is '${config.hardware.mode}'; readings are simulated.`,
+      config.hardware.mode === "live" ? "documented_not_implemented" : "mocked_simulated",
+    ),
+  );
   steps.push(
     step(
       "defaults",
       "Choose safe defaults",
       true,
-      `hardware=${defaults.hardwareMode}; optimizer=${defaults.optimizerMode}; voice=off; backend=${preferredBackend ?? "echo/tools"}. No model was auto-crowned fastest.`,
+      `hardware=${defaults.hardwareMode}; optimizer=${defaults.optimizerMode}; voice=${defaults.voiceEnabled ? "on" : "off"}; backend=${preferredBackend ?? "echo/tools"}. No model was auto-crowned fastest.`,
       "implemented_tested",
     ),
   );
@@ -355,6 +434,7 @@ function emptyProfile(
     currentMachine: current,
     targetProfile: config.hardware.target,
     backends: [],
+    preferredBackend: null,
     models: [],
     telemetry: "mocked_simulated",
     audio: "documented_not_implemented",
