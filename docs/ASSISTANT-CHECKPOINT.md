@@ -1,13 +1,17 @@
 # Assistant build — checkpoint
 
 Phase 1 (assistant foundation), Phase 2 (durable runtime + governor + rollback +
-continuity + physical-PC prep) and Phase 3 (closing the loops) are on this branch.
-Phases 1 and 2 are merged into `main` at `e090130`.
+continuity + physical-PC prep), Phase 3 (closing the loops) and Phase 4 (PC-ready
+residency) are on this branch. Phases 1, 2 and 3 are merged into `main` at `d0d807d`.
 
 **Phase 3 closed the loops Phase 2 left open.** Several phase-2 subsystems were, in this
 project's own classification, *implemented and tested but not wired* — real modules with
-no call site asking for the guarantee they offered. That is not a capability the product
-has, and phase 3 is the wiring. See `docs/phase-3-runtime.md`.
+no call site asking for the guarantee they offered. See `docs/phase-3-runtime.md`.
+
+**Phase 4 made Vesper ready to live on the PC.** The Windows startup primitives had no
+call sites; the runtime awaited `knowledge.reindex()` on the critical path; there was
+no readiness state to distinguish "process alive" from "actually ready"; the lifecycle
+controller had no per-hook timeout. All four are addressed. See `docs/residency.md`.
 
 Last touched 2026-08-29. Everything below is observed output or a repo fact.
 
@@ -20,8 +24,8 @@ Last touched 2026-08-29. Everything below is observed output or a repo fact.
 | Authoritative repo | **`MMGSaint/vesper-ai`**, working copy `/home/user/vesper-ai` |
 | Not the target | `/home/user/Vesper-personal-assistant-` is a **second working copy of this same repository**, sitting on a detached HEAD several commits behind the tip. It is not an empty scaffold — earlier checkpoints said so and were wrong. **Do all work in `/home/user/vesper-ai`.** A stale second checkout is an active hazard: it made four adversarial verifier agents report real code as "non-existent" (see `security/BACKLOG.md` §4b). |
 | Work branch | `claude/vesper-local-ai-build-ti8ofa` |
-| HEAD | phase-3 work on the branch, ahead of `main` |
-| `origin/main` | `e23f245` — phases 1 and 2 landed here, CI and CodeQL green on it |
+| HEAD | phase-4 work on the branch, ahead of `main` |
+| `origin/main` | `d0d807d` — phases 1–3 landed here, CI and CodeQL green on it |
 
 Verify git state rather than trusting this table if any time has passed.
 
@@ -125,13 +129,51 @@ screening bypass.
 
 ---
 
+## 2c. Phase 4 additions
+
+| Loop | What closed it |
+|---|---|
+| **Startup registration wired** | Reconcile layer above `startup.ts` with honest three-state inspect, refuses on unknown state, refuses launcher targets that are not a Vesper launcher. Three CLI commands (`--startup-status`/`--enable-startup`/`--disable-startup`) dispatched before `createProductionHost`. Boot-time reconcile in the background. Config write-back through a `patchConfigFile` that preserves keys the patch did not name. |
+| **Readiness states** | Seven-state `ReadinessMonitor` with a monotonic `advanceTo` and component observations. Never regresses to INITIALIZING from a settled state; shutdown states always win. Wired into `runtime.start()`/`stop()` and reported through the doctor. |
+| **Startup no longer blocks on reindex** | `knowledge.reindex()` moved off the critical path into a `void (async () => {})` block. Pinned structurally so a regression that adds `await` back fails a named test. |
+| **Bounded shutdown** | Per-hook `timeoutMs` on the lifecycle controller (default 5 s). Hooks that overshoot are left running and shutdown moves on with an honest timeout error. The bound is a REFERENCED timer, deliberately not unref'd — an unref'd timer would let Node exit before it fired and report success on a shutdown that stalled. |
+| **Doctor coverage** | New `readiness` and `startup-registration` checks. Readiness passes for READY/DEGRADED/CORE_READY (DEGRADED is honest, not broken). Startup fails when the registry disagrees with the preference. |
+
+**Defects found while wiring — every one had an existing test that missed it:**
+
+- The startup primitives' reader `readStartupRegistration` collapsed "no entry" and
+  "we could not look" into `registered: false`. A repair path built on that would
+  rewrite on every boot after a transient reg.exe failure — exactly what a repair path
+  exists to prevent.
+- The launcher target was validated only against control characters. reg.exe runs the
+  string at every logon; anything short of a Vesper-launcher containment check would
+  let a caller register `cmd.exe /c calc`.
+- The PowerShell installer wrapped the Run value in literal double quotes; the reader
+  captures them verbatim. A reconcile that compared the two would rewrite on every
+  boot.
+- `writeConfigIfMissing` refuses when the file exists AND drops entire sections in
+  its `publicConfig` projection. Reusing it as a saver would delete permissions
+  overrides and approved roots. `patchConfigFile` deep-merges and preserves.
+- docs/known-limitations.md and docs/status.md said the startup primitives were
+  "implemented and unit-tested against a fake runner". False: no test injected a
+  runner, and no startup.test.ts existed. Now they exist and use the seam
+  `windows/exec.ts` explicitly documents.
+- `runtime.start()` awaited `knowledge.reindex()` on the critical path — silently
+  adding seconds to logon on a fresh install with a full knowledge root.
+- A pre-existing test-order flake in `security-invariants.test.ts` surfaced under the
+  new timing: two tests read a memory whose key is also pre-seeded, and picked the
+  wrong entry with `.find` when the seed and the write landed in the same millisecond.
+  Fixed by picking by `source: "user"` rather than by insertion order.
+
+---
+
 ## 3. Verified continuously
 
 | Check | Result |
 |---|---|
-| `npm test` | **1023 pass, 0 fail, 0 skipped** (671 at Phase 1 start, 894 at Phase 2 end) |
-| `npm run security:quick` | **361 pass, 0 fail** (297 at Phase 2 end; the gate grew, nothing was weakened) |
-| `npm run hygiene` | clean, 359 files |
+| `npm test` | **1084 pass, 0 fail, 0 skipped** (671 at Phase 1 start, 894 at Phase 2 end, 1023 at Phase 3) |
+| `npm run security:quick` | **373 pass, 0 fail** (361 at Phase 3 end; the gate grew by one file, none dropped) |
+| `npm run hygiene` | clean, 368 files |
 | `npx tsc --noEmit` | clean |
 | Journal adversarial workflow | 30 CONFIRMED findings — all HIGH fixed with regression tests |
 | Phase-2 attack suite | 28 CONFIRMED (1 CRITICAL, 10 HIGH) across scheduler / governor / checkpoint, **plus 12 capsule findings the verifiers wrongly refuted** — all fixed, 37 regression tests |
@@ -254,11 +296,15 @@ real, in-process only) · skills/plugins, model migration, outcome learning
 ## 6. Exact next actions
 
 **The next milestone is the FIRST REAL PC BOOT, not another architecture change.**
-The ordered workflow is `docs/first-pc-boot.md`. Everything below is what remains
-verifiable without that machine.
+The ordered workflow is `docs/first-pc-boot.md`, updated for the residency work in
+`docs/residency.md`. Everything below is what remains verifiable without that machine.
 
 1. **Real Windows hardware probes** — the interface, the checklist and the priority rule
    are ready; the six probes are not written because the machine has been off.
+2. **NEXUS re-detection** — the adapter is constructed once at startup from config, so a
+   `mock → live` transition requires a restart. The shared `classifyOptimizerCapability`
+   is the seam a future re-detection path would feed. Not built yet because a real NEXUS
+   endpoint is a physical-PC prerequisite.
 2. **Correction record producer** — a small watcher that turns optimizer
    observations into `CapsuleCorrectionEntry` values. Closes the mission's
    correction-loop hook.

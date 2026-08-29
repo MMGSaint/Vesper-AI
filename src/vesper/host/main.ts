@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline/promises";
-import { basename, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stdin as input, stdout as output } from "node:process";
 import {
@@ -11,7 +11,12 @@ import {
 import { CLI_HELP, parseCli } from "../cli.ts";
 import { runConsole } from "./console.ts";
 import { VESPER_NAME, VESPER_VERSION } from "../version.ts";
-import { loadHostConfig } from "../config-file.ts";
+import { loadHostConfig, patchConfigFile } from "../config-file.ts";
+import {
+  formatStartupSnapshot,
+  reconcileStartupRegistration,
+  snapshotStartupRegistration,
+} from "../windows/startup-manage.ts";
 import { configFile, crashNoteFile, healthFile, instanceLockFile, resolveVesperDirs } from "../paths.ts";
 import { inspectInstanceLock } from "./instance-lock.ts";
 import { readHealthStatus } from "./health.ts";
@@ -57,6 +62,88 @@ async function flushStdio(): Promise<void> {
   await Promise.all([settle(process.stdout), settle(process.stderr)]);
 }
 
+/**
+ * Handle the three startup-registration CLI commands.
+ *
+ * Deliberately does NOT construct a runtime: the whole point is that a user with a
+ * broken runtime can still fix their startup registration, and running Vesper twice to
+ * repair its Run key would be a footgun. Reads the config file directly and touches
+ * only the Run key and the config file.
+ *
+ * Exit codes are the same shape as the reconcile result:
+ *   0 in-sync   — the intent already matches the registry (or Linux+off)
+ *   1 changed   — a write happened (`enable-startup` wrote, `disable-startup` removed)
+ *   2 refused/unable — nothing was written because it would have been unsafe or we
+ *                     could not look at the registry to decide
+ */
+async function handleStartupCommand(
+  kind: "startup-status" | "enable-startup" | "disable-startup",
+  dirs: ReturnType<typeof resolveVesperDirs>,
+): Promise<number> {
+  const loaded = await loadHostConfig(configFile(dirs));
+  if (!loaded.ok) {
+    console.error(`Config invalid:\n${loaded.errors.join("\n")}`);
+    return 2;
+  }
+  const launcher = resolveLauncherPath(dirs);
+
+  if (kind === "startup-status") {
+    const intent = {
+      enabled: loaded.config.windows.startOnLogin,
+      launcher,
+    };
+    const snapshot = await snapshotStartupRegistration({ intent });
+    console.log(formatStartupSnapshot(snapshot));
+    return snapshot.inSync ? 0 : 2;
+  }
+
+  const enabled = kind === "enable-startup";
+
+  // Reconcile FIRST, patch config second. The reverse order let `--enable-startup` on
+  // Linux flip the persisted preference to `true` before refusing to touch the
+  // registry, which reads as either lying to the user or setting up a future
+  // reconcile-on-boot they never asked for. If we cannot make the registry match, the
+  // preference does not move either.
+  const result = await reconcileStartupRegistration({
+    intent: { enabled, launcher },
+  });
+  console.log(result.detail);
+  if (result.outcome !== "in-sync" && result.outcome !== "changed") {
+    return 2;
+  }
+
+  const patched = await patchConfigFile(configFile(dirs), {
+    windows: { startOnLogin: enabled },
+  });
+  if (!patched.ok) {
+    console.error(`Could not update ${configFile(dirs)}: ${patched.reason}`);
+    return 2;
+  }
+  return result.outcome === "in-sync" ? 0 : 1;
+}
+
+/**
+ * Where the persistent launcher lives, or null when Vesper does not know.
+ *
+ * The runtime is `--experimental-strip-types src/vesper/host/main.ts` and cannot be
+ * pointed at from a Run key directly. The packaged `bin/vesper-host.cmd` (or the
+ * generated one at %LOCALAPPDATA%\Vesper\bin\vesper-host.cmd) is the actual
+ * launcher. This function returns the packaged one if it can find the install root, and
+ * null otherwise — a null result means `--enable-startup` refuses rather than plants a
+ * launcher path Vesper cannot honour.
+ */
+function resolveLauncherPath(dirs: ReturnType<typeof resolveVesperDirs>): string | null {
+  const env = process.env.VESPER_LAUNCHER;
+  if (env && env.length > 0) return env;
+  // The installer writes vesper-host.cmd under <install-root>/bin. `dirs.root` is that
+  // install root when running from an installed layout; on a source checkout it points
+  // at the repository root, where packaging/windows/vesper-host.cmd is shipped.
+  if (dirs.root) {
+    return join(dirs.root, "bin", "vesper-host.cmd");
+  }
+  return null;
+}
+
 async function main() {
   const command = parseCli(process.argv.slice(2));
   if (command.kind === "help") {
@@ -85,6 +172,22 @@ async function main() {
     }
     console.log(`Config OK (${loaded.source}) at ${loaded.path}`);
     return;
+  }
+
+  // Startup registration commands are deliberately handled BEFORE createProductionHost:
+  // they touch only the Run key and the config file, they must not require a runtime
+  // (the whole point is that a user with a broken runtime can still fix their
+  // registration), and they must not acquire the instance lock (repairing startup while
+  // Vesper is running should be possible from a second terminal). Three-way exit code:
+  // 0 in-sync, 1 changed, 2 refused/unable.
+  if (
+    command.kind === "startup-status" ||
+    command.kind === "enable-startup" ||
+    command.kind === "disable-startup"
+  ) {
+    const exit = await handleStartupCommand(command.kind, dirs);
+    await flushStdio();
+    process.exit(exit);
   }
 
   // Status must work *while* a host is running, so it reads the health file rather

@@ -9,6 +9,7 @@ import { registerBuiltinTools } from "./tools/builtin.ts";
 import { TOOL_CALL_TASK_KIND, createToolCallExecutor } from "./tool-executor.ts";
 import { CorrectionStore } from "./corrections.ts";
 import { HardwareProbeRegistry, registerPlaceholderProbes } from "./hardware/probes.ts";
+import { ReadinessMonitor } from "./host/readiness.ts";
 import { OptimizerCorrectionProducer } from "./correction-producer.ts";
 import {
   FS_WRITE_CHECKPOINT_TOOL,
@@ -135,6 +136,7 @@ export class VesperRuntime {
   readonly confirmations: Map<string, PendingConfirmation>;
   readonly instanceId = createId("runtime");
   readonly background: BackgroundRuntime;
+  readonly readiness: ReadinessMonitor;
   readonly voice: VoiceModule;
   readonly voiceSession: VoiceSession;
   readonly scheduler: IdleScheduler;
@@ -161,6 +163,7 @@ export class VesperRuntime {
       checkpoints: CheckpointStore;
       corrections: CorrectionStore;
       probes: HardwareProbeRegistry;
+      readiness: ReadinessMonitor;
       correctionProducer: OptimizerCorrectionProducer;
       notifications: NotificationHub;
       hardware: SimulatedHardware;
@@ -196,6 +199,7 @@ export class VesperRuntime {
     this.checkpoints = parts.checkpoints;
     this.corrections = parts.corrections;
     this.probes = parts.probes;
+    this.readiness = parts.readiness;
     this.correctionProducer = parts.correctionProducer;
     this.notifications = parts.notifications;
     this.hardware = parts.hardware;
@@ -250,14 +254,32 @@ export class VesperRuntime {
     }
     if (!this.skipDiscovery) {
       this.discoveryPromise = this.discoverInBackground();
+    } else {
+      // Discovery was skipped, so nothing else in this run is going to probe backends
+      // or mark the manifest ready. Mark them settled honestly now — degraded on the
+      // manifest side is the right reading because refreshCapabilities happens below
+      // regardless, but the backends component would otherwise stay pending forever
+      // and hold the aggregate at CORE_READY on tests that never intended to.
+      this.readiness.markComponent("backends", "degraded", "discovery skipped for this run");
     }
-    try {
-      await this.knowledge.reindex();
-    } catch (error) {
-      this.log.warn("lifecycle", "Knowledge reindex failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+
+    // Knowledge reindex used to be AWAITED here, and directly blocked start() on the
+    // largest optional subsystem the runtime has. On a fresh install with a full
+    // knowledge root that could add tens of seconds to logon time, on the one OS
+    // Vesper targets. It runs in the background now, and reports through the readiness
+    // monitor when it finishes — the same shape the rest of the discovery path uses.
+    void (async () => {
+      try {
+        await this.knowledge.reindex();
+        this.readiness.markComponent("knowledge", "ready", "reindex complete");
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        this.log.warn("lifecycle", "Knowledge reindex failed", { error: detail });
+        // Degraded, not failed: the assistant is still useful without an index. FAILED
+        // is reserved for a runtime that cannot serve any request.
+        this.readiness.markComponent("knowledge", "degraded", `reindex failed: ${detail}`);
+      }
+    })();
     // Stored state that could not be read is a security event, not a footnote.
     //
     // The registry treats a corrupt file as "costs knowledge of peers, never the ability
@@ -303,7 +325,17 @@ export class VesperRuntime {
     // Record what this device can actually do. Until this runs, the registry holds a
     // device with no manifest, and routing correctly refuses to send it work — which
     // looks exactly like a machine that cannot do anything.
-    await this.refreshCapabilities();
+    const manifest = await this.refreshCapabilities();
+    this.readiness.markComponent(
+      "manifest",
+      manifest ? "ready" : "degraded",
+      manifest ? "refreshed at start" : "refresh returned null; using previous manifest",
+    );
+
+    // Core is up. Deterministic intents, tools, memory, permissions and the manifest
+    // are all live. Optional subsystems (model probes, knowledge index) are still
+    // catching up — the monitor advances to READY or DEGRADED when they answer.
+    this.readiness.advanceTo("CORE_READY");
     return this.capability;
   }
 
@@ -345,6 +377,12 @@ export class VesperRuntime {
       });
       this.capability = this.firstBootReport.profile;
       await this.models.probeAll();
+      const anyLocal = this.models.status().available.some((p) => p.available && p.kind === "local");
+      this.readiness.markComponent(
+        "backends",
+        anyLocal ? "ready" : "degraded",
+        anyLocal ? "at least one local backend answered" : "no local backend answered",
+      );
       // The manifest built at startup predates this probe, so redo it now that the
       // backends have actually answered.
       await this.refreshCapabilities();
@@ -373,6 +411,7 @@ export class VesperRuntime {
   }
 
   async stop() {
+    this.readiness.advanceTo("STOPPING");
     this.started = false;
     this.memory.clearSession();
     this.scheduler.stop();
@@ -385,6 +424,7 @@ export class VesperRuntime {
     this.obs.disconnect();
     await this.events.flush();
     await this.background.stop();
+    this.readiness.advanceTo("STOPPED");
     this.log.info("lifecycle", "Vesper stopped");
   }
 
@@ -1268,9 +1308,19 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
       );
     },
   });
+  const readiness = new ReadinessMonitor({
+    events,
+    log,
+    components: [
+      { id: "manifest", description: "capability manifest", optional: false, detail: "not yet refreshed" },
+      { id: "backends", description: "local model backends", optional: config.models.roles !== undefined, detail: "not yet probed" },
+      { id: "knowledge", description: "knowledge index", optional: true, detail: "not yet indexed" },
+    ],
+  });
   const runtime = new VesperRuntime(config, {
     log,
     probes,
+    readiness,
     storage,
     memory,
     knowledge,

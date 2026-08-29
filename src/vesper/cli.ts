@@ -11,6 +11,9 @@ export type CliCommand =
   | { kind: "export-memory" }
   | { kind: "client-hello"; skipDiscovery: boolean }
   | { kind: "first-boot-report" }
+  | { kind: "startup-status" }
+  | { kind: "enable-startup" }
+  | { kind: "disable-startup" }
   | { kind: "unknown"; reason: string };
 
 const COMMANDS = new Set([
@@ -27,6 +30,9 @@ const COMMANDS = new Set([
   "--client-hello",
   "--ask",
   "--first-boot-report",
+  "--startup-status",
+  "--enable-startup",
+  "--disable-startup",
 ]);
 
 export function parseCli(argv: string[]): CliCommand {
@@ -78,6 +84,12 @@ export function parseCli(argv: string[]): CliCommand {
       return { kind: "client-hello", skipDiscovery };
     case "--first-boot-report":
       return { kind: "first-boot-report" };
+    case "--startup-status":
+      return { kind: "startup-status" };
+    case "--enable-startup":
+      return { kind: "enable-startup" };
+    case "--disable-startup":
+      return { kind: "disable-startup" };
     default:
       return {
         kind: "unknown",
@@ -107,6 +119,9 @@ Commands:
   --client-hello    Print the companion protocol hello (no listener, no token)
   --first-boot-report
                     Run first-boot discovery to completion and print the report
+  --startup-status  Show whether Vesper is registered to start on Windows logon
+  --enable-startup  Register Vesper to start at logon (per-user, no elevation)
+  --disable-startup Remove the logon startup registration
 
 Flags:
   --skip-discovery  Skip first-boot backend probes

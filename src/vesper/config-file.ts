@@ -139,3 +139,57 @@ export async function writeConfigIfMissing(configPath: string, config: VesperCon
   await writeFile(configPath, `${JSON.stringify(publicConfig, null, 2)}\n`, "utf8");
   return true;
 }
+
+/**
+ * Apply a shallow patch to an on-disk config file, preserving every other key the user
+ * wrote.
+ *
+ * This is the missing writer path. `writeConfigIfMissing` (above) refuses when a file
+ * already exists, and its `publicConfig` projection drops entire sections — reusing it
+ * to update an existing file would delete the user's permission overrides, approved
+ * roots, obs settings, and embeddings config. That would recreate the exact defect the
+ * `lockedDownConfig` fallback exists to prevent.
+ *
+ * `patchConfigFile` reads the file if present, deep-merges `patch` over its RAW parsed
+ * shape (not over defaults — the file may deliberately omit a key), and writes the
+ * result back. Only own keys are ever set; prototype-poisoning attempts are refused by
+ * the shared merge helper. When no file exists, the patch is written as the whole file
+ * so a caller can bootstrap without a separate `writeConfigIfMissing` step.
+ *
+ * Deliberately narrow: this is not a general config editor. It exists so a startup
+ * toggle from the CLI can survive a restart without needing the user to hand-edit the
+ * JSON.
+ */
+export async function patchConfigFile(
+  configPath: string,
+  patch: Record<string, unknown>,
+): Promise<{ ok: true; wrote: boolean } | { ok: false; reason: string }> {
+  let raw: string | null = null;
+  try {
+    raw = await readFile(configPath, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      return { ok: false, reason: `Could not read ${configPath}: ${(error as Error).message}` };
+    }
+  }
+  let current: Record<string, unknown> = {};
+  if (raw !== null) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (!isPlainObject(parsed)) {
+        return {
+          ok: false,
+          reason: `${configPath} is not a JSON object; refusing to overwrite an unfamiliar shape.`,
+        };
+      }
+      current = parsed;
+    } catch (error) {
+      return { ok: false, reason: `Could not parse ${configPath}: ${(error as Error).message}` };
+    }
+  }
+  const merged = mergeOverDefaults(current, patch);
+  await mkdir(dirname(configPath), { recursive: true });
+  await writeFile(configPath, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+  return { ok: true, wrote: true };
+}
