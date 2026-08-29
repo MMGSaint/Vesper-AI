@@ -1221,6 +1221,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     hardware,
     optimizer,
     confirmations,
+    // Catch-up sources. Outstanding work comes from the queue rather than from event
+    // counts, and the journal lets the digest say honestly how far back it can see.
+    tasks: taskQueue,
+    journal,
+    corrections,
     history,
     maxToolIterations: config.agent.maxToolIterations,
     deviceId: deviceIdentity.deviceId,

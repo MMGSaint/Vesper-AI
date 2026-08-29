@@ -10,6 +10,9 @@ import type { KnowledgeIndex } from "./knowledge/rag.ts";
 import type { ModelRouter } from "./models/router.ts";
 import type { NotificationHub } from "./notifications.ts";
 import type { EventBus } from "./events.ts";
+import type { EventJournal } from "./event-journal.ts";
+import type { TaskQueue } from "./distributed/tasks.ts";
+import type { CorrectionStore } from "./corrections.ts";
 import type { ToolRegistry } from "./tools/registry.ts";
 import type { WorkspaceManager } from "./workspaces.ts";
 import type { SimulatedHardware } from "./hardware/simulated.ts";
@@ -66,6 +69,25 @@ interface AgentDeps {
   hardware: SimulatedHardware;
   optimizer: OptimizerAdapter;
   confirmations: Map<string, PendingConfirmation>;
+  /**
+   * Unfinished work, for catch-up.
+   *
+   * Read from the QUEUE rather than counted from events, because the two answer
+   * different questions. Events say what happened while the ring held them; the queue
+   * says what is still outstanding right now — which is what someone coming back to
+   * their machine is actually asking about, and which survives a restart that the ring
+   * does not.
+   */
+  tasks?: TaskQueue;
+  /**
+   * Durable events, for looking back further than the 500-entry ring.
+   *
+   * Optional throughout: a runtime without a journal reports on the ring alone rather
+   * than failing, and says nothing about the period it cannot see.
+   */
+  journal?: EventJournal;
+  /** Decision history — where an expectation met contrary evidence. */
+  corrections?: CorrectionStore;
   history: ChatMessage[];
   maxToolIterations: number;
 }
@@ -1058,6 +1080,79 @@ export class Agent {
     }
     if (system.length > 0) {
       lines.push(`System/OBS state changes (${system.length}).`);
+    }
+
+    // Outstanding work, read from the queue rather than counted from events.
+    //
+    // Event counts answer "what happened while the ring held it"; the queue answers
+    // "what is still waiting", which is the question someone returning to their machine
+    // is actually asking, and which survives a restart the ring does not. A task that
+    // was queued three boots ago and is still blocked appears here and appears nowhere
+    // in the ring.
+    if (this.deps.tasks) {
+      const open = (await this.deps.tasks.list()).filter(
+        (task) => task.state === "queued" || task.state === "assigned" || task.state === "blocked",
+      );
+      if (open.length > 0) {
+        const byState = new Map<string, number>();
+        for (const task of open) byState.set(task.state, (byState.get(task.state) ?? 0) + 1);
+        const breakdown = [...byState.entries()].map(([state, n]) => `${n} ${state}`).join(", ");
+        const examples = open
+          .slice(0, 2)
+          .map((task) => sanitiseInline(task.description, 60))
+          .join(" · ");
+        lines.push(`Still outstanding (${open.length}): ${breakdown}. ${examples}`);
+      }
+    }
+
+    // Decisions Vesper made while nobody was watching.
+    //
+    // Only autonomous ones are worth a catch-up line. A decision the user was present
+    // for is not news to them, and listing it turns the digest into a transcript of
+    // their own session.
+    const autonomous = events.filter(
+      (event) => event.type === "autonomy.decision" || event.type === "autonomy.no_action",
+    );
+    if (autonomous.length > 0) {
+      const noAction = autonomous.filter((event) => event.type === "autonomy.no_action").length;
+      const acted = autonomous.length - noAction;
+      const parts: string[] = [];
+      if (acted) parts.push(`${acted} acted on`);
+      // "Considered and did nothing" is a real decision and reporting it is the point of
+      // recording it. A digest that only ever shows action makes restraint invisible.
+      if (noAction) parts.push(`${noAction} deliberately left alone`);
+      lines.push(`Autonomy decisions: ${parts.join(", ")}.`);
+    }
+
+    // Corrections — where an expectation met contrary evidence.
+    if (this.deps.corrections) {
+      const recent = await this.deps.corrections.list({ limit: 3 });
+      if (recent.length > 0) {
+        const wrong = recent.filter((record) => record.outcome === "assumption_wrong");
+        // Lead with the ones where Vesper was wrong: those are what the user most needs
+        // to know, and burying them under a tally would be a way of not saying it.
+        const headline = (wrong[0] ?? recent[recent.length - 1])!;
+        lines.push(
+          `Corrections (${recent.length} recent): ${sanitiseInline(headline.correction, 140)}` +
+            ` — from ${headline.source.origin}.`,
+        );
+      }
+    }
+
+    // How far back this digest can actually see.
+    //
+    // The ring holds 500 events and is lost on restart. Saying "nothing happened" when
+    // the truth is "nothing I still have a record of" is the kind of quiet overclaim the
+    // honesty rules exist to prevent, so the horizon is stated whenever there is a
+    // journal to state it from.
+    if (this.deps.journal && events.length > 0) {
+      const oldestInRing = events[0]!.at;
+      const durable = await this.deps.journal
+        .query({ since: oldestInRing, limit: 1 })
+        .catch(() => []);
+      if (durable.length === 0) {
+        lines.push(`This covers what is still in memory since ${oldestInRing}.`);
+      }
     }
     if (lifecycle.length > 0) {
       const started = lifecycle.filter((event) => event.type === "lifecycle.start").length;
