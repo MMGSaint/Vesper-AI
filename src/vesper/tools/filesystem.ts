@@ -1,4 +1,4 @@
-import { readdir, mkdir, open, lstat, unlink } from "node:fs/promises";
+import { readdir, mkdir, open, lstat, unlink, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import {
@@ -79,10 +79,64 @@ export async function resolveApprovedPathReal(
   requested: string,
 ): Promise<{ ok: true; path: string; root: string } | { ok: false; summary: string }> {
   const lexical = resolveApprovedPath(approvedRoots, requested);
-  if (!lexical.ok) return lexical;
-  const real = await resolveRealWithinRoot(lexical.root, lexical.path);
+  if (lexical.ok) {
+    const real = await resolveRealWithinRoot(lexical.root, lexical.path);
+    if (!real.ok) return { ok: false, summary: real.reason };
+    return { ok: true, path: real.path, root: real.root };
+  }
+
+  // Second pass against the roots as the filesystem actually names them.
+  //
+  // The defect this fixes, reproduced before it was written: an approved root that is
+  // itself a symlink — or a macOS /var, or a Windows TEMP in 8.3 short form — makes
+  // every fs_write rollback refuse. The write resolves and records the checkpoint under
+  // the REAL path, as it must, so that a rollback restores the file that was written.
+  // Re-checking that real path later then fails the LEXICAL comparison above, because it
+  // is compared against the root as the user spelled it. `resolveRealWithinRoot` handles
+  // this case correctly and never gets the chance: the lexical pass refuses first.
+  //
+  // The user sees a rollback that refuses with "the state has drifted", which is
+  // indistinguishable from the drift protection working.
+  //
+  // This is NOT a widening of containment, and the distinction matters:
+  //   - `realpath(R)` and `R` are the same directory, so a path under one is inside the
+  //     other. No file becomes reachable that was not reachable before — only an
+  //     additional NAME for a file the user already approved.
+  //   - Every refusal in `resolveApprovedPath` that is about the REQUEST rather than the
+  //     root — traversal, null bytes, dangerous roots, Vesper's own paths — runs again
+  //     unchanged in this pass.
+  //   - `resolveRealWithinRoot` still performs the authoritative post-symlink check.
+  // Mutation-checked against the containment suite: the escape tests still fail if the
+  // real check is removed.
+  const canonical = await canonicalRoots(approvedRoots);
+  if (canonical.length === 0) return lexical;
+  const second = resolveApprovedPath(canonical, requested);
+  // Keep the FIRST refusal. It names the root the user configured, which is the one they
+  // can act on; a message about a path they never typed would be a worse answer.
+  if (!second.ok) return lexical;
+  const real = await resolveRealWithinRoot(second.root, second.path);
   if (!real.ok) return { ok: false, summary: real.reason };
   return { ok: true, path: real.path, root: real.root };
+}
+
+/**
+ * The approved roots as the filesystem names them, keeping only those that differ.
+ *
+ * An empty result means canonicalisation changed nothing and the second pass would
+ * repeat the first exactly.
+ */
+async function canonicalRoots(approvedRoots: string[]): Promise<string[]> {
+  const out: string[] = [];
+  for (const root of approvedRoots) {
+    try {
+      const real = await realpath(root);
+      if (real !== root) out.push(real);
+    } catch {
+      // A root that does not exist cannot be canonicalised. Nothing to add; the first
+      // pass's refusal stands.
+    }
+  }
+  return out;
 }
 
 /**

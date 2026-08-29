@@ -14,7 +14,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, symlink, link, stat, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, symlink, link, stat, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -31,7 +31,12 @@ import type { Logger } from "../logging.ts";
 const OUTSIDE_SECRET = "OUTSIDE-SECRET-MUST-SURVIVE";
 
 async function sandbox() {
-  const base = await mkdtemp(join(tmpdir(), "vesper-fsroll-"));
+  // realpath the sandbox. On Windows the runner's TEMP is an 8.3 short name
+  // (C:\Users\RUNNERA~1\...) and on macOS /var is a symlink, so a test that compared a
+  // recorded real path against an un-canonicalised fixture path failed on those hosts
+  // for a reason that had nothing to do with the behaviour under test. The symlinked
+  // root is covered deliberately below instead of arriving by accident.
+  const base = await realpath(await mkdtemp(join(tmpdir(), "vesper-fsroll-")));
   const approved = join(base, "approved");
   const outside = join(base, "outside");
   await mkdir(approved, { recursive: true });
@@ -412,6 +417,104 @@ describe("rollback cannot cross the filesystem boundary", () => {
 
     assert.equal(outcome.applied, false, "rollback-as-delete must not reach outside the roots either");
     assert.equal(await exists(join(outside, "existing.txt")), true, "the outside file must still exist");
+  });
+});
+
+describe("an approved root that is itself a symlink still round-trips", () => {
+  /**
+   * Found by windows-latest, and it is a product defect rather than a Windows one.
+   *
+   * A write resolves its target through symlinks and records the checkpoint under the
+   * REAL path — it must, or a rollback would restore a different file than the one
+   * written. Re-checking that real path later then failed the LEXICAL comparison,
+   * because it was compared against the root as the user spelled it.
+   *
+   * So for anyone whose approved root is a symlink — or on macOS, where /var is one —
+   * every fs_write rollback refused with "the state has drifted", which is exactly what
+   * the drift protection looks like when it is working. Silent, and wrong.
+   */
+  async function linkedSandbox() {
+    const base = await realpath(await mkdtemp(join(tmpdir(), "vesper-fslink-")));
+    const real = join(base, "real");
+    const outside = join(base, "outside");
+    await mkdir(real, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "secret.txt"), OUTSIDE_SECRET, "utf8");
+    const linked = join(base, "linked");
+    await symlink(real, linked);
+    // The user configures the LINK as their approved root, which is entirely reasonable.
+    return { base, real, linked, outside, roots: [linked] };
+  }
+
+  it("rolls back a write made under a symlinked approved root", async () => {
+    const { real, linked, roots } = await linkedSandbox();
+    await writeFile(join(real, "notes.txt"), "ORIGINAL", "utf8");
+    const store = newStore();
+    store.registerReverser(FS_WRITE_CHECKPOINT_TOOL, fsWriteReverser(() => roots));
+
+    await writeApproved(roots, join(linked, "notes.txt"), "REPLACED", false, { checkpointStore: store });
+    const [record] = await store.list({ tool: FS_WRITE_CHECKPOINT_TOOL });
+    const outcome = await store.rollback(record!.id);
+
+    assert.equal(outcome.applied, true, `rollback refused: ${JSON.stringify(outcome)}`);
+    assert.equal(await readFile(join(real, "notes.txt"), "utf8"), "ORIGINAL");
+  });
+
+  it("still refuses a path outside the root the link points at", async () => {
+    // The canonicalisation pass must not have widened anything. Same directory, extra
+    // name; not extra reach.
+    const { outside, roots } = await linkedSandbox();
+
+    const read = await readApprovedExact(roots, join(outside, "secret.txt"));
+    const write = await writeApproved(roots, join(outside, "secret.txt"), "PWNED");
+
+    assert.equal(read.ok, false, "reading outside the root must still be refused");
+    assert.equal(write.ok, false, "writing outside the root must still be refused");
+    assert.equal(await readFile(join(outside, "secret.txt"), "utf8"), OUTSIDE_SECRET);
+  });
+
+  it("refuses traversal from the canonical root just as from the configured one", async () => {
+    const { linked, roots } = await linkedSandbox();
+    const escape = await writeApproved(roots, join(linked, "..", "outside", "secret.txt"), "PWNED");
+    assert.equal(escape.ok, false);
+  });
+
+  it("refuses a link INSIDE the canonical root that points out of it", async () => {
+    // The escape vector specific to the second pass, and it needed its own test: a path
+    // that fails the lexical check against the CONFIGURED root, passes it against the
+    // CANONICAL one, and then leaves the root once symlinks are followed.
+    //
+    // Nothing else exercises the `resolveRealWithinRoot` call on that branch — mutation
+    // confirmed it: deleting the real check there failed no test until this one existed.
+    // A new code path whose security check is unexercised is the same defect as not
+    // having the check.
+    const { real, outside, roots } = await linkedSandbox();
+    await symlink(outside, join(real, "way-out"));
+
+    // Named through the REAL root, so only the canonical pass can accept it lexically.
+    const read = await readApprovedExact(roots, join(real, "way-out", "secret.txt"));
+    const write = await writeApproved(roots, join(real, "way-out", "secret.txt"), "PWNED");
+
+    assert.equal(read.ok, false, "reading through a link out of the root must be refused");
+    assert.equal(write.ok, false, "writing through a link out of the root must be refused");
+    assert.equal(
+      await readFile(join(outside, "secret.txt"), "utf8"),
+      OUTSIDE_SECRET,
+      "the file outside the root must be untouched",
+    );
+  });
+
+  it("refuses a DANGLING link inside the canonical root", async () => {
+    // The dangling case is the one that produced the original CRITICAL: realpath reports
+    // it as "does not exist yet", so the check passed while the write followed the link
+    // out. It must be refused on the canonical branch too.
+    const { real, outside, roots } = await linkedSandbox();
+    await symlink(join(outside, "not-yet.txt"), join(real, "dangling"));
+
+    const write = await writeApproved(roots, join(real, "dangling"), "PWNED");
+
+    assert.equal(write.ok, false);
+    assert.equal(await exists(join(outside, "not-yet.txt")), false, "nothing may appear outside the root");
   });
 });
 
