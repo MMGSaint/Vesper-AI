@@ -15,6 +15,13 @@ export function resolveVesperDirs(input?: {
   if (input?.dataDir) {
     return layout(input.dataDir);
   }
+  // A test or a developer running against a scratch directory can point every dir at
+  // one place with a single env var. Never consulted in production because
+  // resolveVesperDirs is called with production:true from host/main.ts, which routes
+  // through the LOCALAPPDATA/XDG branches above instead.
+  if (env.VESPER_DATA_DIR) {
+    return layout(env.VESPER_DATA_DIR);
+  }
 
   if (production && platform === "win32") {
     const local = env.LOCALAPPDATA ?? join(env.USERPROFILE ?? homedir(), "AppData", "Local");

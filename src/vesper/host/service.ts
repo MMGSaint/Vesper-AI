@@ -21,6 +21,7 @@ import type { VesperDirs } from "../types.ts";
 import { VESPER_VERSION } from "../version.ts";
 import { createClientGateway, type VesperClientGateway } from "../client/gateway.ts";
 import { createLifecycleController, type LifecycleController } from "../windows/lifecycle.ts";
+import { reconcileStartupRegistration } from "../windows/startup-manage.ts";
 import { createHostNotificationAdapter, type HostNotificationAdapter } from "../windows/notifications.ts";
 import {
   acquireInstanceLock,
@@ -306,7 +307,57 @@ export async function createProductionHost(options?: {
   beat.unref?.();
 
   await host.writeHealth();
+
+  // Reconcile the Windows Run key against the user's preference, in the background and
+  // never blocking startup. This is what makes `windows.startOnLogin` a live setting
+  // rather than one that only takes effect through a hand-run CLI command:
+  //
+  //   - Config says enabled and reg.exe agrees on the same launcher path → unchanged.
+  //   - Config says enabled and reg.exe is out of date              → repair.
+  //   - Config says disabled and reg.exe still has an entry         → remove.
+  //   - Non-Windows, or reg.exe cannot answer                       → no-op.
+  //
+  // `startup-manage.ts` refuses to act on 'unknown' state and refuses launchers that
+  // do not look right, so a transient failure or a hostile config value produces a
+  // quiet log and NEVER an unintended write. A failing reconcile is not fatal — the
+  // user's assistant is not less useful because their logon entry did not converge.
+  const launcher = resolveLauncherPath(dirs);
+  void (async () => {
+    try {
+      const result = await reconcileStartupRegistration({
+        intent: { enabled: runtime.config.windows.startOnLogin, launcher },
+      });
+      if (result.outcome === "changed") {
+        log.info("lifecycle", "Startup registration reconciled", { detail: result.detail });
+      } else if (result.outcome === "refused" || result.outcome === "unable") {
+        log.debug?.("lifecycle", "Startup registration not converged", { detail: result.detail });
+      }
+    } catch (error) {
+      log.warn("lifecycle", "Startup reconcile failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  })();
+
   return host;
+}
+
+/**
+ * Where the persistent launcher lives, or null when Vesper does not know.
+ *
+ * Duplicated from host/main.ts's helper because the two are wired into different call
+ * paths (the CLI runs before createProductionHost; the reconcile runs at the tail of
+ * createProductionHost) and threading a shared helper would either widen the CLI's
+ * dependency graph or add an argument to createProductionHost that only matters on
+ * Windows. Two callers, two lines each — a factored helper does not earn its place.
+ */
+function resolveLauncherPath(dirs: VesperDirs): string | null {
+  const env = process.env.VESPER_LAUNCHER;
+  if (env && env.length > 0) return env;
+  if (dirs.root) {
+    return join(dirs.root, "bin", "vesper-host.cmd");
+  }
+  return null;
 }
 
 export { formatDoctor };
