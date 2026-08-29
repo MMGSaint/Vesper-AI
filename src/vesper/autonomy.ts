@@ -127,6 +127,16 @@ export interface AutonomyPolicy {
   perCategory?: Record<string, AutonomyLevel>;
   /** Rate budgets — any matching pattern that has been exhausted refuses the call. */
   budgets?: AutonomyBudget[];
+  /**
+   * Ceiling applied to any request the scheduler is driving.
+   *
+   * The governor only ever tightens, so this is a ceiling and not a grant: a scheduled
+   * request gets the stricter of its ordinary level and this one. It exists because
+   * "the user asked me to do this" and "a timer said it was time" deserve different
+   * amounts of rope even for the same tool, and the difference belongs somewhere that
+   * cannot accidentally widen — which is here rather than in the scheduler.
+   */
+  scheduledCeiling?: AutonomyLevel;
   /** Argument-shape gates. */
   argumentGates?: ArgumentGate[];
 }
@@ -212,6 +222,13 @@ export function evaluateAutonomy(
       level = stricterAutonomy(level, override);
     }
   }
+  // An unattended request is capped before anything else is considered. Applied through
+  // stricterAutonomy like every other rule, so a policy that set a *laxer* ceiling than
+  // the tool's own level cannot raise it.
+  if (input.origin?.kind === "scheduled" && isAutonomyLevel(policy.scheduledCeiling)) {
+    level = stricterAutonomy(level, policy.scheduledCeiling);
+  }
+
   // Argument gates can tighten further based on args shape.
   const argMatches: ArgumentGate[] = [];
   if (policy.argumentGates) {
@@ -602,6 +619,11 @@ export function defaultAutonomyPolicy(): AutonomyPolicy {
       // Anything security-touching must be PREPARE at minimum.
       "security.": "PREPARE",
     },
+    // Work the scheduler drives while nobody is watching stops at AUTO_SAFE. That is
+    // the same level most write tools already sit at, so this is not a new restriction
+    // on ordinary tasks; what it does is stop a future policy that raises a tool to
+    // AUTO_ADVANCED or FULL from silently raising it for unattended execution too.
+    scheduledCeiling: "AUTO_SAFE",
     budgets: [],
   };
 }

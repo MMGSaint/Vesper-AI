@@ -24,6 +24,7 @@ import type { IdleScheduler } from "../scheduler.ts";
 import type { BenchmarkHarness } from "../models/benchmark.ts";
 import type { CheckpointStore } from "../checkpoint.ts";
 import { listApproved, readApproved, writeApproved } from "./filesystem.ts";
+import { TOOL_CALL_TASK_KIND } from "../tool-executor.ts";
 import { mcpBridgeStatus } from "../integrations/mcp.ts";
 import { detectApprovedApps } from "../windows/apps.ts";
 import { classifyDeviceIntent, resolveTarget } from "../distributed/intent.ts";
@@ -956,6 +957,15 @@ export function registerBuiltinTools(input: {
           type: "string",
           description: "The device the user named, e.g. 'my desktop'. Treated as a requirement.",
         },
+        tool: {
+          type: "string",
+          description:
+            "Optional. A tool to run when the task comes due. It runs unattended, so it must be one that needs no confirmation.",
+        },
+        toolArgs: {
+          type: "object",
+          description: "Optional. Arguments for `tool`, validated against that tool's own schema when it runs.",
+        },
       },
       ["description"],
     ),
@@ -991,12 +1001,28 @@ export function registerBuiltinTools(input: {
         eligibleDevices = [resolved.device.identity.deviceId];
       }
 
+      // A task that names a tool gets the executor kind; one that does not stays a
+      // description-only reminder that no scheduler will start on its own.
+      //
+      // This does not widen what the caller can do. Whoever can call `task_create` can
+      // already call any tool they are permitted; queueing one only defers it, and the
+      // deferred call runs under a `scheduled` origin, which reaches strictly LESS than
+      // a live request — no confirm-tier tool, nothing that administers trust, nothing
+      // on the trusted-only list. The task record is not a stored permission: the whole
+      // chain is re-evaluated at execution time against the state that holds then.
+      const namedTool = str(args, "tool");
+      const toolArgs =
+        args.toolArgs && typeof args.toolArgs === "object" && !Array.isArray(args.toolArgs)
+          ? (args.toolArgs as JsonObject)
+          : {};
       const created = await tasks.create({
         description: str(args, "description"),
         createdBy: selfDeviceId ?? "unknown",
         requiredCapabilities: required,
         preferredDevice: str(args, "preferredDevice") || undefined,
         eligibleDevices,
+        kind: namedTool ? TOOL_CALL_TASK_KIND : undefined,
+        args: namedTool ? ({ tool: namedTool, args: toolArgs } as JsonObject) : undefined,
       });
       // Route immediately so the reply says where it will run, or honestly that it will not yet.
       const scheduled = await tasks.schedule(await deviceRegistry.list());

@@ -538,7 +538,20 @@ export class TaskQueue {
    * Refuses if the task is already terminal — the same "no overwriting committed
    * work" rule that guards complete().
    */
-  async fail(id: string, error: string): Promise<VesperTask | undefined> {
+  /**
+   * Record a failure.
+   *
+   * `opts.retryable: false` fails the task outright instead of re-queueing it, for the
+   * class of failure that will never come out differently. A permission refusal is the
+   * motivating case: retrying it three times produces three identical refusals, three
+   * audit entries and three journal events, and burns the retry budget that exists for
+   * transient problems. "You may not do this" is an answer, not an outage.
+   */
+  async fail(
+    id: string,
+    error: string,
+    opts: { retryable?: boolean } = {},
+  ): Promise<VesperTask | undefined> {
     let refused = false;
     const updated = await this.mutate(id, (task) => {
       if (task.state === "done" || task.state === "failed" || task.state === "cancelled") {
@@ -547,7 +560,8 @@ export class TaskQueue {
       }
       task.error = error;
       task.assignedTo = null;
-      task.state = task.retry.attempts >= task.retry.maxAttempts ? "failed" : "queued";
+      const exhausted = task.retry.attempts >= task.retry.maxAttempts;
+      task.state = opts.retryable === false || exhausted ? "failed" : "queued";
     });
     if (refused) return undefined;
     if (updated) {

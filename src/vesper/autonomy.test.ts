@@ -482,3 +482,89 @@ describe("AutonomyGovernor cannot relax — one-way rule", () => {
     assert.equal(r.decision.allowed, false);
   });
 });
+
+describe("unattended work is capped below what a person can do", () => {
+  const scheduledOrigin: RequestOrigin = { kind: "scheduled" };
+  const atKeyboard: RequestOrigin = { kind: "local" };
+
+  it("tightens a scheduled request to the ceiling", async () => {
+    // The ceiling exists for the case the default policy does NOT currently produce: a
+    // tool raised to FULL or AUTO_ADVANCED for interactive use. Without it, raising a
+    // tool's level for a person at the keyboard silently raises it for a timer too.
+    const policy: AutonomyPolicy = { default: "FULL", scheduledCeiling: "AUTO_SAFE" };
+
+    const scheduled = evaluateAutonomy(
+      { tool: tool("app_launch"), args: {}, origin: scheduledOrigin, workspaceId: "general", gateDecision: decision() },
+      policy,
+      new BudgetState(),
+    );
+    const interactive = evaluateAutonomy(
+      { tool: tool("app_launch"), args: {}, origin: atKeyboard, workspaceId: "general", gateDecision: decision() },
+      policy,
+      new BudgetState(),
+    );
+
+    assert.equal(interactive.level, "FULL", "a person at the keyboard keeps the policy's level");
+    assert.equal(scheduled.level, "AUTO_SAFE", "the same call from a timer is capped");
+  });
+
+  it("the ceiling changes the DECISION, not only the label", async () => {
+    // AUTO_SAFE and FULL both permit execution, so the shipped default ceiling caps the
+    // level without changing any current outcome — it is a guard against a future
+    // policy, and saying otherwise would overclaim. A ceiling that bites is a ceiling
+    // below AUTO_SAFE, and this is what one does.
+    const policy: AutonomyPolicy = { default: "FULL", scheduledCeiling: "PREPARE" };
+
+    const scheduled = evaluateAutonomy(
+      { tool: tool("app_launch"), args: {}, origin: scheduledOrigin, workspaceId: "general", gateDecision: decision() },
+      policy,
+      new BudgetState(),
+    );
+    const interactive = evaluateAutonomy(
+      { tool: tool("app_launch"), args: {}, origin: atKeyboard, workspaceId: "general", gateDecision: decision() },
+      policy,
+      new BudgetState(),
+    );
+
+    assert.equal(interactive.decision.requiresConfirmation, false, "a person is already here to ask");
+    assert.equal(
+      scheduled.decision.requiresConfirmation,
+      true,
+      "the same call unattended must be held for a human",
+    );
+    assert.equal(scheduled.tightened, true);
+  });
+
+  it("does not let the ceiling RAISE a level", () => {
+    // The governor tightens and never relaxes. A policy whose ceiling is laxer than the
+    // tool's own level must change nothing — otherwise `scheduledCeiling` would be a
+    // way to grant authority, which is exactly the shape this system forbids.
+    const policy: AutonomyPolicy = {
+      default: "OBSERVE",
+      scheduledCeiling: "FULL",
+    };
+
+    const result = evaluateAutonomy(
+      { tool: tool("app_launch"), args: {}, origin: scheduledOrigin, workspaceId: "general", gateDecision: decision() },
+      policy,
+      new BudgetState(),
+    );
+
+    assert.equal(result.level, "OBSERVE", "a lax ceiling must not raise the level");
+    assert.equal(result.decision.allowed, false);
+  });
+
+  it("ignores a malformed ceiling rather than failing open", () => {
+    const policy = { default: "FULL", scheduledCeiling: "NOT_A_LEVEL" } as unknown as AutonomyPolicy;
+    const result = evaluateAutonomy(
+      { tool: tool("app_launch"), args: {}, origin: scheduledOrigin, workspaceId: "general", gateDecision: decision() },
+      policy,
+      new BudgetState(),
+    );
+    assert.equal(result.level, "FULL", "an unreadable ceiling is no ceiling, not a wider one");
+  });
+
+  it("ships a ceiling by default", () => {
+    assert.equal(defaultAutonomyPolicy().scheduledCeiling, "AUTO_SAFE");
+  });
+});

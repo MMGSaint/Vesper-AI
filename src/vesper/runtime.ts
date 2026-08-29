@@ -6,6 +6,7 @@ import { MemoryStorage, type StorageAdapter } from "./storage.ts";
 import { createPermissionGate } from "./permissions.ts";
 import { ToolRegistry } from "./tools/registry.ts";
 import { registerBuiltinTools } from "./tools/builtin.ts";
+import { TOOL_CALL_TASK_KIND, createToolCallExecutor } from "./tool-executor.ts";
 import {
   FS_WRITE_CHECKPOINT_TOOL,
   deleteApproved,
@@ -361,6 +362,11 @@ export class VesperRuntime {
     this.started = false;
     this.memory.clearSession();
     this.scheduler.stop();
+    // Stop the TASK scheduler too. Until an executor could do real work this was
+    // harmless; now that one can invoke tools, an in-flight executor needs the abort
+    // signal on the way down rather than being left running against a runtime that has
+    // released its subsystems.
+    this.taskScheduler.stop();
     await this.persistConfirmations();
     this.obs.disconnect();
     await this.events.flush();
@@ -986,6 +992,18 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     log,
   });
   tools.setAutonomyGovernor(autonomy);
+  // Register the tool-running executor HERE and not beside `registerBuiltinExecutors`
+  // above: `tools` and `autonomy` do not exist yet at that point, and an executor that
+  // could not reach the authorization chain would have to reach around it. The
+  // scheduler resolves a task's kind at execution time, not at construction, so a late
+  // registration is picked up normally.
+  taskExecutors.register(
+    TOOL_CALL_TASK_KIND,
+    createToolCallExecutor({
+      tools,
+      workspaceId: () => workspaces.current().id,
+    }),
+  );
   const models = createModelRouter({
     config,
     providers: options.providers,

@@ -21,9 +21,16 @@ import {
 import type { TrustState } from "../distributed/identity.ts";
 import type { ClientScope } from "../client/protocol.ts";
 
-/** Who is driving this turn. Absent means the person at this machine. */
+/**
+ * Who is driving this turn. Absent means the person at this machine.
+ *
+ * `scheduled` is the runtime driving itself: a queued task that came due while nobody
+ * was watching. It is deliberately its OWN kind rather than a flavour of `local`,
+ * because "the person at this machine asked for this" and "a timer fired" are different
+ * claims and only one of them can answer a confirmation prompt.
+ */
 export interface RequestOrigin {
-  kind: "local" | "remote";
+  kind: "local" | "remote" | "scheduled";
   deviceId?: string;
   trust?: TrustState;
   manifest?: CapabilityManifest | null;
@@ -151,6 +158,42 @@ export interface RemoteToolDecision {
 }
 
 /**
+ * Decide whether a tool may run for a task the scheduler is driving.
+ *
+ * The governing rule is the mission's: **a task being queued or scheduled is not
+ * authorization.** Whoever queued the task had some authority at that moment; the task
+ * record is not a bearer token for it, and the scheduler must not be a way to launder
+ * "I asked for this once" into "run it unattended later".
+ *
+ * So a scheduled request may reach strictly less than a person at the keyboard:
+ *
+ *   - Nothing that administers Vesper's own trust. A timer must never promote a device.
+ *   - Nothing on the trusted-only list. Those change state belonging to the machine's
+ *     owner, and the owner is not here.
+ *
+ * The other half of the rule — that a confirm-tier tool cannot run unattended — is
+ * enforced in `ToolRegistry.invoke`, because only the registry has the gate's decision
+ * and therefore knows the tool's effective level after any user override. Splitting it
+ * that way keeps this function a pure function of the tool NAME, which is what makes it
+ * exhaustively testable.
+ */
+export function decideScheduledToolRequest(toolName: string): RemoteToolDecision {
+  if (HOST_ONLY_TOOLS.includes(toolName)) {
+    return {
+      allowed: false,
+      reason: `'${toolName}' administers device trust and is never run by a scheduled task.`,
+    };
+  }
+  if (TRUSTED_ONLY_TOOLS.includes(toolName)) {
+    return {
+      allowed: false,
+      reason: `'${toolName}' changes state belonging to the machine's owner, so a scheduled task may not run it.`,
+    };
+  }
+  return { allowed: true, reason: "Scheduled request within the unattended tool set." };
+}
+
+/**
  * Decide whether a tool may run on behalf of a remote device.
  *
  * Order matters, and mirrors `decideRemoteRequest`: the absolute denials are checked
@@ -161,8 +204,22 @@ export function decideRemoteToolRequest(input: {
   toolName: string;
   origin: RequestOrigin;
 }): RemoteToolDecision {
-  if (input.origin.kind !== "remote") {
+  // Deny by default on the kind itself. The previous shape was
+  // `if (kind !== "remote") return allowed` — which reads as "local is fine" but
+  // actually means "anything that is not remote is fully authorized", so adding any new
+  // origin kind silently granted it the authority of the person at the keyboard. Each
+  // kind now has to say what it is allowed to do, and an unrecognised one is refused.
+  if (input.origin.kind === "local") {
     return { allowed: true, reason: "Local request." };
+  }
+  if (input.origin.kind === "scheduled") {
+    return decideScheduledToolRequest(input.toolName);
+  }
+  if (input.origin.kind !== "remote") {
+    return {
+      allowed: false,
+      reason: `Unrecognised request origin; refusing '${input.toolName}'.`,
+    };
   }
 
   if (HOST_ONLY_TOOLS.includes(input.toolName)) {

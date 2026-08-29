@@ -275,6 +275,34 @@ export class ToolRegistry {
       };
     }
 
+    // A scheduled task cannot answer a confirmation prompt, and must never be allowed to
+    // answer one on the user's behalf. Two things follow, and both are refusals rather
+    // than deferrals:
+    //
+    //   - `confirmed: true` from a scheduled origin is a contradiction. The flag means
+    //     "a person approved this"; a timer is not a person. It is refused outright
+    //     rather than honoured, because `invoke` otherwise trusts the flag verbatim.
+    //   - Queueing the confirmation instead would look kinder and be worse: a task that
+    //     comes due every tick would fill the 32-slot queue with prompts the user never
+    //     asked for, and the queue refuses rather than evicts, so genuine requests would
+    //     start being turned away.
+    if (origin.kind === "scheduled" && decision.requiresConfirmation) {
+      const reason =
+        `'${input.name}' needs your confirmation, and a scheduled task cannot give it. ` +
+        `Run it yourself when you want it to happen.`;
+      this.log.warn("permission", "Refused a confirm-tier tool for a scheduled task", {
+        tool: input.name,
+      });
+      return {
+        id: createId("tool"),
+        toolName: input.name,
+        args: input.args,
+        at: nowIso(),
+        decision,
+        result: { ok: false, summary: reason, epistemic: "could_not_access" },
+      };
+    }
+
     if (decision.requiresConfirmation && !input.confirmed) {
       this.sweepExpiredConfirmations();
       if (this.confirmations.size >= MAX_PENDING_CONFIRMATIONS) {
@@ -322,7 +350,14 @@ export class ToolRegistry {
         reason: decision.reason,
         createdAt: nowIso(),
         workspaceId: input.workspaceId,
-        requestedBy: { kind: origin.kind, deviceId: origin.deviceId },
+        // Unreachable for a scheduled origin — the branch above refuses those before
+        // anything is queued — but narrowed rather than cast, so that a future change
+        // which lets one through fails to compile instead of persisting a kind the
+        // approval path has no rule for.
+        requestedBy: {
+          kind: origin.kind === "remote" ? "remote" : "local",
+          deviceId: origin.deviceId,
+        },
       };
       this.confirmations.set(pending.id, pending);
       this.log.info("permission", "Queued confirmation", { id: pending.id, tool: input.name });

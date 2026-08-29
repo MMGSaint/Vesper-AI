@@ -28,6 +28,7 @@ const SUITE = [
   ["src/vesper/injection-redteam.test.ts", "prompt injection: containment"],
   ["src/vesper/injection-wiring.test.ts", "prompt injection: the product actually uses it"],
   ["src/vesper/tools/remote.test.ts", "remote authority limits at the tool gate"],
+  ["src/vesper/tool-executor.test.ts", "a scheduled task reaches tools only through the authorization chain"],
   ["src/vesper/tools/scope-enforcement.test.ts", "a scope governs its data on every route"],
   ["src/vesper/tools/filesystem-containment.test.ts", "writes and reads never escape an approved root"],
   ["src/vesper/tools/filesystem-rollback.test.ts", "an undo never escapes an approved root either"],
