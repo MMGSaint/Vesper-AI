@@ -2,6 +2,7 @@ import { access, constants, mkdir } from "node:fs/promises";
 import type { VesperDirs } from "./types.ts";
 import type { VesperConfig } from "./config.ts";
 import { VESPER_VERSION } from "./version.ts";
+import { CLIENT_PROTOCOL_VERSION } from "./client/protocol.ts";
 
 export interface DoctorCheck {
   id: string;
@@ -65,8 +66,20 @@ export async function runDoctor(input: {
         : `Config invalid: ${input.configErrors.join("; ") || "unknown"}`,
     },
     {
+      // `ok` is deliberately always true, and now says so instead of computing it.
+      //
+      // The expression here was `allowOptionalCloud === false || true`, which makes the
+      // left operand dead: the check could never fail whatever the config said. That
+      // reads as a computed check and is a constant, which is worse than a constant —
+      // anyone auditing the doctor would count this as a cloud guarantee that is being
+      // verified.
+      //
+      // Always-true is nevertheless the right answer, for the reason the detail gives:
+      // enabling optional cloud in config does not make Vesper depend on it, and the
+      // local-first guarantee is enforced by the router, not by this line. The truth
+      // lives in `detail`, following the same convention the model checks use.
       id: "cloud-not-required",
-      ok: input.config.models.allowOptionalCloud === false || true,
+      ok: true,
       detail: input.config.models.allowOptionalCloud
         ? "Optional cloud is enabled in config (still not required at runtime)"
         : "Optional cloud is disabled",
@@ -102,10 +115,22 @@ export async function runDoctor(input: {
       detail: input.lastError ? `Last recorded error: ${input.lastError}` : "No persisted last-error",
     },
     {
+      // Not a failure — a simulated hardware source is the correct state on every
+      // machine that is not the target PC. It is a check because "live" is settable and
+      // does nothing, and a setting that silently does nothing is the kind of thing a
+      // user only discovers by trusting a number that was never measured.
+      id: "hardware-source",
+      ok: true,
+      detail:
+        input.config.hardware.mode === "live"
+          ? "hardware.mode is 'live' but no live source is implemented; readings are simulated."
+          : `hardware.mode is '${input.config.hardware.mode}'; readings are simulated.`,
+    },
+    {
       id: "client-protocol",
       ok: true,
       detail:
-        "vesper.client v1 is in-process only. Remote OS control is UNAVAILABLE. No companion network listener is bound.",
+        `vesper.client v${CLIENT_PROTOCOL_VERSION} is in-process only. Remote OS control is UNAVAILABLE. No companion network listener is bound.`,
     },
     ...modelChecks(input.models),
   ];

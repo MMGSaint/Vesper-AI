@@ -326,6 +326,13 @@ export interface CapabilityProfile {
   };
   backends: BackendAvailability[];
   models: DiscoveredModel[];
+  /**
+   * Which backend discovery would pick. Carried on the profile so every surface quotes
+   * one answer: the first-boot report used to re-derive its own, knowing only `ollama`
+   * and `llamacpp`, so on a Vulkan-only host discovery said "llamacpp-vulkan" and the
+   * report said "llamacpp".
+   */
+  preferredBackend: string | null;
   telemetry: FeatureStatus;
   audio: FeatureStatus;
   windowsIntegration: FeatureStatus;

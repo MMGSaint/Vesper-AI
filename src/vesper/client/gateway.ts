@@ -14,6 +14,7 @@ import {
 import { ClientSessionStore, type ClientSession, type IssueSessionInput } from "./session.ts";
 import { filterForSync } from "../distributed/sync.ts";
 import type { RequestOrigin } from "../tools/remote.ts";
+import { classifyOptimizerCapability } from "../specialists/optimizer.ts";
 
 export interface ClientStatus {
   hello: ClientHello;
@@ -95,12 +96,10 @@ export class VesperClientGateway {
     const session = await this.sessions.require(token, "status");
     if ("ok" in session) return session;
     const diagnostics = await this.runtime.diagnostics();
-    const optimizerState =
-      diagnostics.optimizer.mode === "live" && diagnostics.optimizer.available
-        ? "AVAILABLE"
-        : diagnostics.optimizer.mode === "mock"
-          ? "DEGRADED"
-          : "UNAVAILABLE";
+    // One classifier, shared with the capability manifest. These were two copies that
+    // disagreed: a mock adapter read NOT_CONFIGURED there and DEGRADED here, so a phone
+    // and a peer were told different things about the same machine.
+    const optimizerState = classifyOptimizerCapability(diagnostics.optimizer);
     const voiceState = diagnostics.voice.available ? "AVAILABLE" : "UNAVAILABLE";
     const localModels = diagnostics.models.available.some((item) => item.available && item.kind === "local");
     const mortis = this.runtime.workspaces.get("mortis");

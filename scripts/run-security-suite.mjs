@@ -37,6 +37,7 @@ const SUITE = [
   ["src/vesper/client/confirmation-authority.test.ts", "the confirmation queue as a trust boundary"],
   ["src/vesper/security-corrections.test.ts", "a correction is evidence and never authority"],
   ["src/vesper/memory/scopes.test.ts", "memory scope visibility and attribution"],
+  ["src/vesper/security-nexus-boundary.test.ts", "the optimizer specialist is data, never authority"],
   ["src/vesper/distributed/discovery.test.ts", "capabilities are discovered, never assumed"],
   ["src/vesper/logging.test.ts", "secret redaction on the audit path"],
   ["src/vesper/resource-bounds.test.ts", "nothing untrusted chooses how much the host allocates"],

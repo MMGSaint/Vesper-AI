@@ -68,6 +68,20 @@ export interface HardwareProbe {
    * for platform 'win32' running on 'linux' returns the platform-unsupported result.
    */
   platforms: readonly string[];
+  /**
+   * True for a stand-in that answers only because nothing better is registered.
+   *
+   * This exists because registration ORDER was the only priority mechanism, and it
+   * pointed the wrong way for the case that matters. The placeholders declare
+   * `platforms: ["linux", "darwin", "win32"]` — win32 included — and `run()` took the
+   * first platform match. So on the target PC, a real Windows probe registered after
+   * `registerPlaceholderProbes` would never execute, and first boot would report
+   * "not implemented" on the one machine where it *was* implemented. Nothing enforced
+   * the ordering and nothing would have failed if it were wrong.
+   *
+   * A real probe wins over a fallback regardless of when either was registered.
+   */
+  fallback?: boolean;
   probe: (ctx: ProbeContext) => Promise<ProbeResult>;
 }
 
@@ -95,7 +109,12 @@ export class HardwareProbeRegistry {
    * platform, the caller gets the not-implemented result — never a throw.
    */
   async run(id: string, ctx: ProbeContext): Promise<ProbeResult> {
-    const candidates = this.probes.get(id) ?? [];
+    // Real probes first, fallbacks last; insertion order preserved within each group.
+    // Sorting rather than trusting registration order is what makes a real Windows
+    // probe reachable on the target PC no matter where the platform module wires it in.
+    const candidates = [...(this.probes.get(id) ?? [])].sort(
+      (a, b) => Number(a.fallback ?? false) - Number(b.fallback ?? false),
+    );
     for (const p of candidates) {
       if (p.platforms.includes(ctx.platform)) {
         try {
@@ -135,13 +154,16 @@ export class HardwareProbeRegistry {
  *
  * On win32, they still return not-implemented — the physical Windows implementation
  * plugs in AT install time (a `platforms: ["win32"]` probe registered by a Windows-only
- * module) and takes priority over these fallbacks by insertion order.
+ * module) and outranks these because they are marked `fallback: true`. Priority is a
+ * property of the probe, not of when it happened to be registered.
  */
 export function registerPlaceholderProbes(registry: HardwareProbeRegistry): void {
   const placeholder = (id: string, title: string, detail: string): HardwareProbe => ({
     id,
     title,
     platforms: ["linux", "darwin", "win32"],
+    // Marked so a real probe outranks it whatever order the two are registered in.
+    fallback: true,
     async probe() {
       return { ok: false, detail, classification: "documented_not_implemented" };
     },

@@ -4,6 +4,7 @@ import { isRedirect, linkAbort, NO_REDIRECT } from "../models/http.ts";
 import { checkLocalEndpoint } from "../net.ts";
 import { sanitiseInline } from "../untrusted.ts";
 import type { Logger } from "../logging.ts";
+import type { CapabilityState } from "../client/protocol.ts";
 import type {
   HardwareSnapshot,
   JsonObject,
@@ -630,4 +631,40 @@ function parseAccepted(value: unknown): { accepted: boolean; summary: string } |
     accepted: obj.accepted,
     summary: safeTextOr(obj.summary, obj.accepted ? "Accepted." : "Declined."),
   };
+}
+
+/**
+ * The single answer to "what is the optimizer capability right now".
+ *
+ * It lives here, next to the adapter, because it had grown two copies that disagreed.
+ * `distributed/discovery.ts` classified a mock adapter as NOT_CONFIGURED; the client
+ * gateway classified the same adapter, in the same state, as DEGRADED. A user reading
+ * their phone and a peer reading the capability manifest were told different things
+ * about the same machine — the same shape of drift the "scope rules live in one module"
+ * invariant already exists for.
+ *
+ * NOT_CONFIGURED is the correct answer for a mock, and the distinction is the whole
+ * point of having four states rather than two:
+ *
+ *   AVAILABLE      a real optimizer answered and reported itself available
+ *   UNAVAILABLE    a real optimizer is configured and did not answer, or said no
+ *   NOT_CONFIGURED nothing real is wired up — the mock is not the capability
+ *   DEGRADED       reserved for a real optimizer in a reduced state
+ *
+ * Calling a mock DEGRADED implies something real is there and impaired, which is the
+ * over-claim CLAUDE.md's rule names directly: "a mock adapter answering 'available' is
+ * not the capability".
+ *
+ * `mode` is Vesper's own provenance label, never the endpoint's claim — an endpoint
+ * that answered `mode: "mock"` once made Vesper describe a live, machine-changing
+ * subsystem as a simulation. That quarantine is upstream in `parseStatus`; this
+ * function reads only the label Vesper assigned.
+ */
+export function classifyOptimizerCapability(status: {
+  mode: OptimizerStatus["mode"];
+  available: boolean;
+}): CapabilityState {
+  if (status.mode === "mock") return "NOT_CONFIGURED";
+  if (status.mode === "live") return status.available ? "AVAILABLE" : "UNAVAILABLE";
+  return "UNAVAILABLE";
 }

@@ -8,6 +8,7 @@ import { ToolRegistry } from "./tools/registry.ts";
 import { registerBuiltinTools } from "./tools/builtin.ts";
 import { TOOL_CALL_TASK_KIND, createToolCallExecutor } from "./tool-executor.ts";
 import { CorrectionStore } from "./corrections.ts";
+import { HardwareProbeRegistry, registerPlaceholderProbes } from "./hardware/probes.ts";
 import { OptimizerCorrectionProducer } from "./correction-producer.ts";
 import {
   FS_WRITE_CHECKPOINT_TOOL,
@@ -117,6 +118,8 @@ export class VesperRuntime {
   readonly autonomy: AutonomyGovernor;
   readonly checkpoints: CheckpointStore;
   readonly corrections: CorrectionStore;
+  /** Hardware probes consulted by first boot. Placeholders until the target PC exists. */
+  readonly probes: HardwareProbeRegistry;
   readonly correctionProducer: OptimizerCorrectionProducer;
   readonly notifications: NotificationHub;
   readonly hardware: SimulatedHardware;
@@ -157,6 +160,7 @@ export class VesperRuntime {
       autonomy: AutonomyGovernor;
       checkpoints: CheckpointStore;
       corrections: CorrectionStore;
+      probes: HardwareProbeRegistry;
       correctionProducer: OptimizerCorrectionProducer;
       notifications: NotificationHub;
       hardware: SimulatedHardware;
@@ -191,6 +195,7 @@ export class VesperRuntime {
     this.autonomy = parts.autonomy;
     this.checkpoints = parts.checkpoints;
     this.corrections = parts.corrections;
+    this.probes = parts.probes;
     this.correctionProducer = parts.correctionProducer;
     this.notifications = parts.notifications;
     this.hardware = parts.hardware;
@@ -336,6 +341,7 @@ export class VesperRuntime {
     try {
       this.firstBootReport = await runFirstBootAutomation(this.config, this.log, {
         storage: this.storage,
+        probes: this.probes,
       });
       this.capability = this.firstBootReport.profile;
       await this.models.probeAll();
@@ -1030,6 +1036,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   // Decision history: what Vesper expected, what the evidence said. Learning signal
   // only — nothing here can change a permission, a trust state or an autonomy level.
   const corrections = new CorrectionStore({ storage, log, events });
+  // The probe registry first boot consults. Only the honest placeholders are registered
+  // here; a Windows-only module registers real probes on the target PC, and they outrank
+  // these because the placeholders are marked `fallback`.
+  const probes = new HardwareProbeRegistry();
+  registerPlaceholderProbes(probes);
   // The producer sits between the optimizer adapter and the store: Vesper records what
   // it expected when it asked, and files the comparison when an observation arrives.
   const correctionProducer = new OptimizerCorrectionProducer({ optimizer, corrections });
@@ -1259,6 +1270,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   });
   const runtime = new VesperRuntime(config, {
     log,
+    probes,
     storage,
     memory,
     knowledge,
@@ -1300,6 +1312,7 @@ function emptyProfile(config: VesperConfig): CapabilityProfile {
     currentMachine: { os: "unknown", arch: "unknown" },
     targetProfile: config.hardware.target,
     backends: [],
+    preferredBackend: null,
     models: [],
     telemetry: "mocked_simulated",
     audio: "documented_not_implemented",
