@@ -799,11 +799,16 @@ describe("invariant: a confirm-tier control cannot be reached by a safe-tier rou
     }
 
     const stored = await runtime.memory.search("mortis-boundary", { scope: "all" });
-    assert.match(
-      stored.find((entry) => entry.key === "mortis-boundary")?.value ?? "",
-      /separate project/,
-      "the stored memory was destroyed",
-    );
+    // The runtime pre-seeds a `mortis-boundary` fact with a similar but distinct value.
+    // Both entries carry the same key and search returns them together, sorted by
+    // updatedAt. When the seed and the test's `remember` fall in the same millisecond
+    // (a millisecond of thin margin turned this into a rare-but-real flake), the
+    // stable sort keeps the seed at position 0 and `find` returns its value rather
+    // than the test's. Pick the entry by its `source: "user"` to name what this test
+    // is actually about — that the user's write survived.
+    const written = stored.find((entry) => entry.key === "mortis-boundary" && entry.source === "user");
+    assert.ok(written, "the memory the test wrote must still be present");
+    assert.match(written!.value, /separate project/, "the stored memory was destroyed");
     await runtime.stop();
   });
 
@@ -1363,7 +1368,12 @@ describe("invariant: revoking a device bites the turn already running", () => {
     assert.equal(isClientError(result), true, "a companion overwrote a stored memory");
 
     const stored = await runtime.memory.search("mortis-boundary", { scope: "all" });
-    assert.match(stored.find((e) => e.key === "mortis-boundary")?.value ?? "", /separate project/);
+    // Same rationale as the earlier twin: the runtime pre-seeds a `mortis-boundary`
+    // and search sorts by updatedAt. Pick the user-authored entry explicitly rather
+    // than trusting a stable sort to keep it first.
+    const written = stored.find((e) => e.key === "mortis-boundary" && e.source === "user");
+    assert.ok(written, "the memory the test wrote must still be present");
+    assert.match(written!.value, /separate project/);
     await runtime.stop();
   });
 });
