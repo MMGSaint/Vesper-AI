@@ -50,6 +50,26 @@ export async function runDoctor(input: {
    * cheap filesystem/config checks.
    */
   models?: DoctorModelStatus;
+  /**
+   * Optional. When present, doctor reports the current readiness state and which
+   * components are settled. Absent for a doctor run before start().
+   */
+  readiness?: {
+    state: string;
+    settled: boolean;
+    summary: string;
+    components: Array<{ id: string; state: string; detail: string; optional: boolean }>;
+  };
+  /**
+   * Optional. When present, doctor reports whether the Windows Run key matches the
+   * user's `windows.startOnLogin` preference. Absent when reg.exe was not consulted
+   * (non-Windows host, or a doctor run that opted out).
+   */
+  startup?: {
+    preferred: boolean;
+    inSync: boolean;
+    detail: string;
+  };
 }): Promise<DoctorReport> {
   const nodeMajor = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
   const checks: DoctorCheck[] = [
@@ -132,6 +152,8 @@ export async function runDoctor(input: {
       detail:
         `vesper.client v${CLIENT_PROTOCOL_VERSION} is in-process only. Remote OS control is UNAVAILABLE. No companion network listener is bound.`,
     },
+    ...readinessChecks(input.readiness),
+    ...startupChecks(input.startup),
     ...modelChecks(input.models),
   ];
   return {
@@ -166,6 +188,47 @@ export function formatDoctor(report: DoctorReport): string {
  * single most important thing to say out loud when someone runs `vesper --doctor` and
  * wonders why their local model was not answering.
  */
+function readinessChecks(
+  readiness?: {
+    state: string;
+    settled: boolean;
+    summary: string;
+    components: Array<{ id: string; state: string; detail: string; optional: boolean }>;
+  },
+): DoctorCheck[] {
+  if (!readiness) return [];
+  // Readiness is a status surface, not a permission decision. This doctor check is
+  // therefore always `ok: true` even when the state is DEGRADED — a settled degraded
+  // runtime is the honest answer for a machine with no local backend, and marking it
+  // as a doctor failure would push the process exit code to 1 for a state Vesper's
+  // own honesty rules already say is expected.
+  return [
+    {
+      id: "readiness",
+      ok: readiness.settled || readiness.state === "CORE_READY",
+      detail: `${readiness.state}: ${readiness.summary}`,
+    },
+  ];
+}
+
+function startupChecks(
+  startup?: { preferred: boolean; inSync: boolean; detail: string },
+): DoctorCheck[] {
+  if (!startup) return [];
+  // A startup registration that is out of sync with the config is a real problem —
+  // Vesper will not come up at logon the way the user asked. Not fatal (the assistant
+  // is still usable in this session), but the exit code should reflect it, so `ok`
+  // tracks `inSync` honestly.
+  return [
+    {
+      id: "startup-registration",
+      ok: startup.inSync,
+      detail: startup.detail,
+    },
+  ];
+}
+
+
 function modelChecks(status: DoctorModelStatus | undefined): DoctorCheck[] {
   if (!status) return [];
   const reachable = status.available.filter((entry) => entry.available);

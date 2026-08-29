@@ -21,7 +21,7 @@ import type { VesperDirs } from "../types.ts";
 import { VESPER_VERSION } from "../version.ts";
 import { createClientGateway, type VesperClientGateway } from "../client/gateway.ts";
 import { createLifecycleController, type LifecycleController } from "../windows/lifecycle.ts";
-import { reconcileStartupRegistration } from "../windows/startup-manage.ts";
+import { reconcileStartupRegistration, snapshotStartupRegistration } from "../windows/startup-manage.ts";
 import { createHostNotificationAdapter, type HostNotificationAdapter } from "../windows/notifications.ts";
 import {
   acquireInstanceLock,
@@ -273,6 +273,22 @@ export async function createProductionHost(options?: {
           { provider: target.provider, model: target.model },
         ]),
       );
+      const readinessSnapshot = runtime.readiness.snapshot();
+      // Snapshot the Run key against the config's preference. Best-effort — on a host
+      // where reg.exe is unreachable this reads as "unknown" and the doctor check
+      // reports that, rather than throwing.
+      const launcher = resolveLauncherPath(dirs);
+      const startup = await snapshotStartupRegistration({
+        intent: { enabled: runtime.config.windows.startOnLogin, launcher },
+      }).catch((error) => ({
+        preferred: runtime.config.windows.startOnLogin,
+        inSync: false,
+        actual: {
+          state: "unknown" as const,
+          detail: `snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
+        },
+        launcher,
+      }));
       return runDoctor({
         dirs,
         config: runtime.config,
@@ -284,6 +300,22 @@ export async function createProductionHost(options?: {
           active: modelStatus.active,
           available: modelStatus.available,
           roles,
+        },
+        readiness: {
+          state: readinessSnapshot.state,
+          settled: readinessSnapshot.settled,
+          summary: readinessSnapshot.summary,
+          components: readinessSnapshot.components.map((c) => ({
+            id: c.id,
+            state: c.state,
+            detail: c.detail,
+            optional: c.optional,
+          })),
+        },
+        startup: {
+          preferred: startup.preferred,
+          inSync: startup.inSync,
+          detail: `${startup.actual.state}: ${startup.actual.detail}`,
         },
       });
     },

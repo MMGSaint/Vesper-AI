@@ -118,3 +118,92 @@ describe("doctor tells the user about their model backend, honestly", () => {
     assert.equal(report.checks.find((c) => c.id.startsWith("role-")), undefined);
   });
 });
+
+describe("doctor reports readiness and startup registration", () => {
+  async function report(input: {
+    readiness?: Parameters<typeof runDoctor>[0]["readiness"];
+    startup?: Parameters<typeof runDoctor>[0]["startup"];
+  } = {}) {
+    const { defaultConfig } = await import("./config.ts");
+    const { resolveVesperDirs } = await import("./paths.ts");
+    const { mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const base = await mkdtemp(join(tmpdir(), "vesper-doctor-"));
+    return runDoctor({
+      dirs: resolveVesperDirs({ dataDir: base }),
+      config: defaultConfig(),
+      configOk: true,
+      configErrors: [],
+      storageReadable: true,
+      readiness: input.readiness,
+      startup: input.startup,
+    });
+  }
+
+  it("adds a readiness check when a readiness snapshot is supplied", async () => {
+    const r = await report({
+      readiness: {
+        state: "READY",
+        settled: true,
+        summary: "Vesper is ready.",
+        components: [
+          { id: "manifest", state: "ready", detail: "refreshed", optional: false },
+        ],
+      },
+    });
+    const check = r.checks.find((c) => c.id === "readiness");
+    assert.ok(check, "readiness check must be present");
+    assert.equal(check!.ok, true);
+    assert.match(check!.detail, /READY/);
+  });
+
+  it("omits readiness when no snapshot is supplied", async () => {
+    // A doctor run before start() has no readiness to report on; omitting the check
+    // is honest, and asserting it keeps the doctor's own boot-time footprint minimal.
+    const r = await report();
+    assert.equal(r.checks.some((c) => c.id === "readiness"), false);
+    assert.equal(r.checks.some((c) => c.id === "startup-registration"), false);
+  });
+
+  it("passes CORE_READY as ok:true too, because it is a settled reading of 'started, catching up'", async () => {
+    // A doctor run inside the discovery window would otherwise show `ok: false` and
+    // push the process exit code to 1 for a normal warm-up state. Distinct from
+    // DEGRADED (settled with degradation) and READY (fully settled), CORE_READY is
+    // the "just after start()" moment where nothing has failed yet.
+    const r = await report({
+      readiness: {
+        state: "CORE_READY",
+        settled: false,
+        summary: "Core ready. Waiting on manifest.",
+        components: [],
+      },
+    });
+    assert.equal(r.checks.find((c) => c.id === "readiness")?.ok, true);
+  });
+
+  it("marks the startup check ok:true when the intent matches the registry", async () => {
+    const r = await report({
+      startup: { preferred: false, inSync: true, detail: "absent: not registered" },
+    });
+    const check = r.checks.find((c) => c.id === "startup-registration");
+    assert.ok(check);
+    assert.equal(check!.ok, true);
+  });
+
+  it("marks the startup check ok:false when the intent and registry disagree", async () => {
+    // A startup that will not fire at logon is a real problem worth reporting through
+    // the exit code, even though the current session is unaffected.
+    const r = await report({
+      startup: {
+        preferred: true,
+        inSync: false,
+        detail: "absent: no Run key entry, but startOnLogin is on",
+      },
+    });
+    const check = r.checks.find((c) => c.id === "startup-registration");
+    assert.ok(check);
+    assert.equal(check!.ok, false);
+    assert.equal(r.ok, false, "overall doctor result must reflect the out-of-sync startup");
+  });
+});
