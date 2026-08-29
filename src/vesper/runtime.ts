@@ -6,6 +6,12 @@ import { MemoryStorage, type StorageAdapter } from "./storage.ts";
 import { createPermissionGate } from "./permissions.ts";
 import { ToolRegistry } from "./tools/registry.ts";
 import { registerBuiltinTools } from "./tools/builtin.ts";
+import {
+  FS_WRITE_CHECKPOINT_TOOL,
+  deleteApproved,
+  readApprovedExact,
+  writeApproved,
+} from "./tools/filesystem.ts";
 import { MemoryStore } from "./memory/store.ts";
 import { KnowledgeIndex } from "./knowledge/rag.ts";
 import {
@@ -1075,6 +1081,70 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
       if (!before) throw new Error("workspace_switch checkpoint has no `before` value");
       const restored = workspaces.switchTo(before);
       if (!restored) throw new Error(`Cannot restore workspace '${before}': not configured`);
+    },
+  });
+
+  checkpoints.registerReverser(FS_WRITE_CHECKPOINT_TOOL, {
+    async verify(record) {
+      // Same rule as the other two reversers: an absent post-image means we never
+      // learned what the write produced, so we cannot tell a match from drift. Refuse.
+      const after = typeof record.after === "string" ? record.after : null;
+      if (after === null) return false;
+      // Read through the SAME contained read path a tool would use, against the roots
+      // in force NOW. If the file has left the approved set since the write, the answer
+      // to "has it drifted" is not "no" — it is "we may no longer look", which is a
+      // refusal either way.
+      const current = await readApprovedExact(config.approvedRoots, record.target);
+      // `absentBefore` does not change the drift question, only what restoring means.
+      // Either way the file must still hold exactly what Vesper wrote: if it does not,
+      // someone has edited it since, and a rollback would throw their work away —
+      // whether by overwriting it or by deleting the file outright.
+      return current.ok && current.present && current.content === after;
+    },
+    async restore(record) {
+      // Everything below re-derives authority from the CURRENT configuration, because
+      // the pre-image arrives from `rollback.checkpoints` in the shared state file and
+      // is therefore persisted, attacker-influenceable data.
+      //
+      // Honest labelling: this containment is DEFENCE IN DEPTH, not the load-bearing
+      // check. `CheckpointStore.rollbackInner` always calls verify() first, and verify()
+      // reads through `readApprovedExact` — so a target outside the approved roots is
+      // already refused as drift before restore() is ever entered. Mutation confirms it:
+      // replacing both branches below with a raw `writeFile`/`unlink` fails no test.
+      // It is kept because verify() and restore() read the roots at two different
+      // moments and the two are not one atomic act, and because a future reverser change
+      // that relaxed verify() would otherwise silently turn this into an
+      // arbitrary-file-write primitive. Recorded as unexercised rather than presented as
+      // proven.
+      if (typeof record.target !== "string" || record.target.length === 0) {
+        throw new Error("fs_write checkpoint has no target; refusing to restore");
+      }
+      if (record.absentBefore) {
+        const removed = await deleteApproved(config.approvedRoots, record.target);
+        if (!removed.ok) {
+          // `restore` must THROW on failure — a promise that merely resolves is taken as
+          // success and the checkpoint is stamped rolledBackAt, claiming a reversal that
+          // did not happen.
+          throw new Error(`Could not remove the file Vesper created: ${removed.summary}`);
+        }
+        return;
+      }
+      const before = record.before;
+      if (typeof before !== "string") {
+        throw new Error("fs_write checkpoint `before` is not text; refusing to restore");
+      }
+      // Restore through `writeApproved` rather than through the filesystem directly, so
+      // the reversal passes every containment check the original write passed:
+      // traversal, dangerous roots, Vesper's own paths, approved roots, symlink refusal
+      // at the final component, and the hard-link refusal.
+      //
+      // No checkpointStore is passed. A rollback is not itself a checkpointable write —
+      // recording one would let rollbacks of rollbacks accumulate, and the record being
+      // reversed already holds the state needed to describe what happened.
+      const restored = await writeApproved(config.approvedRoots, record.target, before);
+      if (!restored.ok) {
+        throw new Error(`Could not restore the previous contents: ${restored.summary}`);
+      }
     },
   });
 

@@ -30,6 +30,7 @@ const SUITE = [
   ["src/vesper/tools/remote.test.ts", "remote authority limits at the tool gate"],
   ["src/vesper/tools/scope-enforcement.test.ts", "a scope governs its data on every route"],
   ["src/vesper/tools/filesystem-containment.test.ts", "writes and reads never escape an approved root"],
+  ["src/vesper/tools/filesystem-rollback.test.ts", "an undo never escapes an approved root either"],
   ["src/vesper/client/gateway.test.ts", "gateway method scopes and session authentication"],
   ["src/vesper/client/device-binding.test.ts", "device identity, trust, revocation"],
   ["src/vesper/client/confirmation-authority.test.ts", "the confirmation queue as a trust boundary"],
@@ -60,7 +61,7 @@ const MUST_BE_LISTED = [
   /^src\/vesper\/resource-bounds\.test\.ts$/,
   /^src\/vesper\/prompt-integrity\.test\.ts$/,
   /^src\/vesper\/client\/.*\.test\.ts$/,
-  /^src\/vesper\/tools\/(remote|scope-enforcement|filesystem-containment)\.test\.ts$/,
+  /^src\/vesper\/tools\/(remote|scope-enforcement|filesystem-containment|filesystem-rollback)\.test\.ts$/,
 ];
 
 const listed = new Set(SUITE.map(([file]) => file));

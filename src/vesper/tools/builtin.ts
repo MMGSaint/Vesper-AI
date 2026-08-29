@@ -608,7 +608,11 @@ export function registerBuiltinTools(input: {
       { path: { type: "string" }, content: { type: "string" } },
       ["path", "content"],
     ),
-    async (args, context) => writeApproved(config.approvedRoots, str(args, "path"), str(args, "content"), context.dryRun),
+    async (args, context) =>
+      writeApproved(config.approvedRoots, str(args, "path"), str(args, "content"), context.dryRun, {
+        checkpointStore,
+        workspaceId: context.workspaceId,
+      }),
   );
 
   registry.register(
