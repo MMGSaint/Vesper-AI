@@ -12,6 +12,13 @@ without being asked" are different questions.
 
 Checked 2026-08-28 against `agent/distributed`.
 
+> **Superseded in part.** Both gaps named below as "not built" were built afterwards:
+> the checkpoint/rollback layer landed in phase 2 and now covers `fs_write` as well as
+> memory and workspace, and the autonomy governor landed as a per-call, per-session
+> one-way tightener with rolling rate budgets. This survey is kept as the record of what
+> was true when it was written — it is a dated snapshot, not current state. For current
+> state see `docs/phase-2-runtime.md` and `docs/phase-3-runtime.md`.
+
 | Seam | Module | State |
 |---|---|---|
 | World state | `hardware/simulated.ts`, `specialists/context.ts` | **Simulated.** The snapshot is generated, not measured. `mode` is honest about this and diagnostics classifies it `mocked_simulated`. Real telemetry needs the physical machine. |

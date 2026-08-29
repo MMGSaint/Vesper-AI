@@ -12,6 +12,29 @@ Every item here is a probe id (matches `src/vesper/hardware/probes.ts`) with the
 exact test the implementation must pass. Do not mark a probe green until it has
 been observed on the physical target PC.
 
+## How to register a real probe
+
+The registry is consulted by first boot — its answers replace the placeholder text in
+`--first-boot-report`, so a probe that works changes what a user sees. Two rules, both
+of which used to be traps:
+
+1. **Register with `platforms: ["win32"]` and WITHOUT `fallback: true`.** The
+   placeholders are marked `fallback`, and a real probe outranks a fallback regardless
+   of registration order. Before that flag existed, priority was insertion order alone
+   and the placeholders declared `win32` among their platforms — so a correctly written
+   Windows probe registered after `registerPlaceholderProbes` would never have run, and
+   first boot would have reported "not implemented" on the one machine where it *was*.
+
+2. **The probe id is not the step id.** Probes are `gpu.live`, `vram.live`,
+   `telemetry.amd`, `audio.wasapi`, `windows.tray`, `benchmark.harness`; the first-boot
+   steps they feed are `gpu`, `vram`, `telemetry`, `audio`, `windows`, `benchmark`. The
+   mapping lives in one table in `bootstrap.ts`. Use the dotted probe ids here.
+
+A probe must not throw — a throw is reported as a probe failure rather than a hardware
+answer — and must return a `classification`, not just `ok`. A **negative** answer is
+kept as-is: "the probe ran and could not read the GPU" is a different fact from "no
+probe exists", and flattening them makes a broken driver look like an unasked question.
+
 The mission's rule "**do NOT fabricate benchmark numbers before the machine
 exists**" applies to every item below. A number without a real measurement on
 real silicon is not a number; it is an assumption.
