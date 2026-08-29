@@ -120,6 +120,11 @@ const TOOL_SCOPE: Readonly<Record<string, ClientScope>> = {
   memory_remember: "memory.write",
   memory_forget: "memory.write",
   knowledge_search: "knowledge.read",
+  // A correction names the workspace context an expectation was formed in and quotes
+  // what a specialist observed. A tool with no entry here is remote-reachable by
+  // default for any trusted or restricted device, so this is stated rather than left
+  // to the fall-through.
+  corrections_list: "memory.read",
 };
 
 export function scopeForTool(toolName: string): ClientScope | null {

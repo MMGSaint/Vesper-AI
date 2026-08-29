@@ -7,6 +7,8 @@ import { createPermissionGate } from "./permissions.ts";
 import { ToolRegistry } from "./tools/registry.ts";
 import { registerBuiltinTools } from "./tools/builtin.ts";
 import { TOOL_CALL_TASK_KIND, createToolCallExecutor } from "./tool-executor.ts";
+import { CorrectionStore } from "./corrections.ts";
+import { OptimizerCorrectionProducer } from "./correction-producer.ts";
 import {
   FS_WRITE_CHECKPOINT_TOOL,
   deleteApproved,
@@ -114,6 +116,8 @@ export class VesperRuntime {
   readonly taskScheduler: TaskScheduler;
   readonly autonomy: AutonomyGovernor;
   readonly checkpoints: CheckpointStore;
+  readonly corrections: CorrectionStore;
+  readonly correctionProducer: OptimizerCorrectionProducer;
   readonly notifications: NotificationHub;
   readonly hardware: SimulatedHardware;
   readonly optimizer: OptimizerAdapter;
@@ -152,6 +156,8 @@ export class VesperRuntime {
       taskScheduler: TaskScheduler;
       autonomy: AutonomyGovernor;
       checkpoints: CheckpointStore;
+      corrections: CorrectionStore;
+      correctionProducer: OptimizerCorrectionProducer;
       notifications: NotificationHub;
       hardware: SimulatedHardware;
       optimizer: OptimizerAdapter;
@@ -184,6 +190,8 @@ export class VesperRuntime {
     this.taskScheduler = parts.taskScheduler;
     this.autonomy = parts.autonomy;
     this.checkpoints = parts.checkpoints;
+    this.corrections = parts.corrections;
+    this.correctionProducer = parts.correctionProducer;
     this.notifications = parts.notifications;
     this.hardware = parts.hardware;
     this.optimizer = parts.optimizer;
@@ -1019,6 +1027,12 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
 
   // Vesper-owned rollback: snapshots kept in `rollback.checkpoints` with per-record TTL.
   const checkpoints = new CheckpointStore({ storage, log, events });
+  // Decision history: what Vesper expected, what the evidence said. Learning signal
+  // only — nothing here can change a permission, a trust state or an autonomy level.
+  const corrections = new CorrectionStore({ storage, log, events });
+  // The producer sits between the optimizer adapter and the store: Vesper records what
+  // it expected when it asked, and files the comparison when an observation arrives.
+  const correctionProducer = new OptimizerCorrectionProducer({ optimizer, corrections });
   // Register reversers for the write paths that participate. Each reverser is a small
   // shim over the underlying store; the checkpoint layer never knows the store's
   // internals, only how to ask it to restore a value it once had.
@@ -1168,6 +1182,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
 
   registerBuiltinTools({
     checkpointStore: checkpoints,
+    corrections,
+    correctionProducer,
     registry: tools,
     obs,
     deviceRegistry: devices,
@@ -1248,6 +1264,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     taskScheduler,
     autonomy,
     checkpoints,
+    corrections,
+    correctionProducer,
     notifications,
     hardware,
     optimizer,

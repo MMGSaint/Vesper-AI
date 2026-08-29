@@ -23,6 +23,8 @@ import type { ModelRouter } from "../models/router.ts";
 import type { IdleScheduler } from "../scheduler.ts";
 import type { BenchmarkHarness } from "../models/benchmark.ts";
 import type { CheckpointStore } from "../checkpoint.ts";
+import type { CorrectionStore } from "../corrections.ts";
+import type { OptimizerCorrectionProducer } from "../correction-producer.ts";
 import { listApproved, readApproved, writeApproved } from "./filesystem.ts";
 import { TOOL_CALL_TASK_KIND } from "../tool-executor.ts";
 import { mcpBridgeStatus } from "../integrations/mcp.ts";
@@ -72,9 +74,14 @@ export function registerBuiltinTools(input: {
   benchmark?: BenchmarkHarness;
   getDiagnostics?: () => Promise<DiagnosticReport>;
   checkpointStore?: CheckpointStore;
+  /** Optional like checkpointStore: a runtime without one keeps the previous behaviour. */
+  corrections?: CorrectionStore;
+  correctionProducer?: OptimizerCorrectionProducer;
 }) {
   const {
     checkpointStore,
+    corrections,
+    correctionProducer,
     registry,
     config,
     hardware,
@@ -717,15 +724,37 @@ export function registerBuiltinTools(input: {
     ),
     async (args) => {
       const action = str(args, "action");
+      const profile = str(args, "profile") || undefined;
+      // What Vesper believes right now, recorded BEFORE the request. Reading the
+      // bottleneck afterwards and calling it the expectation would make the producer
+      // incapable of ever being wrong.
+      const expectedBound = correctionProducer
+        ? await optimizer
+            .analyze()
+            .then((analysis) => analysis.bound)
+            .catch(() => "unknown" as const)
+        : "unknown";
       const result =
         action === "rollback"
           ? await optimizer.requestRollback()
-          : await optimizer.requestOptimization({ profile: str(args, "profile") || undefined });
+          : await optimizer.requestOptimization({ profile });
       if (result.accepted) {
         events.emit({
           type: "optimizer.state",
           title: `Optimizer ${action} confirmed`,
           severity: "info",
+        });
+      }
+      // Only an optimize request forms an expectation worth checking later. A rollback
+      // is a reversal, not a prediction. `accepted` is passed through exactly as the
+      // adapter reported it, so a refused request produces a correction about the
+      // request rather than about an effect that never occurred.
+      if (correctionProducer && action !== "rollback") {
+        correctionProducer.expect({
+          profile: profile ?? "default",
+          expectedBound,
+          because: `the optimizer reported a ${expectedBound}-bound workload`,
+          accepted: result.accepted,
         });
       }
       return {
@@ -735,6 +764,42 @@ export function registerBuiltinTools(input: {
       };
     },
   );
+
+  if (corrections) {
+    registry.register(
+      spec(
+        "corrections_list",
+        "List recorded corrections — where Vesper's expectations met contrary evidence.",
+        "read",
+        {
+          limit: { type: "number", description: "How many to return (1-50)" },
+          subsystem: {
+            type: "string",
+            description: "Filter to one subsystem, e.g. optimizer",
+          },
+        },
+      ),
+      async (args) => {
+        const limitRaw = typeof args.limit === "number" ? args.limit : 10;
+        const limit = Math.max(1, Math.min(50, Math.floor(limitRaw)));
+        const subsystem = str(args, "subsystem");
+        const records = await corrections.list({
+          limit,
+          subsystem: subsystem ? (subsystem as never) : undefined,
+        });
+        const tally = await corrections.tally();
+        return {
+          ok: true,
+          epistemic: "checked",
+          summary:
+            records.length === 0
+              ? "No corrections have been recorded."
+              : `${records.length} correction(s). Overall: ${tally.assumption_wrong} wrong, ${tally.assumption_held} held, ${tally.inconclusive} inconclusive.`,
+          data: { records, tally } as unknown as JsonObject,
+        };
+      },
+    );
+  }
 
   registry.register(
     spec("context_status", "Read VRChat, OBS, and game context from the host adapter.", "read", {}),
