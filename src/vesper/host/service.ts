@@ -264,8 +264,23 @@ export async function createProductionHost(options?: {
     },
     async doctor() {
       const error = await runtime.lastError();
-      // Snapshot model reachability for the doctor so a user can see whether their
-      // local backend is running without hunting through logs.
+      // PROBE before snapshotting. `models.status()` is a pure read of each provider's
+      // cached `available` flag; it never contacts anything. The only writer is
+      // `probeAll()`, called once at the end of fire-and-forget first-boot discovery,
+      // plus a lazy re-probe reachable exclusively from `pick()` on a real completion.
+      //
+      // So a `--doctor` run reported "Provider 'ollama' did not answer" having sent no
+      // request at all - and `npm run doctor` bakes in `--skip-discovery`, which skips
+      // the one call site that would ever have probed. The output was identical whether
+      // Ollama was running or not, which is what made it so confusing to debug on a
+      // machine where `ollama list` and `/api/tags` both plainly worked.
+      //
+      // Probing here is not a widening of what `--skip-discovery` means. That flag
+      // skips FIRST-BOOT DISCOVERY - backend enumeration, model listing, the capability
+      // profile. Reporting live reachability is the doctor's entire job, and a
+      // diagnostic that answers "is my backend up?" without asking is the kind of claim
+      // the honesty rules exist to forbid.
+      await runtime.models.probeAll().catch(() => undefined);
       const modelStatus = runtime.models.status();
       const roles = Object.fromEntries(
         Object.entries(runtime.config.models.roles).map(([role, target]) => [
