@@ -518,3 +518,63 @@ describe("the model→tool call path is honest about failures", () => {
     );
   });
 });
+
+describe("reasoning mode is decided by Vesper, not left to the model's default", () => {
+  /** The `think` field as it appeared in the body the server actually received. */
+  function thinkFieldOf(loopback: OllamaLoopback): unknown {
+    const chat = loopback.requests.find((entry) => entry.path === "/api/chat");
+    assert.ok(chat, "no /api/chat request reached the server");
+    assert.ok(chat.body && typeof chat.body === "object", "the chat body was not an object");
+    return (chat.body as Record<string, unknown>).think;
+  }
+
+  it("sends think:false by default rather than omitting the field", async () => {
+    // Regression, measured against a real qwen3:14b on a real Ollama 0.33.2.
+    //
+    // The code read `if (options.think) body.think = true`, and its comment claimed
+    // reasoning was "off by default". Omitting the field does not mean off — it means
+    // "use this model's default", and Ollama defaults thinking ON for a thinking-capable
+    // model. Vesper reads only `message.content` and drops `message.thinking`, so the
+    // default bought reasoning that was then thrown away: the same one-sentence answer
+    // cost 131 eval tokens / 56.6s with the field omitted, against 8 tokens / 3.9s with
+    // `think:false`.
+    //
+    // Asserted as `=== false`, not as falsy: `undefined` is the bug, and it is falsy.
+    await withLoopback(
+      { chat: { "loopback-chat": { frames: [{ content: "hi" }] } } },
+      async (loopback) => {
+        const provider = createOllamaProvider({
+          baseUrl: loopback.url,
+          defaultModel: "loopback-chat",
+        });
+        await provider.complete(
+          { messages: [{ role: "user", content: "say hi" }], role: "everyday" },
+          "loopback-chat",
+        );
+        assert.equal(
+          thinkFieldOf(loopback),
+          false,
+          "an absent `think` hands the decision to the model; Vesper must state it",
+        );
+      },
+    );
+  });
+
+  it("still sends think:true when a caller opts in", async () => {
+    await withLoopback(
+      { chat: { "loopback-chat": { frames: [{ content: "hi" }] } } },
+      async (loopback) => {
+        const provider = createOllamaProvider({
+          baseUrl: loopback.url,
+          defaultModel: "loopback-chat",
+          think: true,
+        });
+        await provider.complete(
+          { messages: [{ role: "user", content: "say hi" }], role: "everyday" },
+          "loopback-chat",
+        );
+        assert.equal(thinkFieldOf(loopback), true, "the opt-in must still reach the wire");
+      },
+    );
+  });
+});

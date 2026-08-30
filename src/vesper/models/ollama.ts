@@ -40,7 +40,24 @@ export interface OllamaOptions {
   /** Generation calls. */
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
-  /** Opt-in reasoning mode. Off by default: Ollama rejects it on models without it. */
+  /**
+   * Opt-in reasoning mode, sent explicitly on every request.
+   *
+   * Omitting the field does NOT mean "off" — it means "whatever this model defaults
+   * to", and Ollama defaults thinking ON for a thinking-capable model. Vesper reads
+   * only `message.content` and discards `message.thinking`, so an omitted field bought
+   * reasoning nobody would ever see: measured against a real qwen3:14b, an identical
+   * one-sentence answer cost 131 eval tokens and 56.6s with the field omitted versus 8
+   * tokens and 3.9s with `think:false`. On slower hardware that difference is the whole
+   * 120s generation budget, after which the turn falls back to the offline stub and
+   * reports "no local inference backend is available" — a reachable backend that looks
+   * like an outage.
+   *
+   * `think: false` is accepted by non-thinking models too (verified against
+   * qwen2.5:0.5b, capabilities `["completion","tools"]`), so this is safe to send
+   * unconditionally. `think: true` is not — Ollama rejects it on models without the
+   * capability — which is why the opt-in stays opt-in.
+   */
   think?: boolean;
 }
 
@@ -273,7 +290,10 @@ export function createOllamaProvider(options: OllamaOptions) {
           },
         }));
       }
-      if (options.think) body.think = true;
+      // Always explicit. `if (options.think) body.think = true` left the field absent in
+      // the default case, which hands the decision to the model's own default rather
+      // than making it. See `OllamaOptions.think`.
+      body.think = options.think === true;
 
       let text = "";
       let ttftMs: number | null = null;
