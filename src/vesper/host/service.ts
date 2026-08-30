@@ -309,6 +309,11 @@ export async function createProductionHost(options?: {
         config: runtime.config,
         configOk: loaded.ok,
         configErrors: loaded.errors,
+        // Which file answered, and whether one answered at all. `loaded` is the result
+        // of the single `loadHostConfig` at the top of createProductionHost, so this is
+        // the real provenance of the config every other check below reports on.
+        configSource: loaded.source,
+        configPath: loaded.path,
         storageReadable: true,
         lastError: error?.message ?? null,
         models: {
