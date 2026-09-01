@@ -121,6 +121,14 @@ export interface ToolParameterSchema {
 export interface ToolHandlerContext {
   workspaceId: string;
   dryRun?: boolean;
+  /**
+   * Who is driving this call. Absent means the person at this machine.
+   *
+   * Structural, not imported from `tools/remote.ts`: this file is the shared type
+   * surface and must not grow a dependency on the authorization layer that consumes it.
+   * The registry copies `kind` and `deviceId` off the live origin at invoke time.
+   */
+  origin?: { kind: "local" | "remote" | "scheduled"; deviceId?: string };
 }
 
 export type ToolHandler = (

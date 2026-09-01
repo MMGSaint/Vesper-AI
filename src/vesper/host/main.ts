@@ -21,6 +21,7 @@ import { configFile, crashNoteFile, healthFile, instanceLockFile, resolveVesperD
 import { inspectInstanceLock } from "./instance-lock.ts";
 import { readHealthStatus } from "./health.ts";
 import { formatCrashNote, writeCrashNoteSync } from "./crash.ts";
+import { collectDecisions, formatDecisions } from "../decisions.ts";
 
 /** Kept referenced while the daemon runs; it is the only thing holding the event loop. */
 const KEEP_ALIVE_MS = 60_000;
@@ -304,6 +305,16 @@ async function main() {
     const report = await host.doctor();
     console.log(formatDoctor(report));
     await shutdown(report.ok ? 0 : 1, "doctor");
+    return;
+  }
+  if (command.kind === "decisions") {
+    const report = await collectDecisions({
+      events: runtime.events,
+      journal: runtime.journal,
+      governor: runtime.autonomy,
+    });
+    console.log(formatDecisions(report));
+    await shutdown(0, "decisions");
     return;
   }
   if (command.kind === "export-memory") {

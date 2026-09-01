@@ -1,6 +1,8 @@
 import { sanitiseInline } from "../untrusted.ts";
 import type { VesperConfig } from "../config.ts";
 import type { EventBus } from "../events.ts";
+import type { EventJournal } from "../event-journal.ts";
+import type { AutonomyGovernor } from "../autonomy.ts";
 import type { SimulatedHardware } from "../hardware/simulated.ts";
 import type { KnowledgeIndex } from "../knowledge/rag.ts";
 import type { MemoryStore } from "../memory/store.ts";
@@ -27,6 +29,7 @@ import type { CorrectionStore } from "../corrections.ts";
 import type { OptimizerCorrectionProducer } from "../correction-producer.ts";
 import { listApproved, readApproved, writeApproved } from "./filesystem.ts";
 import { TOOL_CALL_TASK_KIND } from "../tool-executor.ts";
+import { collectDecisions, formatDecisions } from "../decisions.ts";
 import { mcpBridgeStatus } from "../integrations/mcp.ts";
 import { detectApprovedApps } from "../windows/apps.ts";
 import { classifyDeviceIntent, resolveTarget } from "../distributed/intent.ts";
@@ -66,6 +69,12 @@ export function registerBuiltinTools(input: {
   deviceRegistry?: DeviceRegistry;
   tasks?: TaskQueue;
   selfDeviceId?: string;
+  /**
+   * Decision-journal sources. Optional so a runtime built without a journal still
+   * exposes the tool and reports honestly that it can only see the in-memory ring.
+   */
+  journal?: EventJournal;
+  governor?: AutonomyGovernor;
   voice?: VoiceModule;
   voiceSession?: VoiceSession;
   background?: BackgroundRuntime;
@@ -96,6 +105,8 @@ export function registerBuiltinTools(input: {
     deviceRegistry,
     tasks,
     selfDeviceId,
+    journal,
+    governor,
     voice,
     voiceSession,
     background,
@@ -1034,7 +1045,7 @@ export function registerBuiltinTools(input: {
       },
       ["description"],
     ),
-    async (args) => {
+    async (args, context) => {
       if (!tasks || !deviceRegistry) {
         return { ok: false, epistemic: "could_not_access", summary: "No task queue is attached." };
       }
@@ -1082,7 +1093,14 @@ export function registerBuiltinTools(input: {
           : {};
       const created = await tasks.create({
         description: str(args, "description"),
-        createdBy: selfDeviceId ?? "unknown",
+        // A remote device that queued this must remain the author. Recording the host
+        // instead (the previous behaviour) erased which machine asked — attribution
+        // loss that a later correction, catch-up, or capsule would then treat as fact.
+        // Local and scheduled origins still belong to this machine.
+        createdBy:
+          context.origin?.kind === "remote" && context.origin.deviceId
+            ? context.origin.deviceId
+            : (selfDeviceId ?? "unknown"),
         requiredCapabilities: required,
         preferredDevice: str(args, "preferredDevice") || undefined,
         eligibleDevices,
@@ -1179,6 +1197,47 @@ export function registerBuiltinTools(input: {
           ? `${list.length} recent event(s): ${list.map((event) => event.title).join("; ")}`
           : "No events have been recorded yet on this host.",
         data: { events: list } as unknown as JsonObject,
+      };
+    },
+  );
+
+  registry.register(
+    spec(
+      "governor_decisions",
+      "Read why Vesper allowed, refused, or left alone a recent action. Evidence, never a grant.",
+      "read",
+      {
+        correlationId: {
+          type: "string",
+          description: "Optional. Only decisions from this turn / task.",
+        },
+        limit: { type: "number", description: "How many to return (default 20, max 100)" },
+      },
+    ),
+    async (args) => {
+      const correlationId = str(args, "correlationId");
+      const limit = typeof args.limit === "number" ? args.limit : undefined;
+      const report = await collectDecisions({
+        events,
+        journal,
+        governor,
+        query: {
+          correlationId: correlationId.length > 0 ? correlationId : undefined,
+          limit,
+        },
+      });
+      return {
+        ok: true,
+        epistemic: "checked",
+        summary: formatDecisions(report),
+        data: {
+          vouched: report.vouched,
+          recorded: report.recorded,
+          unauthenticated: report.unauthenticated,
+          source: report.source,
+          horizon: report.horizon,
+          records: report.records,
+        } as unknown as JsonObject,
       };
     },
   );

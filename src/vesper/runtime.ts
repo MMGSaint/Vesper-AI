@@ -1255,6 +1255,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     models,
     scheduler,
     benchmark,
+    journal,
+    governor: autonomy,
     getDiagnostics: async () => {
       if (!runtimeRef.current) throw new Error("Runtime not ready");
       return runtimeRef.current.diagnostics();

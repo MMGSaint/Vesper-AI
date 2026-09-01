@@ -14,6 +14,7 @@ export type CliCommand =
   | { kind: "startup-status" }
   | { kind: "enable-startup" }
   | { kind: "disable-startup" }
+  | { kind: "decisions"; skipDiscovery: boolean }
   | { kind: "unknown"; reason: string };
 
 const COMMANDS = new Set([
@@ -33,6 +34,7 @@ const COMMANDS = new Set([
   "--startup-status",
   "--enable-startup",
   "--disable-startup",
+  "--decisions",
 ]);
 
 export function parseCli(argv: string[]): CliCommand {
@@ -90,6 +92,8 @@ export function parseCli(argv: string[]): CliCommand {
       return { kind: "enable-startup" };
     case "--disable-startup":
       return { kind: "disable-startup" };
+    case "--decisions":
+      return { kind: "decisions", skipDiscovery };
     default:
       return {
         kind: "unknown",
@@ -122,6 +126,7 @@ Commands:
   --startup-status  Show whether Vesper is registered to start on Windows logon
   --enable-startup  Register Vesper to start at logon (per-user, no elevation)
   --disable-startup Remove the logon startup registration
+  --decisions       Print recent autonomy decisions (why Vesper allowed, refused, or left something alone)
 
 Flags:
   --skip-discovery  Skip first-boot backend probes

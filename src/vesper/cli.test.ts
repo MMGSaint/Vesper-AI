@@ -21,6 +21,10 @@ describe("cli", () => {
     assert.equal(parseCli(["--startup-status"]).kind, "startup-status");
     assert.equal(parseCli(["--enable-startup"]).kind, "enable-startup");
     assert.equal(parseCli(["--disable-startup"]).kind, "disable-startup");
+    assert.deepEqual(parseCli(["--decisions", "--skip-discovery"]), {
+      kind: "decisions",
+      skipDiscovery: true,
+    });
   });
 
   it("rejects unknown and extra arguments", () => {
@@ -82,6 +86,7 @@ describe("--ask is the one-shot conversation entry", () => {
     assert.equal(parseCli(["--diagnostics"]).kind, "diagnostics");
     assert.equal(parseCli(["--status"]).kind, "status");
     assert.equal(parseCli(["--client-hello"]).kind, "client-hello");
+    assert.equal(parseCli(["--decisions"]).kind, "decisions");
     assert.equal(parseCli(["--nonsense"]).kind, "unknown");
     assert.equal(parseCli(["--doctor", "--status"]).kind, "unknown");
   });
