@@ -1,5 +1,6 @@
 import type { VesperConfig } from "../config.ts";
 import type { CompletionRequest, CompletionResult, DiscoveredModel, ModelRole } from "../types.ts";
+import { pickInstalledModel } from "./backends.ts";
 import { createEchoProvider } from "./echo.ts";
 import { createOllamaProvider } from "./ollama.ts";
 import { createOpenAiCompatProvider, type OpenAiCompatProvider } from "./openai-compat.ts";
@@ -39,6 +40,12 @@ export type AnyProvider = {
   contextLength?: (model: string) => Promise<number | null>;
   /** Backends that can generate embeddings without a second service. */
   embed?: (texts: string[], model: string) => Promise<number[][] | null>;
+  /**
+   * Names from the last probe. Empty means "not yet known", not "nothing installed" —
+   * the router will not substitute in that case, so a configured name still reaches
+   * the wire.
+   */
+  installedModels?: () => string[];
   defaultModel?: string;
 };
 
@@ -77,6 +84,7 @@ export function createModelRouter(input: {
 
   let activeId: string | undefined;
   let lastProbeAt = 0;
+  let probePromise: Promise<void> | null = null;
 
   /**
    * Providers were probed once, at the end of fire-and-forget first-boot discovery, and
@@ -86,36 +94,72 @@ export function createModelRouter(input: {
    *
    * Re-probing lazily, only when no local backend appears available, keeps an idle
    * assistant free of background polling while still recovering on its own.
+   *
+   * A probe in flight must be awaited, not treated as already done. `probeAll` used
+   * to stamp `lastProbeAt` before the probes returned, so a concurrent `--ask`
+   * during first-boot discovery saw "just probed" + `isAvailable() === false` and
+   * fell through to echo.
    */
   const REPROBE_AFTER_MS = 15_000;
 
+  function startProbe(): Promise<void> {
+    if (!probePromise) {
+      probePromise = (async () => {
+        try {
+          await Promise.all(
+            providers.map((provider) => provider.probe?.().catch(() => undefined)),
+          );
+          lastProbeAt = Date.now();
+        } finally {
+          probePromise = null;
+        }
+      })();
+    }
+    return probePromise;
+  }
+
+  async function awaitInFlightProbe(): Promise<void> {
+    if (probePromise) await probePromise;
+  }
+
   async function reprobeIfStale(): Promise<void> {
-    if (Date.now() - lastProbeAt < REPROBE_AFTER_MS) return;
-    lastProbeAt = Date.now();
-    await Promise.all(
-      providers.map((provider) =>
-        provider.probe?.().catch(() => undefined),
-      ),
+    if (probePromise) {
+      await probePromise;
+      return;
+    }
+    if (lastProbeAt !== 0 && Date.now() - lastProbeAt < REPROBE_AFTER_MS) return;
+    await startProbe();
+  }
+
+  /**
+   * Configured name if it is installed (or we cannot tell). An installed chat
+   * model if the config still names a candidate that was never pulled. Never
+   * an embedding model, and never a rewrite of the config file.
+   */
+  function resolveModel(provider: AnyProvider, role: ModelRole): string {
+    const wanted = modelFor(provider, role);
+    if (provider.id === "echo" || provider.kind === "optional-cloud") return wanted;
+    const names = provider.installedModels?.() ?? [];
+    if (names.length === 0) return wanted;
+    return pickInstalledModel(
+      names.map((name) => ({ name, available: true })),
+      wanted,
+      role,
     );
   }
 
   async function pick(role: ModelRole): Promise<{ provider: AnyProvider; model: string }> {
+    await awaitInFlightProbe();
     if (activeId) {
       const forced = providers.find((provider) => provider.id === activeId);
-      if (forced) {
-        const model =
-          forced.id === "xai-optional"
-            ? "grok-4.5"
-            : input.config.models.roles[role]?.model ?? "default";
-        return { provider: forced, model };
-      }
+      if (forced) return { provider: forced, model: resolveModel(forced, role) };
     }
     const preferred = input.config.models.roles[role];
     if (preferred) {
       const match = providers.find(
         (provider) => provider.id === preferred.provider && provider.isAvailable(),
       );
-      if (match) return { provider: match, model: preferred.model };
+      if (match) return { provider: match, model: resolveModel(match, role) };
     }
     let local = providers.find(
       (provider) => provider.kind === "local" && provider.isAvailable(),
@@ -128,32 +172,26 @@ export function createModelRouter(input: {
         const match = providers.find(
           (provider) => provider.id === preferredNow.provider && provider.isAvailable(),
         );
-        if (match) return { provider: match, model: preferredNow.model };
+        if (match) return { provider: match, model: resolveModel(match, role) };
       }
       local = providers.find(
         (provider) => provider.kind === "local" && provider.isAvailable(),
       );
     }
     if (local) {
-      return {
-        provider: local,
-        model: input.config.models.roles[role]?.model ?? "default",
-      };
+      return { provider: local, model: resolveModel(local, role) };
     }
     const optional = providers.find(
       (provider) => provider.kind === "optional-cloud" && provider.isAvailable(),
     );
     if (optional) {
-      return { provider: optional, model: optional.id === "xai-optional" ? "grok-4.5" : "default" };
+      return { provider: optional, model: resolveModel(optional, role) };
     }
     const other = providers.find(
       (provider) => provider.id !== "echo" && provider.isAvailable(),
     );
     if (other) {
-      return {
-        provider: other,
-        model: input.config.models.roles[role]?.model ?? other.id,
-      };
+      return { provider: other, model: resolveModel(other, role) };
     }
     return { provider: echo, model: "echo" };
   }
@@ -183,8 +221,11 @@ export function createModelRouter(input: {
       };
     },
     async probeAll() {
-      lastProbeAt = Date.now();
-      await Promise.all(providers.map((provider) => provider.probe?.().catch(() => undefined)));
+      if (probePromise) {
+        await probePromise;
+        return;
+      }
+      await startProbe();
     },
     providers() {
       return providers.slice();
@@ -200,7 +241,7 @@ export function createModelRouter(input: {
         if (fallback) {
           // Model names are provider-specific. Asking a different backend for the
           // failed backend's model name would just fail a second time.
-          const retry = await fallback.complete(request, modelFor(fallback, request.role));
+          const retry = await fallback.complete(request, resolveModel(fallback, request.role));
           return { ...retry, error: result.error };
         }
       }

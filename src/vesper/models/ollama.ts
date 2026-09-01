@@ -184,6 +184,11 @@ export function createOllamaProvider(options: OllamaOptions) {
     defaultModel: options.defaultModel,
     isAvailable: () => available,
 
+    /** Names from the last successful /api/tags. Empty means unknown, not "none installed". */
+    installedModels: () =>
+      tags.map((tag) => tag.name ?? tag.model).filter((name): name is string => Boolean(name)),
+
+
     async probe(): Promise<{ available: boolean; detail: string }> {
       const json = await getJson<{ models?: OllamaTag[] }>("/api/tags", probeTimeoutMs);
       if (!json) {

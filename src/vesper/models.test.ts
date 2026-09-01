@@ -217,4 +217,122 @@ describe("model routing", () => {
     assert.equal(recovered.providerId, "ollama");
     assert.equal(recovered.text, "from the local backend");
   });
+
+  it("awaits an in-flight probe instead of falling through to echo", async () => {
+    let available = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const late = {
+      id: "ollama",
+      kind: "local",
+      isAvailable: () => available,
+      async probe() {
+        await gate;
+        available = true;
+        return { available: true, detail: "up" };
+      },
+      complete: async (_request: CompletionRequest, model: string) => ({
+        text: "from the local backend",
+        toolCalls: [],
+        providerId: "ollama",
+        model,
+        role: "everyday" as const,
+      }),
+    };
+    const router = createModelRouter({ config: defaultConfig(), providers: [late] });
+    const probing = router.probeAll();
+    const turn = router.complete({
+      messages: [{ role: "user", content: "ping" }],
+      role: "everyday",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    release();
+    await probing;
+    const result = await turn;
+    assert.equal(result.providerId, "ollama");
+    assert.equal(result.text, "from the local backend");
+  });
+
+  it("uses an installed chat model when the configured name is missing", async () => {
+    const asked: string[] = [];
+    const ollama = {
+      id: "ollama",
+      kind: "local",
+      isAvailable: () => true,
+      installedModels: () => ["qwen3:14b", "nomic-embed-text"],
+      complete: async (_request: CompletionRequest, model: string) => {
+        asked.push(model);
+        return {
+          text: "ok",
+          toolCalls: [],
+          providerId: "ollama",
+          model,
+          role: "everyday" as const,
+        };
+      },
+    };
+    const router = createModelRouter({ config: defaultConfig(), providers: [ollama] });
+    const result = await router.complete({
+      messages: [{ role: "user", content: "ping" }],
+      role: "everyday",
+    });
+    assert.equal(result.model, "qwen3:14b");
+    assert.deepEqual(asked, ["qwen3:14b"]);
+  });
+
+  it("does not rewrite a configured name that is actually installed", async () => {
+    const asked: string[] = [];
+    const ollama = {
+      id: "ollama",
+      kind: "local",
+      isAvailable: () => true,
+      installedModels: () => ["qwen2.5:14b", "qwen3:14b"],
+      complete: async (_request: CompletionRequest, model: string) => {
+        asked.push(model);
+        return {
+          text: "ok",
+          toolCalls: [],
+          providerId: "ollama",
+          model,
+          role: "everyday" as const,
+        };
+      },
+    };
+    const router = createModelRouter({ config: defaultConfig(), providers: [ollama] });
+    const result = await router.complete({
+      messages: [{ role: "user", content: "ping" }],
+      role: "everyday",
+    });
+    assert.equal(result.model, "qwen2.5:14b");
+    assert.deepEqual(asked, ["qwen2.5:14b"]);
+  });
+
+  it("does not send an embedding model when that is all that is installed", async () => {
+    const asked: string[] = [];
+    const ollama = {
+      id: "ollama",
+      kind: "local",
+      isAvailable: () => true,
+      installedModels: () => ["nomic-embed-text"],
+      complete: async (_request: CompletionRequest, model: string) => {
+        asked.push(model);
+        return {
+          text: "ok",
+          toolCalls: [],
+          providerId: "ollama",
+          model,
+          role: "everyday" as const,
+        };
+      },
+    };
+    const router = createModelRouter({ config: defaultConfig(), providers: [ollama] });
+    const result = await router.complete({
+      messages: [{ role: "user", content: "ping" }],
+      role: "everyday",
+    });
+    assert.equal(result.model, "qwen2.5:14b");
+    assert.deepEqual(asked, ["qwen2.5:14b"]);
+  });
 });

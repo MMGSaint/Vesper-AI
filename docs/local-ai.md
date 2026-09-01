@@ -52,7 +52,14 @@ cancelled turn is never retried against a different provider.
 
 Providers are re-probed lazily when no local backend appears available, rate limited so
 an idle assistant never polls. A backend started *after* Vesper — the normal order when
-Vesper launches at login — is picked up on the next turn without a restart.
+Vesper launches at login — is picked up on the next turn without a restart. A probe
+already in flight is awaited, not treated as finished: otherwise a concurrent `--ask`
+during first-boot discovery falls through to the offline stub.
+
+When the configured model name is not installed, the router asks for an installed chat
+model instead (role-hinted, never an embedding model). The configured name is left
+alone when it *is* installed, including an Ollama `:latest` alias. The config file is
+not rewritten, and no model is auto-crowned fastest.
 
 ## Benchmark harness
 

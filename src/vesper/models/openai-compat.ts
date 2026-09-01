@@ -88,6 +88,7 @@ export function createOpenAiCompatProvider(options: OpenAiCompatOptions) {
   let available =
     options.kind === "test" || (options.kind === "optional-cloud" && Boolean(options.apiKey));
   const fetchImpl = options.fetchImpl ?? fetch;
+  let listed: string[] = [];
 
   return {
     id: options.id,
@@ -96,16 +97,19 @@ export function createOpenAiCompatProvider(options: OpenAiCompatOptions) {
     async probe() {
       if (!options.apiKey && options.kind === "optional-cloud") {
         available = false;
+        listed = [];
         return { available, detail: "No API key" };
       }
       if (options.kind === "optional-cloud" && options.apiKey) {
         available = true;
         return { available, detail: "Optional cloud key present (not probed on every boot)" };
       }
-      const result = await probeOpenAiCompatible(options.baseUrl, options.timeoutMs ?? 1200, fetchImpl);
+      const result = await listOpenAiModels(options.baseUrl, options.timeoutMs ?? 1200, fetchImpl);
       available = result.available;
-      return result;
+      listed = result.available ? result.models : [];
+      return { available: result.available, detail: result.detail };
     },
+    installedModels: () => listed,
     isAvailable: () => available,
     async complete(request: CompletionRequest, model: string): Promise<CompletionResult> {
       if (!available && options.kind !== "optional-cloud") {
