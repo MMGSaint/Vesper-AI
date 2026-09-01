@@ -312,8 +312,10 @@ The ordered workflow is `docs/first-pc-boot.md`, updated for the residency work 
    a tool call is still open.
 4. **Physical validation** — everything under §7 waits on the target PC.
 
-~~Governor decision-journal query~~ — **done.** `governor_decisions` + `--decisions`.
-`task_create` now attributes remote tasks to the asking device (BACKLOG 4c.1).
+~~Governor decision-journal query~~ — **done at b292d97.** `governor_decisions` + `--decisions`.
+The first PC boot ran an older tree and rejected `--decisions`. Pull `b292d97`; `--help`
+must then list the flag. The Windows launcher now forwards `%*` so
+`vesper-host.cmd --decisions` reaches parseCli.
 
 ---
 

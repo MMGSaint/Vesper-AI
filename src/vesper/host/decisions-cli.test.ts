@@ -42,4 +42,12 @@ describe("--decisions is a one-shot diagnostic", () => {
     assert.equal(result.code, 0, describe_(result));
     assert.match(result.stdout, /No autonomy decisions are on record|Autonomy decisions/i, describe_(result));
   });
+
+  it("--help lists --decisions, the same surface parseCli recognises", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "vesper-decisions-help-"));
+    const result = await run(["--help"], cwd);
+    assert.equal(result.code, 0, describe_(result));
+    assert.match(result.stdout, /--decisions/, describe_(result));
+    assert.doesNotMatch(result.stdout, /Unknown command/, describe_(result));
+  });
 });
