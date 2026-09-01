@@ -461,4 +461,46 @@ describe("the executor is wired into the runtime, not merely written", () => {
     const task = await runtime.taskQueue.get(taskId);
     assert.equal(task?.kind, undefined);
   });
+
+  it("a tool_call with a future dueAt waits, then still goes through the chain", async () => {
+    const { runtime } = await sandboxRuntime({ driveTasks: true });
+    const queued = await runtime.tools.invoke({
+      name: "task_create",
+      args: {
+        description: "remember later",
+        tool: "memory_remember",
+        toolArgs: { category: "fact", key: "deferred", value: "yes" },
+        dueAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      },
+      workspaceId: "general",
+    });
+    const taskId = (queued.result?.data as { taskId?: string }).taskId!;
+    await runtime.taskScheduler.tick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const waiting = await runtime.taskQueue.get(taskId);
+    assert.equal(waiting?.kind, TOOL_CALL_TASK_KIND);
+    assert.equal(waiting?.state, "assigned", `future tool_call must wait, got ${waiting?.state}`);
+    const early = await runtime.memory.search("deferred");
+    assert.equal(early.some((e) => e.value.includes("yes")), false, "must not run before dueAt");
+  });
+
+  it("a tool_call whose dueAt is already past still cannot run confirm-tier unattended", async () => {
+    const { approved, runtime } = await sandboxRuntime({ driveTasks: true });
+    const queued = await runtime.tools.invoke({
+      name: "task_create",
+      args: {
+        description: "write later",
+        tool: "fs_write",
+        toolArgs: { path: join(approved, "still-no.txt"), content: "NOPE" },
+        dueAt: new Date(Date.now() - 1000).toISOString(),
+      },
+      workspaceId: "general",
+    });
+    const taskId = (queued.result?.data as { taskId?: string }).taskId!;
+    await runtime.taskScheduler.tick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const task = await runtime.taskQueue.get(taskId);
+    assert.equal(task?.state, "failed");
+    assert.equal(await exists(join(approved, "still-no.txt")), false);
+  });
 });

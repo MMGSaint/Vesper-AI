@@ -268,9 +268,10 @@ export const vesperConfigSchema = z.object({
       /** Cap on events per day-partition — a floody subsystem cannot grow unbounded. */
       journalMaxPerDay: z.number().int().min(50).max(50_000).default(1000),
       /**
-       * Whether the idle-scheduler tick drives the task queue. Off by default —
-       * a runtime with no executors registered stays silent, so a fresh install does
-       * not appear to try to do work it cannot yet do.
+       * Whether the idle-scheduler tick drives the task queue. Off by default so a
+       * fresh install does not start reminders or delayed tool_calls before the owner
+       * has completed first boot. Executors (noop, reminder, tool_call) are registered
+       * either way; this flag is the on-switch, not the wiring.
        */
       driveTasksOnIdle: z.boolean().default(false),
       /** Cap on how many tasks the scheduler starts on one tick. */

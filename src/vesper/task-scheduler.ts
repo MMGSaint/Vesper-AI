@@ -33,6 +33,7 @@
  */
 
 import type { TaskQueue, VesperTask } from "./distributed/tasks.ts";
+import { taskDueState } from "./distributed/tasks.ts";
 import type { DeviceRecord } from "./distributed/registry.ts";
 import { manifestHas } from "./distributed/capabilities.ts";
 import type { EventBus } from "./events.ts";
@@ -111,6 +112,11 @@ export interface TaskSchedulerOptions {
   maxPerTick?: number;
   /** Feature flag — off by default so a runtime with no executors is silent. */
   enabled?: boolean;
+  /**
+   * Clock. Injected so a test can prove a future dueAt is skipped and a past one is
+   * not, without sleeping. Production leaves it unset and uses Date.now().
+   */
+  now?: () => number;
 }
 
 /**
@@ -256,6 +262,19 @@ export class TaskScheduler {
         return `unauthorized:${authorized.reason}`;
       }
 
+      // dueAt is an absolute timestamp so a restart does not re-delay the work. A
+      // future dueAt is skipped silently — emitting every tick would flood the journal
+      // with "not yet" for every reminder on the queue. A garbage timestamp is failed
+      // rather than treated as due (which would fire early) or skipped forever.
+      const due = taskDueState(task, this.opts.now?.() ?? Date.now());
+      if (due === "not-due") return "not-due";
+      if (due === "invalid-dueAt") {
+        await this.opts.taskQueue.fail(task.id, "dueAt is not a valid timestamp", {
+          retryable: false,
+        });
+        return "invalid-dueAt";
+      }
+
       // Executor kind must be registered. A task with an unknown kind stays assigned
       // and emits a visible event so an operator can see the shortfall.
       if (!task.kind || !this.opts.registry.has(task.kind)) {
@@ -278,6 +297,15 @@ export class TaskScheduler {
       if (TERMINAL_STATES.has(fresh.state)) return `terminal:${fresh.state}`;
       if (fresh.state !== "assigned") return `not-assigned:${fresh.state}`;
       if (fresh.assignedTo !== this.opts.deviceId) return "reassigned-away";
+
+      const freshDue = taskDueState(fresh, this.opts.now?.() ?? Date.now());
+      if (freshDue === "not-due") return "not-due";
+      if (freshDue === "invalid-dueAt") {
+        await this.opts.taskQueue.fail(fresh.id, "dueAt is not a valid timestamp", {
+          retryable: false,
+        });
+        return "invalid-dueAt";
+      }
 
       const executor = this.opts.registry.get(fresh.kind!)!;
       const started = await this.opts.taskQueue.start(fresh.id);
@@ -343,9 +371,10 @@ export class TaskScheduler {
 }
 
 /**
- * The one built-in executor. Any task whose kind is 'noop' completes with a fixed
- * receipt. Useful for smoke tests, reminders, and as a placeholder for tasks a user
- * queued to see the lifecycle wired up before real executors exist.
+ * The one built-in executor that needs no runtime services. Any task whose kind is
+ * `noop` completes with a fixed receipt. Useful for smoke tests. Reminders and
+ * tool calls are registered by the runtime, because they need the notification hub
+ * and the tool registry respectively.
  */
 export function registerBuiltinExecutors(registry: TaskExecutorRegistry): void {
   registry.register("noop", async (task) => ({

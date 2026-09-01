@@ -13,7 +13,7 @@ call sites; the runtime awaited `knowledge.reindex()` on the critical path; ther
 no readiness state to distinguish "process alive" from "actually ready"; the lifecycle
 controller had no per-hook timeout. All four are addressed. See `docs/residency.md`.
 
-Last touched 2026-08-29. Everything below is observed output or a repo fact.
+Last touched 2026-09-01. Everything below is observed output or a repo fact.
 
 ---
 
@@ -171,9 +171,9 @@ screening bypass.
 
 | Check | Result |
 |---|---|
-| `npm test` | **1084 pass, 0 fail, 0 skipped** (671 at Phase 1 start, 894 at Phase 2 end, 1023 at Phase 3) |
-| `npm run security:quick` | **373 pass, 0 fail** (361 at Phase 3 end; the gate grew by one file, none dropped) |
-| `npm run hygiene` | clean, 368 files |
+| `npm test` | **1131 pass, 0 fail, 0 skipped** (671 at Phase 1 start, 894 at Phase 2 end, 1023 at Phase 3, 1108 at decisions) |
+| `npm run security:quick` | **390 pass, 0 fail** (361 at Phase 3 end; the gate grew by `reminder-executor.test.ts`, none dropped) |
+| `npm run hygiene` | clean, 376 files |
 | `npx tsc --noEmit` | clean |
 | Journal adversarial workflow | 30 CONFIRMED findings — all HIGH fixed with regression tests |
 | Phase-2 attack suite | 28 CONFIRMED (1 CRITICAL, 10 HIGH) across scheduler / governor / checkpoint, **plus 12 capsule findings the verifiers wrongly refuted** — all fixed, 37 regression tests |
@@ -280,13 +280,19 @@ commits landing the assistant foundation.
   Needs an explicit user decision because opening a listener on a personal
   machine is not Vesper's call.
 - ~~An executor that invokes a tool under the same permission gate~~ — **done in
-  Phase 3.** Timer-based and reminder-style executors are still open.
+  Phase 3.**
+- ~~Timer / reminder executors~~ — **done.** `dueAt` (absolute ISO) and `inSeconds`
+  (converted once at queue time) live on the task. The scheduler will not start a
+  task whose dueAt is still in the future. A due-at task with no tool is kind
+  `reminder`: it writes a subsystem notification and a durable event, and it does
+  not invoke tools even if `args.tool` is planted. A due-at `tool_call` still goes
+  through `ToolRegistry.invoke` under origin `scheduled`. A description-only task
+  with neither a tool nor a due time stays un-started, as before.
 - ~~Governor decision reads~~ — **done.** Catch-up still counts them; `governor_decisions`
   (read-tier, trusted-only) and `--decisions` now query the journal by optional
   correlation id. Forged bus events are labelled unauthenticated and never summarised
   as something Vesper authorised. Session-nonce vouched vs previous-session recorded
   stay distinct claims.
-- Timer-based and reminder-style executors are still open.
 
 ### P2 / P3
 
@@ -307,10 +313,11 @@ The ordered workflow is `docs/first-pc-boot.md`, updated for the residency work 
 2. **NEXUS re-detection** — the adapter is constructed once at startup from config, so a
    `mock → live` transition requires a restart. The shared `classifyOptimizerCapability`
    is the seam a future re-detection path would feed. Not built yet because a real NEXUS
-   endpoint is a physical-PC prerequisite.
-3. **Timer / reminder executors** — `tool_call` is wired; a due-at executor that is not
-   a tool call is still open.
-4. **Physical validation** — everything under §7 waits on the target PC.
+   endpoint is a physical-PC prerequisite. Do not invent the unpublished API.
+3. **Physical validation** — everything under §7 waits on the target PC.
+
+~~Timer / reminder executors~~ — **done.** `dueAt` / `inSeconds` on the task, scheduler
+gate, `reminder` kind, delayed `tool_call` still through the chain. See P1.
 
 ~~Governor decision-journal query~~ — **done at b292d97.** `governor_decisions` + `--decisions`.
 The first PC boot ran an older tree and rejected `--decisions`. Pull `b292d97`; `--help`
