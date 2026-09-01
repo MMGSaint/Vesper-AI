@@ -144,7 +144,7 @@ The CRITICAL and the MEDIUM are fixed (see the table in that file). These two re
 
 | # | Finding | Why deferred |
 |---|---|---|
-| 4c.1 | **`task_create` records the HOST device as `createdBy`** for tasks a remote device created, erasing which device asked. | LOW. It is an attribution loss, not an authority grant — the task still routes and executes under the same capability checks, and `requiredCapabilities` is unchanged. It does corrupt the provenance a future correction-loop or session capsule would read, so it should be fixed before either consumes `createdBy`. |
+| 4c.1 | **`task_create` records the HOST device as `createdBy`** for tasks a remote device created, erasing which device asked. | **Fixed.** `task_create` now copies `origin.deviceId` when the origin is remote. Regression in `security-decisions.test.ts`. |
 | 4c.2 | **Remote conversation text enters shared agent history as an unmarked `user` message**, so a later local turn cannot tell which device said it. | INFORMATIONAL. The untrusted-content boundary already governs what that text can *do*; this is about whether a later reader can tell who said it. Fixing it means adding provenance to history entries, which touches the context window and `fitContext` — worth doing deliberately rather than as a closure-pass patch. |
 
 ## 5. Defences that exist but are not mutation-proven

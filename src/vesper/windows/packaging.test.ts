@@ -111,4 +111,24 @@ describe("windows packaging and lifecycle", () => {
       );
     }
   });
+
+  it("the launcher forwards CLI flags instead of swallowing them", async () => {
+    // Without %*, `vesper-host.cmd --decisions` starts the REPL and reports
+    // success. The host then looks like it has no --decisions command.
+    const cmd = await readFile(
+      join(process.cwd(), "packaging", "windows", "vesper-host.cmd"),
+      "utf8",
+    );
+    assert.match(cmd, /main\.ts" %\*/, "repo launcher must forward %* to node");
+
+    const script = await readFile(
+      join(process.cwd(), "packaging", "windows", "install.ps1"),
+      "utf8",
+    );
+    assert.match(
+      script,
+      /main\.ts %\*/,
+      "installed launcher must forward %* so --doctor / --ask / --decisions reach parseCli",
+    );
+  });
 });

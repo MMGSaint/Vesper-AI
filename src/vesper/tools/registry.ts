@@ -400,6 +400,7 @@ export class ToolRegistry {
       const result = await registered.handler(args, {
         workspaceId: input.workspaceId,
         dryRun: input.dryRun,
+        origin: { kind: origin.kind, deviceId: origin.deviceId },
       });
       this.log.info("tool", `Executed ${input.name}`, {
         tool: input.name,

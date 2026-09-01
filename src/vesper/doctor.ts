@@ -18,6 +18,36 @@ export interface DoctorReport {
   checks: DoctorCheck[];
 }
 
+/**
+ * How the `config` check names where the settings came from.
+ *
+ * Three distinct claims, deliberately worded so they cannot be confused:
+ *   - `file`        — this exact file was read; what follows is what it says.
+ *   - `default`     — no readable file; every value below is a built-in default.
+ *   - `locked-down` — a file exists but could not be trusted, so authority was dropped.
+ *
+ * When the caller passes no source at all we say so rather than implying a file was
+ * read, for the same reason `NOT_CONFIGURED` is not `UNAVAILABLE`.
+ */
+function configOrigin(
+  source: string | undefined,
+  path: string | undefined,
+  name: string,
+): string {
+  const at = path ? ` at ${path}` : "";
+  if (source === "file") return `Config read from ${path ?? "disk"} (${name})`;
+  if (source === "default") {
+    return (
+      `No config file${at} — running on built-in defaults. ` +
+      `Every setting below is a default, not something you set.`
+    );
+  }
+  if (source === "locked-down") {
+    return `Config${at} could not be trusted and was locked down; running with no approved roots.`;
+  }
+  return `Config parsed${at} (${name}); source not reported`;
+}
+
 async function writable(dir: string): Promise<boolean> {
   try {
     await mkdir(dir, { recursive: true });
@@ -42,6 +72,16 @@ export async function runDoctor(input: {
   config: VesperConfig;
   configOk: boolean;
   configErrors: string[];
+  /**
+   * Where the configuration actually came from, and the file that was consulted.
+   *
+   * Optional so the unit-test callers that only want the cheap filesystem checks keep
+   * working, but the host always passes it: without it, `config: Config parsed` is the
+   * same line whether Vesper read the user's file or never found one and reported its
+   * own built-in defaults. See the `config` check below.
+   */
+  configSource?: "file" | "default" | "locked-down";
+  configPath?: string;
   storageReadable: boolean;
   lastError?: string | null;
   /**
@@ -79,10 +119,27 @@ export async function runDoctor(input: {
       detail: `Node ${process.versions.node} (need >= 22)`,
     },
     {
+      // Name the FILE and the SOURCE, not just "parsed".
+      //
+      // "Config parsed (Vesper)" was printed identically whether Vesper had read the
+      // user's file or had found no file at all and fallen back to built-in defaults —
+      // and the role lines below then reported those defaults in the same shape as a
+      // real setting. A user whose config lives on a path this process does not resolve
+      // to therefore saw a green report describing a configuration they never wrote,
+      // with nothing on screen to distinguish it from theirs.
+      //
+      // Vesper resolves its root differently depending on `VESPER_ENV` (see
+      // paths.ts `resolveVesperDirs`), so two config files on one machine is a normal
+      // state, not a corner case: `npm run doctor` reads a CWD-relative dev tree while
+      // the packaged launcher sets VESPER_ENV=production and reads LOCALAPPDATA. Which
+      // one answered is exactly the fact a diagnostic exists to report.
+      //
+      // `--config-check` already printed `Config OK (<source>) at <path>`. The doctor
+      // being quieter than the narrower command was the bug.
       id: "config",
       ok: input.configOk,
       detail: input.configOk
-        ? `Config parsed (${input.config.identity.name})`
+        ? configOrigin(input.configSource, input.configPath, input.config.identity.name)
         : `Config invalid: ${input.configErrors.join("; ") || "unknown"}`,
     },
     {

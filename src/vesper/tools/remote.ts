@@ -103,6 +103,10 @@ const TRUSTED_ONLY_TOOLS: readonly string[] = [
   // describe the owner's private activity.
   "rollback_apply",
   "rollback_list",
+  // The decision journal is the owner's private audit of what Vesper authorised.
+  // A trusted phone asking "why did you do that" is the feature; a restricted one
+  // reading it is disclosure of the same activity `task_list` already hides.
+  "governor_decisions",
 ];
 
 /**

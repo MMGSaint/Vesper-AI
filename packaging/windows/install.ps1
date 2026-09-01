@@ -34,7 +34,7 @@ $launcher = Join-Path $root "bin\vesper-host.cmd"
 @echo off
 set VESPER_ENV=production
 cd /d "$repo"
-node --experimental-strip-types src\vesper\host\main.ts
+node --experimental-strip-types src\vesper\host\main.ts %*
 "@ | Set-Content -Path $launcher -Encoding ASCII
 
 if ($RegisterStartup) {

@@ -281,9 +281,12 @@ commits landing the assistant foundation.
   machine is not Vesper's call.
 - ~~An executor that invokes a tool under the same permission gate~~ — **done in
   Phase 3.** Timer-based and reminder-style executors are still open.
-- ~~Governor decision reads~~ — **partly done in Phase 3:** catch-up now reports
-  autonomy decisions including deliberate no-action. A "why did Vesper do X" tool that
-  queries the journal by correlation id is still open.
+- ~~Governor decision reads~~ — **done.** Catch-up still counts them; `governor_decisions`
+  (read-tier, trusted-only) and `--decisions` now query the journal by optional
+  correlation id. Forged bus events are labelled unauthenticated and never summarised
+  as something Vesper authorised. Session-nonce vouched vs previous-session recorded
+  stay distinct claims.
+- Timer-based and reminder-style executors are still open.
 
 ### P2 / P3
 
@@ -300,21 +303,19 @@ The ordered workflow is `docs/first-pc-boot.md`, updated for the residency work 
 `docs/residency.md`. Everything below is what remains verifiable without that machine.
 
 1. **Real Windows hardware probes** — the interface, the checklist and the priority rule
-   are ready; the six probes are not written because the machine has been off.
+   are ready; the six probes are not written because they need the physical PC.
 2. **NEXUS re-detection** — the adapter is constructed once at startup from config, so a
    `mock → live` transition requires a restart. The shared `classifyOptimizerCapability`
    is the seam a future re-detection path would feed. Not built yet because a real NEXUS
    endpoint is a physical-PC prerequisite.
-2. **Correction record producer** — a small watcher that turns optimizer
-   observations into `CapsuleCorrectionEntry` values. Closes the mission's
-   correction-loop hook.
-3. **A tool-invoking executor** for the scheduler — the current `noop`
-   executor is enough to prove the loop; a `tool_call` executor that goes
-   back through the permission gate closes the scheduler → tools loop.
-4. **Governor decision-journal query** — a `governor_decisions` tool or a
-   `--decisions` diagnostic flag that reads autonomy.decision events from the
-   journal.
-5. **Physical validation** — everything under §7 waits on the target PC.
+3. **Timer / reminder executors** — `tool_call` is wired; a due-at executor that is not
+   a tool call is still open.
+4. **Physical validation** — everything under §7 waits on the target PC.
+
+~~Governor decision-journal query~~ — **done at b292d97.** `governor_decisions` + `--decisions`.
+The first PC boot ran an older tree and rejected `--decisions`. Pull `b292d97`; `--help`
+must then list the flag. The Windows launcher now forwards `%*` so
+`vesper-host.cmd --decisions` reaches parseCli.
 
 ---
 
