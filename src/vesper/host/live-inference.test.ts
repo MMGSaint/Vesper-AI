@@ -207,6 +207,49 @@ describe("inference end to end from the host layer", () => {
     }
   });
 
+  it("asks an installed model when production defaults name one that is not", async () => {
+    // The installer writes no models section. Built-in everyday is qwen2.5:14b.
+    // The target PC has qwen3:14b. Direct `node host/main.ts --ask` often reads a
+    // repo-tree config that already names qwen3; the launcher sets VESPER_ENV=production
+    // and reads LOCALAPPDATA, so it used to 404 the missing default, treat that as an
+    // outage, and print the echo stub. The daemon was never the problem.
+    const backend = await startOllama("Paris.");
+    const dirs = dirsUnder("live-inference-defaults");
+    await mkdir(dirs.config, { recursive: true });
+    await writeFile(
+      configFile(dirs),
+      JSON.stringify(
+        {
+          identity: { name: "Vesper", userName: "User" },
+          hardware: { mode: "auto" },
+          optimizer: { mode: "mock" },
+          voice: { enabled: false },
+          windows: { enableTray: true, startOnLogin: false },
+          models: { endpoints: { ollama: `${backend.url}/v1` } },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    const host = await createProductionHost({ dirs, runtime: { skipDiscovery: true } });
+    try {
+      const turn = await host.runtime.chat("What is the capital of France?");
+      assert.equal(turn.reply, "Paris.");
+      assert.equal(turn.model?.providerId, "ollama");
+      assert.notEqual(turn.model?.unavailable, true);
+      assert.equal(turn.model?.model, "qwen3:14b");
+      assert.deepEqual(
+        backend.chats.map((chat) => chat.model),
+        ["qwen3:14b"],
+        `server saw ${JSON.stringify(backend.chats)}`,
+      );
+    } finally {
+      await host.shutdown();
+      await backend.close();
+    }
+  });
+
   it("reports the model it actually used, not the one it was configured with", async () => {
     // When the backend is down the turn must say so rather than reporting the
     // configured model as though it had served the reply. `turn.model` is the only

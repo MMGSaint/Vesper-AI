@@ -317,6 +317,20 @@ The first PC boot ran an older tree and rejected `--decisions`. Pull `b292d97`; 
 must then list the flag. The Windows launcher now forwards `%*` so
 `vesper-host.cmd --decisions` reaches parseCli.
 
+**Launcher `--ask` vs direct host (this session).** Args forwarding was not the
+inference bug. Direct `node host/main.ts --ask` reads `data/vesper`; the launcher
+sets `VESPER_ENV=production` and reads `%LOCALAPPDATA%\Vesper`. Production
+defaults still name `qwen2.5:14b`. The target PC has `qwen3:14b`. Asking for a
+missing model 404s, the router treats that as an outage, and the user hears the
+echo stub with a daemon that is fine. `--decisions` worked because it never
+picks a model. Also: first-boot `probeAll()` and `--ask` `pick()` raced — a
+timestamp set at the *start* of the probe made pick skip it and fall through
+to echo. Both are closed on `grok/launcher-inference`: pick an installed model
+per turn (not a config write), probe 127.0.0.1 / localhost / `OLLAMA_HOST`, and
+await an in-flight probe instead of rate-limiting a failure. Still does not
+enable startup. Still does not invent a NEXUS API.
+
+
 ---
 
 ## 7. Requires the physical PC

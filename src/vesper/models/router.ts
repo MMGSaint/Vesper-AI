@@ -2,6 +2,7 @@ import type { VesperConfig } from "../config.ts";
 import type { CompletionRequest, CompletionResult, DiscoveredModel, ModelRole } from "../types.ts";
 import { createEchoProvider } from "./echo.ts";
 import { createOllamaProvider } from "./ollama.ts";
+import { ollamaEndpointCandidates, pickInstalledModel } from "./ollama-resolve.ts";
 import { createOpenAiCompatProvider, type OpenAiCompatProvider } from "./openai-compat.ts";
 
 export interface ModelRouter {
@@ -40,6 +41,8 @@ export type AnyProvider = {
   /** Backends that can generate embeddings without a second service. */
   embed?: (texts: string[], model: string) => Promise<number[][] | null>;
   defaultModel?: string;
+  /** Last successful probe's installed model names, if the provider caches them. */
+  installedNames?: () => string[];
 };
 
 export function createModelRouter(input: {
@@ -55,6 +58,10 @@ export function createModelRouter(input: {
     id: "ollama",
     baseUrl: input.config.models.endpoints.ollama,
     defaultModel: input.config.models.roles.everyday?.model ?? "qwen2.5:14b",
+    endpointCandidates: ollamaEndpointCandidates({
+      configured: input.config.models.endpoints.ollama,
+      allowRemote: input.config.models.allowRemoteEndpoints,
+    }),
   });
   const llamacpp = createOpenAiCompatProvider({
     id: "llamacpp",
@@ -76,86 +83,35 @@ export function createModelRouter(input: {
   if (!providers.some((provider) => provider.id === "echo")) providers.push(echo);
 
   let activeId: string | undefined;
-  let lastProbeAt = 0;
-
   /**
-   * Providers were probed once, at the end of fire-and-forget first-boot discovery, and
-   * never again - so the first messages after launch fell back to the offline stub even
-   * with a backend running, `--skip-discovery` meant no probe ever happened, and a
-   * backend started *after* Vesper was never noticed.
+   * In-flight probe shared by first-boot's `probeAll()` and `pick()` on `--ask`.
    *
-   * Re-probing lazily, only when no local backend appears available, keeps an idle
-   * assistant free of background polling while still recovering on its own.
+   * Setting a timestamp at the *start* of probeAll used to make pick() treat the
+   * still-running probe as "already tried" and fall through to echo. A launcher
+   * `--ask` that races first-boot is that path. Await the same promise instead.
    */
-  const REPROBE_AFTER_MS = 15_000;
+  let inflightProbe: Promise<void> | null = null;
 
-  async function reprobeIfStale(): Promise<void> {
-    if (Date.now() - lastProbeAt < REPROBE_AFTER_MS) return;
-    lastProbeAt = Date.now();
-    await Promise.all(
-      providers.map((provider) =>
-        provider.probe?.().catch(() => undefined),
-      ),
-    );
+  async function probeNow(): Promise<void> {
+    if (inflightProbe) return inflightProbe;
+    const running = Promise.all(
+      providers.map((provider) => provider.probe?.().catch(() => undefined)),
+    ).then(() => undefined);
+    inflightProbe = running;
+    try {
+      await running;
+    } finally {
+      if (inflightProbe === running) inflightProbe = null;
+    }
   }
 
-  async function pick(role: ModelRole): Promise<{ provider: AnyProvider; model: string }> {
-    if (activeId) {
-      const forced = providers.find((provider) => provider.id === activeId);
-      if (forced) {
-        const model =
-          forced.id === "xai-optional"
-            ? "grok-4.5"
-            : input.config.models.roles[role]?.model ?? "default";
-        return { provider: forced, model };
-      }
-    }
-    const preferred = input.config.models.roles[role];
-    if (preferred) {
-      const match = providers.find(
-        (provider) => provider.id === preferred.provider && provider.isAvailable(),
-      );
-      if (match) return { provider: match, model: preferred.model };
-    }
-    let local = providers.find(
-      (provider) => provider.kind === "local" && provider.isAvailable(),
-    );
-    if (!local) {
-      // No local backend looks available. That may simply be stale information.
-      await reprobeIfStale();
-      const preferredNow = input.config.models.roles[role];
-      if (preferredNow) {
-        const match = providers.find(
-          (provider) => provider.id === preferredNow.provider && provider.isAvailable(),
-        );
-        if (match) return { provider: match, model: preferredNow.model };
-      }
-      local = providers.find(
-        (provider) => provider.kind === "local" && provider.isAvailable(),
-      );
-    }
-    if (local) {
-      return {
-        provider: local,
-        model: input.config.models.roles[role]?.model ?? "default",
-      };
-    }
-    const optional = providers.find(
-      (provider) => provider.kind === "optional-cloud" && provider.isAvailable(),
-    );
-    if (optional) {
-      return { provider: optional, model: optional.id === "xai-optional" ? "grok-4.5" : "default" };
-    }
-    const other = providers.find(
-      (provider) => provider.id !== "echo" && provider.isAvailable(),
-    );
-    if (other) {
-      return {
-        provider: other,
-        model: input.config.models.roles[role]?.model ?? other.id,
-      };
-    }
-    return { provider: echo, model: "echo" };
+  async function ensureProbed(): Promise<void> {
+    const anyLocal = providers.some((provider) => provider.kind === "local" && provider.isAvailable());
+    // A successful local backend does not need another probe this turn. A FAILED
+    // probe must not lock --ask out: first-boot's probeAll and pick() race on a
+    // cold production start, and the launcher --ask is that race.
+    if (anyLocal) return;
+    await probeNow();
   }
 
   /** Resolve the model name a given provider should be asked for at this role. */
@@ -165,6 +121,65 @@ export function createModelRouter(input: {
     if (provider.id === "xai-optional") return "grok-4.5";
     if (provider.id === "echo") return "echo";
     return provider.defaultModel ?? configured?.model ?? "default";
+  }
+
+  function resolveModel(provider: AnyProvider, role: ModelRole): string {
+    const requested = modelFor(provider, role);
+    if (provider.id === "echo" || provider.id === "xai-optional") return requested;
+    return pickInstalledModel({
+      requested,
+      role,
+      installed: provider.installedNames?.() ?? [],
+    });
+  }
+
+  async function pick(role: ModelRole): Promise<{ provider: AnyProvider; model: string }> {
+    if (activeId) {
+      const forced = providers.find((provider) => provider.id === activeId);
+      if (forced) {
+        return { provider: forced, model: resolveModel(forced, role) };
+      }
+    }
+    const preferred = input.config.models.roles[role];
+    if (preferred) {
+      const match = providers.find(
+        (provider) => provider.id === preferred.provider && provider.isAvailable(),
+      );
+      if (match) return { provider: match, model: resolveModel(match, role) };
+    }
+    let local = providers.find(
+      (provider) => provider.kind === "local" && provider.isAvailable(),
+    );
+    if (!local) {
+      // No local backend looks available. That may simply be stale information.
+      await ensureProbed();
+      const preferredNow = input.config.models.roles[role];
+      if (preferredNow) {
+        const match = providers.find(
+          (provider) => provider.id === preferredNow.provider && provider.isAvailable(),
+        );
+        if (match) return { provider: match, model: resolveModel(match, role) };
+      }
+      local = providers.find(
+        (provider) => provider.kind === "local" && provider.isAvailable(),
+      );
+    }
+    if (local) {
+      return { provider: local, model: resolveModel(local, role) };
+    }
+    const optional = providers.find(
+      (provider) => provider.kind === "optional-cloud" && provider.isAvailable(),
+    );
+    if (optional) {
+      return { provider: optional, model: resolveModel(optional, role) };
+    }
+    const other = providers.find(
+      (provider) => provider.id !== "echo" && provider.isAvailable(),
+    );
+    if (other) {
+      return { provider: other, model: resolveModel(other, role) };
+    }
+    return { provider: echo, model: "echo" };
   }
 
   return {
@@ -183,8 +198,7 @@ export function createModelRouter(input: {
       };
     },
     async probeAll() {
-      lastProbeAt = Date.now();
-      await Promise.all(providers.map((provider) => provider.probe?.().catch(() => undefined)));
+      await probeNow();
     },
     providers() {
       return providers.slice();
@@ -200,7 +214,7 @@ export function createModelRouter(input: {
         if (fallback) {
           // Model names are provider-specific. Asking a different backend for the
           // failed backend's model name would just fail a second time.
-          const retry = await fallback.complete(request, modelFor(fallback, request.role));
+          const retry = await fallback.complete(request, resolveModel(fallback, request.role));
           return { ...retry, error: result.error };
         }
       }

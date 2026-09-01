@@ -200,21 +200,86 @@ describe("model routing", () => {
     assert.equal(degraded.providerId, "echo");
     assert.ok(probes >= 1, "it probes before giving up on a local backend");
 
-    // The user starts Ollama. Nothing tells Vesper; it must notice by itself.
+    // The user starts Ollama. A failed probe must not lock the next --ask out of
+    // trying again: that lock was the launcher/first-boot race.
     backendUp = true;
-    const probesBefore = probes;
-    // Inside the cooldown, no new probe is issued - an idle assistant must not poll.
-    await ask();
-    assert.equal(probes, probesBefore, "re-probing is rate limited");
-
-    // Past the cooldown it re-probes and recovers without a restart.
-    router.setActive("");
-    const recovered = await (async () => {
-      // Simulate the cooldown expiring by probing explicitly, as a later turn would.
-      await router.probeAll();
-      return ask();
-    })();
+    const recovered = await ask();
     assert.equal(recovered.providerId, "ollama");
     assert.equal(recovered.text, "from the local backend");
+
+    // Once a local backend is up, an idle assistant must not poll it every turn.
+    const probesAfterRecover = probes;
+    const again = await ask();
+    assert.equal(again.providerId, "ollama");
+    assert.equal(probes, probesAfterRecover, "a live local backend is not re-probed every turn");
+  });
+
+  it("a completion waits for an in-flight probeAll rather than falling back to echo", async () => {
+    // First-boot discovery calls probeAll() in the background. `--ask` calls pick()
+    // immediately. If pick treats "probe started" as "probe already tried", the
+    // launcher answers with the echo stub while the probe is still in flight.
+    let release: () => void = () => undefined;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let available = false;
+    const slow = {
+      id: "ollama",
+      kind: "local",
+      isAvailable: () => available,
+      async probe() {
+        await barrier;
+        available = true;
+        return { available: true, detail: "up" };
+      },
+      complete: async (_request: CompletionRequest, model: string) => ({
+        text: "from the local backend",
+        toolCalls: [],
+        providerId: "ollama",
+        model,
+        role: "everyday" as const,
+      }),
+    };
+    const router = createModelRouter({ config: defaultConfig(), providers: [slow] });
+    const probing = router.probeAll();
+    const asking = router.complete({
+      messages: [{ role: "user", content: "ping" }],
+      role: "everyday",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+    const result = await asking;
+    await probing;
+    assert.equal(result.providerId, "ollama");
+    assert.equal(result.text, "from the local backend");
+  });
+
+  it("asks an installed model when the configured name is not on the daemon", async () => {
+    const asked: string[] = [];
+    const ollama = {
+      id: "ollama",
+      kind: "local",
+      isAvailable: () => true,
+      installedNames: () => ["qwen3:14b"],
+      complete: async (_request: CompletionRequest, model: string) => {
+        asked.push(model);
+        return {
+          text: "Paris.",
+          toolCalls: [],
+          providerId: "ollama",
+          model,
+          role: "everyday" as const,
+        };
+      },
+    };
+    const router = createModelRouter({ config: defaultConfig(), providers: [ollama] });
+    const result = await router.complete({
+      messages: [{ role: "user", content: "What is the capital of France?" }],
+      role: "everyday",
+    });
+    assert.equal(result.providerId, "ollama");
+    assert.equal(result.text, "Paris.");
+    assert.deepEqual(asked, ["qwen3:14b"]);
+    assert.notEqual(asked[0], "qwen2.5:14b", "the missing default must not go on the wire");
   });
 });

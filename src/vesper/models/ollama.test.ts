@@ -77,6 +77,37 @@ test("ollama provider", async (t) => {
     assert.equal(provider.isAvailable(), true);
   });
 
+  await t.test("probe follows a candidate that answers after the configured root does not", async () => {
+    const { fetchImpl, calls } = fakeOllama({
+      "/api/tags": (call) => {
+        if (call.url.startsWith("http://127.0.0.1:11434")) {
+          return new Response("nope", { status: 500 });
+        }
+        return Response.json({ models: [{ name: "qwen3:14b" }] });
+      },
+      "/api/chat": () =>
+        ndjson([
+          { message: { role: "assistant", content: "Paris." }, done: false },
+          { message: { role: "assistant", content: "" }, done: true, done_reason: "stop" },
+        ]),
+    });
+    const provider = createOllamaProvider({
+      baseUrl: BASE,
+      defaultModel: "qwen2.5:14b",
+      fetchImpl,
+      endpointCandidates: ["http://127.0.0.1:11434", "http://localhost:11434"],
+    });
+    const probed = await provider.probe();
+    assert.equal(probed.available, true);
+    assert.match(probed.detail, /localhost:11434/);
+    const result = await provider.complete(baseRequest(), "qwen3:14b");
+    assert.equal(result.text, "Paris.");
+    assert.ok(
+      calls.some((call) => call.url.startsWith("http://localhost:11434/api/chat")),
+      `complete must use the root that answered; saw ${calls.map((call) => call.url).join(", ")}`,
+    );
+  });
+
   await t.test("probe is honest when nothing answers", async () => {
     const fetchImpl = (async () => {
       throw new Error("ECONNREFUSED");

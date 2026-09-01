@@ -1,19 +1,3 @@
-/**
- * Native Ollama provider.
- *
- * Vesper previously reached Ollama through its OpenAI-compatible shim. That works, but
- * the shim hides everything Vesper actually needs to make local-first decisions:
- *
- *   - `/api/tags`  - installed models with parameter size and quantization
- *   - `/api/show`  - real context length per model
- *   - `/api/ps`    - which models are resident and how much VRAM they hold
- *   - `/api/chat`  - native tool calling and provider-reported token counters
- *   - `/api/embed` - local embeddings without a second service
- *
- * The counters matter for honesty: they are the only way Vesper can report throughput
- * as a measurement instead of an estimate.
- */
-
 import type {
   ChatMessage,
   CompletionRequest,
@@ -26,6 +10,7 @@ import type {
 } from "../types.ts";
 import { emptyUsage } from "../types.ts";
 import { finiteOrNull, isRedirect, linkAbort, NO_REDIRECT, nsToMs, readNdjson } from "./http.ts";
+import { nativeRoot } from "./ollama-resolve.ts";
 
 export interface OllamaOptions {
   id?: string;
@@ -59,11 +44,15 @@ export interface OllamaOptions {
    * capability — which is why the opt-in stays opt-in.
    */
   think?: boolean;
+  /**
+   * Extra native roots to probe, in order, after `baseUrl`. Used by the router so a
+   * production config that still has the built-in 127.0.0.1 default can find a daemon
+   * answering on localhost or OLLAMA_HOST. Tests that omit this only probe `baseUrl`.
+   */
+  endpointCandidates?: readonly string[];
 }
 
-export function nativeRoot(baseUrl: string): string {
-  return baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
-}
+export { nativeRoot } from "./ollama-resolve.ts";
 
 interface OllamaTag {
   name?: string;
@@ -139,17 +128,21 @@ export function parseParameterSize(raw: string | undefined): number | null {
 
 export function createOllamaProvider(options: OllamaOptions) {
   const id = options.id ?? "ollama";
-  const root = nativeRoot(options.baseUrl);
+  let root = nativeRoot(options.baseUrl);
+  const candidates = uniqueRoots([
+    root,
+    ...(options.endpointCandidates ?? []).map((item) => nativeRoot(item)),
+  ]);
   const fetchImpl = options.fetchImpl ?? fetch;
   const probeTimeoutMs = options.probeTimeoutMs ?? 1200;
   let available = false;
   let detail = "Not probed yet.";
   let tags: OllamaTag[] = [];
 
-  async function getJson<T>(path: string, timeoutMs: number): Promise<T | null> {
+  async function getJson<T>(path: string, timeoutMs: number, atRoot = root): Promise<T | null> {
     const link = linkAbort(undefined, timeoutMs);
     try {
-      const res = await fetchImpl(`${root}${path}`, { signal: link.signal, ...NO_REDIRECT });
+      const res = await fetchImpl(`${atRoot}${path}`, { signal: link.signal, ...NO_REDIRECT });
       if (isRedirect(res.status) || !res.ok) return null;
       return (await res.json()) as T;
     } catch {
@@ -183,20 +176,33 @@ export function createOllamaProvider(options: OllamaOptions) {
     kind: "local" as const,
     defaultModel: options.defaultModel,
     isAvailable: () => available,
+    installedNames: () =>
+      tags
+        .map((tag) => tag.name ?? tag.model)
+        .filter((name): name is string => typeof name === "string" && name.length > 0),
 
     async probe(): Promise<{ available: boolean; detail: string }> {
-      const json = await getJson<{ models?: OllamaTag[] }>("/api/tags", probeTimeoutMs);
-      if (!json) {
-        available = false;
-        tags = [];
-        detail = `No Ollama server answered at ${root}.`;
+      const results = await Promise.all(
+        candidates.map(async (candidate) => {
+          const json = await getJson<{ models?: OllamaTag[] }>("/api/tags", probeTimeoutMs, candidate);
+          return { candidate, json };
+        }),
+      );
+      const hit = candidates
+        .map((candidate) => results.find((row) => row.candidate === candidate && row.json))
+        .find((row): row is { candidate: string; json: { models?: OllamaTag[] } } => Boolean(row?.json));
+      if (hit) {
+        root = hit.candidate;
+        tags = Array.isArray(hit.json.models) ? hit.json.models : [];
+        available = true;
+        detail = tags.length
+          ? `Ollama reachable at ${root} with ${tags.length} installed model(s).`
+          : `Ollama reachable at ${root} but no models are installed (\`ollama pull <model>\`).`;
         return { available, detail };
       }
-      tags = Array.isArray(json.models) ? json.models : [];
-      available = true;
-      detail = tags.length
-        ? `Ollama reachable at ${root} with ${tags.length} installed model(s).`
-        : `Ollama reachable at ${root} but no models are installed (\`ollama pull <model>\`).`;
+      available = false;
+      tags = [];
+      detail = `No Ollama server answered at ${candidates.join(" or ")}.`;
       return { available, detail };
     },
 
@@ -385,6 +391,17 @@ export function createOllamaProvider(options: OllamaOptions) {
       };
     },
   };
+}
+
+function uniqueRoots(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
 }
 
 function unavailable(
