@@ -48,6 +48,7 @@ import { createBenchmarkHarness, type BenchmarkHarness } from "./models/benchmar
 import { createIdleScheduler, type IdleScheduler } from "./scheduler.ts";
 import { Agent, TurnFailure } from "./agent.ts";
 import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
+import { coercePreview } from "./preview.ts";
 import { buildDiagnostics } from "./diagnostics.ts";
 import { createId } from "./id.ts";
 import { createObsClient, type ObsClient } from "./specialists/obs.ts";
@@ -671,6 +672,7 @@ export class VesperRuntime {
         // A restored confirmation is the one case where we cannot ask who queued it,
         // and guessing "local" there would hand a persisted record local authority.
         requestedBy: readRequestedBy(rec.requestedBy),
+        preview: coercePreview(rec.preview),
       });
     }
     if (this.confirmations.size > 0) {

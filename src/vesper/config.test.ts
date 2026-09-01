@@ -13,6 +13,11 @@ describe("config", () => {
     assert.ok(config.workspaces.some((ws) => ws.id === "mortis"));
     assert.equal(config.optimizer.mode, "mock");
     assert.equal(config.models.allowOptionalCloud, false);
+    assert.equal(config.context.sources.screen, false);
+    assert.equal(config.context.sources.clipboard, false);
+    assert.equal(config.context.sources.audio, false);
+    assert.equal(config.context.sources.browser, false);
+    assert.equal(config.context.sources.process, false);
   });
 
   it("rejects invalid config and falls back to defaults", () => {

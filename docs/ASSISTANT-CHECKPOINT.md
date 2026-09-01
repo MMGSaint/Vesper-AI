@@ -327,8 +327,18 @@ picks a model. Also: first-boot `probeAll()` and `--ask` `pick()` raced — a
 timestamp set at the *start* of the probe made pick skip it and fall through
 to echo. Both are closed on `grok/launcher-inference`: pick an installed model
 per turn (not a config write), probe 127.0.0.1 / localhost / `OLLAMA_HOST`, and
-await an in-flight probe instead of rate-limiting a failure. Still does not
-enable startup. Still does not invent a NEXUS API.
+await an in-flight probe instead of rate-limiting a failure.
+
+**CONFIRM preview + context engine (this session).** Friday's useful idea is a
+person seeing what they are about to sign, not a fifth permission class.
+Queued confirmations now carry a deterministic `ActionPreview` (affected
+resources, side effects, reversibility) built *before* the handler runs. The
+four tiers are unchanged. Screenpipe's useful idea is independently enabled
+sources, not always-on capture: `ContextEngine` exists, every invasive source
+defaults off, and a disabled source does no I/O. Screen/clipboard/browser/audio
+are unimplemented even when enabled — they report `unavailable` rather than
+pretending to record.
+
 
 
 ---

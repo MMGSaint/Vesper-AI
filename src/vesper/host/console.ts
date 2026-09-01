@@ -122,6 +122,18 @@ async function resolveConfirmations(
     io.writeLine("");
     io.writeLine(`Vesper wants to run: ${pending.toolName}`);
     io.writeLine(`  reason: ${pending.reason}`);
+    if (pending.preview) {
+      io.writeLine(`  intended: ${pending.preview.summary}`);
+      if (pending.preview.affected.length) {
+        io.writeLine(`  affected: ${pending.preview.affected.join("; ")}`);
+      }
+      if (pending.preview.sideEffects.length) {
+        io.writeLine(`  side effects: ${pending.preview.sideEffects.join("; ")}`);
+      }
+      io.writeLine(
+        `  reversibility: ${pending.preview.rollbackHint ?? pending.preview.reversibility}`,
+      );
+    }
     if (pending.args && Object.keys(pending.args).length) {
       io.writeLine(`  arguments: ${JSON.stringify(pending.args)}`);
     }

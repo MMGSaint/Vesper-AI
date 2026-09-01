@@ -16,11 +16,15 @@ describe("persistence", () => {
     const turn = await first.chat("optimize this");
     const pending = turn.pendingConfirmations[0] ?? [...first.confirmations.values()][0];
     assert.ok(pending, "expected a confirmation to be queued");
+    assert.ok(pending.preview, "a queued confirmation must carry a preview of the intended action");
+    assert.equal(pending.preview.toolName, pending.toolName);
     await first.stop();
 
     const second = await createRuntime({ skipDiscovery: true, storage: new FileStorage(file) });
     await second.start();
     assert.equal(second.confirmations.has(pending.id), true);
+    const restored = second.confirmations.get(pending.id);
+    assert.equal(restored?.preview?.summary, pending.preview.summary);
     await second.stop();
   });
 

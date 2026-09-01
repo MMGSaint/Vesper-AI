@@ -355,6 +355,15 @@ async function main() {
               id: pending.id,
               tool: pending.toolName,
               reason: pending.reason,
+              preview: pending.preview
+                ? {
+                    summary: pending.preview.summary,
+                    affected: pending.preview.affected,
+                    sideEffects: pending.preview.sideEffects,
+                    reversibility: pending.preview.reversibility,
+                    rollbackHint: pending.preview.rollbackHint ?? null,
+                  }
+                : null,
             })),
           },
           null,
@@ -365,6 +374,15 @@ async function main() {
       console.log(turn.reply);
       for (const pending of waiting) {
         console.error(`Waiting for your confirmation: ${pending.toolName} — ${pending.reason}`);
+        if (pending.preview) {
+          console.error(`  intended: ${pending.preview.summary}`);
+          if (pending.preview.affected.length) {
+            console.error(`  affected: ${pending.preview.affected.join("; ")}`);
+          }
+          console.error(
+            `  reversibility: ${pending.preview.rollbackHint ?? pending.preview.reversibility}`,
+          );
+        }
       }
     }
 

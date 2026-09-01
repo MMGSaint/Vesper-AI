@@ -258,6 +258,47 @@ export const vesperConfigSchema = z.object({
       nativeNotifications: z.boolean().default(true),
     })
     .default({ enableTray: true, startOnLogin: false, nativeNotifications: true }),
+  /**
+   * Independently enabled computer-context sources.
+   *
+   * Process listing for game/OBS workload still happens through the existing
+   * `context_status` / inspectWorkload path. These flags only control the ContextEngine
+   * seam. Invasive sources stay off: enabling them in config does not start capture
+   * until a source is actually implemented, and a disabled source does no I/O.
+   */
+  context: z
+    .object({
+      sources: z
+        .object({
+          process: z.boolean().default(false),
+          window: z.boolean().default(false),
+          clipboard: z.boolean().default(false),
+          filesystem: z.boolean().default(false),
+          browser: z.boolean().default(false),
+          screen: z.boolean().default(false),
+          audio: z.boolean().default(false),
+        })
+        .default({
+          process: false,
+          window: false,
+          clipboard: false,
+          filesystem: false,
+          browser: false,
+          screen: false,
+          audio: false,
+        }),
+    })
+    .default({
+      sources: {
+        process: false,
+        window: false,
+        clipboard: false,
+        filesystem: false,
+        browser: false,
+        screen: false,
+        audio: false,
+      },
+    }),
   agent: z
     .object({
       maxToolIterations: z.number().default(8),

@@ -14,6 +14,7 @@ import type { AutonomyGovernor } from "../autonomy.ts";
 import { decideRemoteToolRequest, type RequestOrigin } from "./remote.ts";
 import { capScopesForTrust } from "../client/protocol.ts";
 import type { TrustState } from "../distributed/identity.ts";
+import { previewAction } from "../preview.ts";
 
 export interface RegisteredTool {
   spec: ToolSpec;
@@ -358,6 +359,7 @@ export class ToolRegistry {
           kind: origin.kind === "remote" ? "remote" : "local",
           deviceId: origin.deviceId,
         },
+        preview: previewAction({ toolName: input.name, args, decision }),
       };
       this.confirmations.set(pending.id, pending);
       this.log.info("permission", "Queued confirmation", { id: pending.id, tool: input.name });

@@ -152,6 +152,26 @@ export interface PermissionDecision {
   toolName: string;
 }
 
+/**
+ * What a person is being asked to approve. Built before anything runs.
+ *
+ * A confirmation used to be a tool name, raw args, and a reason. That is not enough
+ * to know what will change, whether it can be undone, or why the gate stopped.
+ * The preview is a claim about the *intended* action — never evidence that it ran.
+ */
+export const REVERSIBILITY = ["reversible", "not_reversible", "unknown"] as const;
+export type Reversibility = (typeof REVERSIBILITY)[number];
+
+export interface ActionPreview {
+  toolName: string;
+  summary: string;
+  affected: string[];
+  sideEffects: string[];
+  reversibility: Reversibility;
+  rollbackHint?: string;
+  reason: string;
+}
+
 export interface PendingConfirmation {
   id: string;
   toolName: string;
@@ -166,6 +186,8 @@ export interface PendingConfirmation {
    * because authority must be re-read live at approval time rather than replayed.
    */
   requestedBy?: { kind: "local" | "remote"; deviceId?: string };
+  /** Deterministic preview of the intended action. Absent on records from older trees. */
+  preview?: ActionPreview;
 }
 
 export interface MemoryEntry {

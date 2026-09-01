@@ -234,6 +234,15 @@ test("interactive console", async (t) => {
               reason: "Closing an application needs confirmation.",
               workspaceId: "general",
               createdAt: new Date().toISOString(),
+              preview: {
+                toolName: "app_close",
+                summary: "Close a running approved application",
+                affected: ["obs64.exe"],
+                sideEffects: ["ask the host adapter to stop that process"],
+                reversibility: "not_reversible" as const,
+                rollbackHint: "closing an app is not undone by Vesper; you would reopen it yourself",
+                reason: "Closing an application needs confirmation.",
+              },
             },
           ],
         });
@@ -245,6 +254,8 @@ test("interactive console", async (t) => {
     const out = io.output();
     assert.match(out, /Vesper wants to run: app_close/);
     assert.match(out, /reason: Closing an application needs confirmation\./);
+    assert.match(out, /intended: Close a running approved application/);
+    assert.match(out, /reversibility: closing an app is not undone/);
     assert.match(out, /obs64\.exe/, "the arguments are shown before approving");
     assert.equal(calls[1]?.confirmId, "conf-1");
     assert.equal(calls[1]?.approve, true);

@@ -9,6 +9,7 @@ import type { MemoryStore } from "../memory/store.ts";
 import type { NotificationHub } from "../notifications.ts";
 import type { OptimizerAdapter } from "../specialists/optimizer.ts";
 import { explainPerformance, inspectWorkload } from "../specialists/context.ts";
+import { createContextEngine } from "../context/engine.ts";
 import { gpuConsumers, groundedConclusions } from "../specialists/gaming.ts";
 import type { ToolRegistry } from "./registry.ts";
 import { correlateAround, explainCorrelations } from "../correlate.ts";
@@ -818,11 +819,22 @@ export function registerBuiltinTools(input: {
       const context = inspectWorkload(hardware);
       const conclusions = groundedConclusions(hardware);
       const gpu = gpuConsumers(hardware);
+      const engine = createContextEngine({
+        config: config.context.sources,
+        listProcesses: () => hardware.listProcesses(),
+      });
+      const observations = await engine.snapshot();
       return {
         ok: true,
         epistemic: "checked",
         summary: context.notes.join(" "),
-        data: { ...context, conclusions, gpu } as unknown as JsonObject,
+        data: {
+          ...context,
+          conclusions,
+          gpu,
+          sources: engine.sources(),
+          observations,
+        } as unknown as JsonObject,
       };
     },
   );

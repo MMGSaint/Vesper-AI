@@ -129,6 +129,9 @@ describe("--ask reports a confirmation, and never answers it", () => {
     const turn = JSON.parse(result.stdout);
     assert.equal(turn.pendingConfirmations.length, 1);
     assert.equal(turn.pendingConfirmations[0].tool, "memory_forget");
+    assert.ok(turn.pendingConfirmations[0].preview, "queued confirmations must include a preview");
+    assert.match(turn.pendingConfirmations[0].preview.summary, /Forget a stored memory/);
+    assert.match(turn.pendingConfirmations[0].preview.reversibility, /not_reversible/);
     const call = turn.toolCalls.find((item: { tool: string }) => item.tool === "memory_forget");
     assert.ok(call, "the queued tool was not reported among the turn's tool calls");
     assert.equal(call.allowed, false, "a confirm-tier tool reported itself as allowed");
