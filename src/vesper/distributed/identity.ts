@@ -16,7 +16,7 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { JsonObject } from "../types.ts";
 
-export const DEVICE_TYPES = ["desktop", "laptop", "phone", "server", "unknown"] as const;
+export const DEVICE_TYPES = ["desktop", "laptop", "phone", "portable", "server", "unknown"] as const;
 export type DeviceType = (typeof DEVICE_TYPES)[number];
 
 /**

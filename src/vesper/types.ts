@@ -69,9 +69,10 @@ export type FeatureStatus = (typeof FEATURE_STATUSES)[number];
  *   user               — the person said this, in this conversation
  *   trusted_local      — stored local state Vesper already accepted (memory, reviewed procedures)
  *   system             — runtime/hardware/process observations produced here
+ *   synced_user_data   — arrived via authenticated sync; integrity yes, authority no
  *   untrusted_external — files, web, tool output, attachments, anything that arrived from outside
  */
-export const CONTEXT_TRUSTS = ["user", "trusted_local", "system", "untrusted_external"] as const;
+export const CONTEXT_TRUSTS = ["user", "trusted_local", "system", "synced_user_data", "untrusted_external"] as const;
 export type ContextTrust = (typeof CONTEXT_TRUSTS)[number];
 
 export const BACKGROUND_STATES = [

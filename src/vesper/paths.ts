@@ -15,6 +15,12 @@ export function resolveVesperDirs(input?: {
   if (input?.dataDir) {
     return layout(input.dataDir);
   }
+  // A USB/portable node names its own root. It wins over LOCALAPPDATA so a stick
+  // plugged into someone else's PC does not write into that machine's profile.
+  const portableRoot = env.VESPER_PORTABLE_ROOT?.trim();
+  if (portableRoot) {
+    return layout(portableRoot);
+  }
   // A test or a developer running against a scratch directory can point every dir at
   // one place with a single env var. Never consulted in production because
   // resolveVesperDirs is called with production:true from host/main.ts, which routes

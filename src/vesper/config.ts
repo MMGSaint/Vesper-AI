@@ -234,6 +234,11 @@ export const vesperConfigSchema = z.object({
       /** Extra arguments appended verbatim, for a local build with a different CLI. */
       sttArgs: z.array(z.string()).default([]),
       ttsArgs: z.array(z.string()).default([]),
+      wakeWord: z
+        .object({
+          enabled: z.boolean().default(false),
+        })
+        .default({ enabled: false }),
     })
     .default({
       enabled: false,
@@ -244,6 +249,7 @@ export const vesperConfigSchema = z.object({
       ttsModel: "en_US-lessac-medium",
       sttArgs: [],
       ttsArgs: [],
+      wakeWord: { enabled: false },
     }),
   notifications: z
     .object({
@@ -327,6 +333,18 @@ export const vesperConfigSchema = z.object({
       driveTasksOnIdle: false,
       tasksPerTick: 4,
     }),
+  /**
+   * Cross-device sync. Off by default. Local Vesper does not wait on the cloud.
+   * Enabling this does not make personal memory globally shared — privacy classes
+   * still default to private.
+   */
+  sync: z
+    .object({
+      enabled: z.boolean().default(false),
+      provider: z.enum(["none", "local-mock"]).default("none"),
+      privacyDefault: z.enum(["private", "device_only", "shared", "global"]).default("private"),
+    })
+    .default({ enabled: false, provider: "none", privacyDefault: "private" }),
 });
 
 export type VesperConfig = z.infer<typeof vesperConfigSchema>;

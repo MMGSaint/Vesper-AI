@@ -18,6 +18,10 @@ describe("config", () => {
     assert.equal(config.context.sources.audio, false);
     assert.equal(config.context.sources.browser, false);
     assert.equal(config.context.sources.process, false);
+    assert.equal(config.sync.enabled, false);
+    assert.equal(config.sync.privacyDefault, "private");
+    assert.equal(config.voice.wakeWord.enabled, false);
+    assert.equal(config.voice.enabled, false);
   });
 
   it("rejects invalid config and falls back to defaults", () => {
