@@ -47,6 +47,9 @@ import { createModelRouter, type ModelRouter } from "./models/router.ts";
 import { createBenchmarkHarness, type BenchmarkHarness } from "./models/benchmark.ts";
 import { createIdleScheduler, type IdleScheduler } from "./scheduler.ts";
 import { Agent, TurnFailure } from "./agent.ts";
+import { ProcedureStore, formatProcedure } from "./procedures.ts";
+import { SkillRegistry } from "./skills.ts";
+import { AutomationStore } from "./automation.ts";
 import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
 import { coercePreview } from "./preview.ts";
 import { buildDiagnostics } from "./diagnostics.ts";
@@ -1035,6 +1038,33 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
           error: error instanceof Error ? error.message : String(error),
         });
       }
+      try {
+        const snapshot = hardware.snapshot();
+        const observation = {
+          cpu: snapshot.cpu.utilizationPct,
+          gpu: snapshot.gpu?.utilizationPct ?? null,
+          tempC: snapshot.cpu.tempC,
+        };
+        const results = await automations.evaluateAll({
+          observationFor: (automation) => (automation.kind === "heartbeat" ? observation : undefined),
+        });
+        for (const { automation, decision } of results) {
+          if (decision.action !== "fire") continue;
+          events.emit({
+            type: `automation.${automation.kind}`,
+            title: `${automation.kind} '${automation.name}' fired`,
+            detail: decision.reason,
+            severity: "info",
+            workspaceId: automation.workspaceId,
+            provenance: { author: "subsystem", source: "automation" },
+            data: { id: automation.id, kind: automation.kind, workspaceId: automation.workspaceId ?? null },
+          });
+        }
+      } catch (error) {
+        log.warn("lifecycle", "automation tick threw", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     },
   });
   const gate = createPermissionGate(config.permissions, log);
@@ -1042,6 +1072,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   const tools = new ToolRegistry(gate, log, confirmations, async (id) =>
     (await devices.get(id))?.trust ?? "unknown",
   );
+  const procedures = new ProcedureStore(storage, {
+    permissionOf: (name) => tools.get(name)?.spec.permission,
+  });
+  const skills = new SkillRegistry(storage);
+  const automations = new AutomationStore(storage);
   const autonomy = new AutonomyGovernor({
     policy: defaultAutonomyPolicy(),
     events,
@@ -1259,6 +1294,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     benchmark,
     journal,
     governor: autonomy,
+    procedures,
+    skills,
+    automations,
     getDiagnostics: async () => {
       if (!runtimeRef.current) throw new Error("Runtime not ready");
       return runtimeRef.current.diagnostics();
@@ -1284,6 +1322,10 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     history,
     maxToolIterations: config.agent.maxToolIterations,
     deviceId: deviceIdentity.deviceId,
+    matchProcedures: async (query, workspaceId) => {
+      const hits = await procedures.search(query, { workspaceId, limit: 3 });
+      return hits.map((hit) => formatProcedure(hit.procedure));
+    },
     deviceTrust: async (id: string) => (await devices.get(id))?.trust ?? "unknown",
     selfManifest: async () =>
       (await devices.get(deviceIdentity.deviceId))?.capabilities ?? null,

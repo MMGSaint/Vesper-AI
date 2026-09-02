@@ -34,6 +34,9 @@ import { collectDecisions, formatDecisions } from "../decisions.ts";
 import { mcpBridgeStatus } from "../integrations/mcp.ts";
 import { detectApprovedApps } from "../windows/apps.ts";
 import { classifyDeviceIntent, resolveTarget } from "../distributed/intent.ts";
+import { ProcedureStore, ProcedureValidationError } from "../procedures.ts";
+import { SkillRegistry, SkillError } from "../skills.ts";
+import { AutomationStore, AutomationError, AUTOMATION_KINDS, type AutomationKind } from "../automation.ts";
 
 function str(args: JsonObject, key: string): string {
   const value = args[key];
@@ -89,6 +92,9 @@ export function registerBuiltinTools(input: {
   /** Optional like checkpointStore: a runtime without one keeps the previous behaviour. */
   corrections?: CorrectionStore;
   correctionProducer?: OptimizerCorrectionProducer;
+  procedures?: ProcedureStore;
+  skills?: SkillRegistry;
+  automations?: AutomationStore;
 }) {
   const {
     checkpointStore,
@@ -117,6 +123,9 @@ export function registerBuiltinTools(input: {
     scheduler,
     benchmark,
     getDiagnostics,
+    procedures,
+    skills,
+    automations,
   } = input;
 
   registry.register(
@@ -1121,6 +1130,8 @@ export function registerBuiltinTools(input: {
         eligibleDevices,
         kind: namedTool ? TOOL_CALL_TASK_KIND : undefined,
         args: namedTool ? ({ tool: namedTool, args: toolArgs } as JsonObject) : undefined,
+        workspaceId: context.workspaceId,
+        idempotent: false,
       });
       // Route immediately so the reply says where it will run, or honestly that it will not yet.
       const scheduled = await tasks.schedule(await deviceRegistry.list());
@@ -1331,6 +1342,240 @@ export function registerBuiltinTools(input: {
       return { ok: true, epistemic: "changed", summary: `Simulator scenario is now '${scenario}'.` };
     },
   );
+
+  if (procedures) {
+    registry.register(
+      spec("procedure_list", "List stored procedures (repeatable methods, not permissions).", "read", {
+        state: { type: "string", enum: ["candidate", "reviewed", "active", "superseded", "disabled"] },
+      }),
+      async (args) => {
+        const state = str(args, "state");
+        const all = await procedures.list(
+          state
+            ? { state: state as "candidate" | "reviewed" | "active" | "superseded" | "disabled" }
+            : undefined,
+        );
+        return {
+          ok: true,
+          epistemic: "checked",
+          summary: all.length ? all.map((item) => `${item.name} [${item.state}]`).join("; ") : "No procedures stored.",
+          data: all as unknown as JsonObject,
+        };
+      },
+    );
+    registry.register(
+      spec(
+        "procedure_propose",
+        "Store a candidate procedure. It is not reusable until it is reviewed and activated.",
+        "safe",
+        {
+          name: { type: "string" },
+          purpose: { type: "string" },
+          steps: { type: "string", description: "New-line separated instructions" },
+        },
+        ["name", "purpose", "steps"],
+      ),
+      async (args, context) => {
+        try {
+          const created = await procedures.propose({
+            name: str(args, "name"),
+            purpose: str(args, "purpose"),
+            steps: str(args, "steps")
+              .split(/\n+/)
+              .map((instruction) => instruction.trim())
+              .filter(Boolean)
+              .map((instruction) => ({ instruction })),
+            workspaceId: context.workspaceId,
+            provenance: { source: context.origin?.kind === "local" ? "user" : "agent", origin: "procedure_propose" },
+          });
+          return {
+            ok: true,
+            epistemic: "changed",
+            summary: `Stored candidate procedure '${created.name}'. It is not reusable until reviewed.`,
+            data: { id: created.id, state: created.state },
+          };
+        } catch (error) {
+          const message = error instanceof ProcedureValidationError ? error.message : String(error);
+          return { ok: false, epistemic: "could_not_access", summary: message };
+        }
+      },
+    );
+    registry.register(
+      spec("procedure_review", "Mark a candidate procedure as reviewed.", "confirm", { id: { type: "string" } }, ["id"]),
+      async (args) => {
+        try {
+          const item = await procedures.review(str(args, "id"));
+          return { ok: true, epistemic: "changed", summary: `Reviewed '${item.name}'. Activate it to make it reusable.` };
+        } catch (error) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+    );
+    registry.register(
+      spec("procedure_activate", "Make a reviewed procedure reusable. Does not grant extra permissions.", "confirm", { id: { type: "string" } }, ["id"]),
+      async (args) => {
+        try {
+          const item = await procedures.activate(str(args, "id"));
+          return {
+            ok: true,
+            epistemic: "changed",
+            summary: `Activated '${item.name}'. Steps still go through the tool gate.`,
+            data: { id: item.id, ceiling: item.permissionCeiling },
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+    );
+    registry.register(
+      spec("procedure_disable", "Disable a procedure so it is no longer surfaced.", "confirm", { id: { type: "string" } }, ["id"]),
+      async (args) => {
+        try {
+          const item = await procedures.disable(str(args, "id"));
+          return { ok: true, epistemic: "changed", summary: `Disabled '${item.name}'.` };
+        } catch (error) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+    );
+  }
+
+  if (skills) {
+    registry.register(
+      spec("skill_list", "List discovered skills and their lifecycle state.", "read", {}),
+      async () => {
+        const all = await skills.list();
+        return {
+          ok: true,
+          epistemic: "checked",
+          summary: all.length
+            ? all.map((item) => `${item.manifest.name} [${item.state}/${item.manifest.trust}]`).join("; ")
+            : "No skills discovered.",
+          data: all.map((item) => ({
+            id: item.id,
+            name: item.manifest.name,
+            state: item.state,
+            trust: item.manifest.trust,
+            findings: item.findings.length,
+          })) as unknown as JsonObject,
+        };
+      },
+    );
+    registry.register(
+      spec("skill_enable", "Enable a scanned skill. Does not bypass the tool permission gate.", "confirm", { id: { type: "string" } }, ["id"]),
+      async (args) => {
+        try {
+          const item = await skills.enable(str(args, "id"));
+          return { ok: true, epistemic: "changed", summary: `Enabled skill '${item.manifest.name}'. Tools still pass the gate.` };
+        } catch (error) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: error instanceof SkillError ? error.message : String(error),
+          };
+        }
+      },
+    );
+    registry.register(
+      spec("skill_disable", "Disable an enabled skill.", "confirm", { id: { type: "string" } }, ["id"]),
+      async (args) => {
+        try {
+          const item = await skills.disable(str(args, "id"));
+          return { ok: true, epistemic: "changed", summary: `Disabled skill '${item.manifest.name}'.` };
+        } catch (error) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: error instanceof SkillError ? error.message : String(error),
+          };
+        }
+      },
+    );
+  }
+
+  if (automations) {
+    registry.register(
+      spec("automation_list", "List schedules, triggers, and heartbeats.", "read", {}),
+      async () => {
+        const all = await automations.list();
+        return {
+          ok: true,
+          epistemic: "checked",
+          summary: all.length
+            ? all.map((item) => `${item.name} [${item.kind}${item.enabled ? "" : "/off"}]`).join("; ")
+            : "No automations stored.",
+          data: all as unknown as JsonObject,
+        };
+      },
+    );
+    registry.register(
+      spec(
+        "automation_create",
+        "Create a schedule, trigger, or heartbeat. Heartbeats stay quiet when nothing changed.",
+        "confirm",
+        {
+          kind: { type: "string", enum: [...AUTOMATION_KINDS] },
+          name: { type: "string" },
+          description: { type: "string" },
+          intervalMs: { type: "number" },
+          eventType: { type: "string" },
+        },
+        ["kind", "name"],
+      ),
+      async (args, context) => {
+        try {
+          const kind = str(args, "kind") as AutomationKind;
+          const created = await automations.create({
+            kind,
+            name: str(args, "name"),
+            description: str(args, "description"),
+            workspaceId: context.workspaceId,
+            intervalMs: typeof args.intervalMs === "number" ? args.intervalMs : undefined,
+            eventType: str(args, "eventType") || undefined,
+          });
+          return {
+            ok: true,
+            epistemic: "changed",
+            summary: `Stored ${created.kind} '${created.name}'. It cannot approve confirm-tier tools.`,
+            data: { id: created.id, workspaceId: created.workspaceId ?? null },
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: error instanceof AutomationError ? error.message : String(error),
+          };
+        }
+      },
+    );
+    registry.register(
+      spec("automation_disable", "Disable an automation so it no longer fires.", "confirm", { id: { type: "string" } }, ["id"]),
+      async (args) => {
+        try {
+          const item = await automations.disable(str(args, "id"));
+          return { ok: true, epistemic: "changed", summary: `Disabled automation '${item.name}'.` };
+        } catch (error) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: error instanceof AutomationError ? error.message : String(error),
+          };
+        }
+      },
+    );
+  }
 
   registry.register(
     spec("disk_wipe", "High-risk disk operation. Must never run autonomously.", "never", {}),

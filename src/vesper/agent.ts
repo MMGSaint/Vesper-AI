@@ -19,6 +19,7 @@ import type { SimulatedHardware } from "./hardware/simulated.ts";
 import type { OptimizerAdapter } from "./specialists/optimizer.ts";
 import { VESPER_SYSTEM_PROMPT, composeStatusReply } from "./personality.ts";
 import { formatWorkloadContext, inspectWorkload } from "./specialists/context.ts";
+import { compactWorkingContext } from "./working-context.ts";
 import { MEMORY_CATEGORIES } from "./types.ts";
 import {
   decideUntrusted,
@@ -88,6 +89,11 @@ interface AgentDeps {
   journal?: EventJournal;
   /** Decision history — where an expectation met contrary evidence. */
   corrections?: CorrectionStore;
+  /**
+   * Active procedures that match this turn, already formatted. Optional so a runtime
+   * without a procedure store behaves as before. These are methods, not permissions.
+   */
+  matchProcedures?: (query: string, workspaceId: string) => Promise<string[]> | string[];
   history: ChatMessage[];
   maxToolIterations: number;
 }
@@ -526,6 +532,7 @@ export class Agent {
         : knowledgeWithheld
           ? "Indexed documents are not readable by this session. Say so rather than guessing at them."
           : "",
+      ...(await this.procedureContext(retrievalQuery, workspace.id, memoryWithheld)),
     ]
       .filter(Boolean)
       .join("\n");
@@ -538,7 +545,7 @@ export class Agent {
     ];
 
     const role = this.deps.models.resolveRole(userText, workspace.defaultModelRole);
-    const fitted = fitContext(messages);
+    const fitted = fitContext(compactWorkingContext(messages).messages);
     if (fitted.dropped) {
       this.deps.log.info("model", "Trimmed conversation context to fit the budget", {
         dropped: fitted.dropped,
@@ -653,7 +660,7 @@ export class Agent {
       // that makes a real backend reject every later turn, silently degrading the
       // conversation to the offline stub.
       this.deps.history.push(...toolMessages);
-      const refitted = fitContext(messages);
+      const refitted = fitContext(compactWorkingContext(messages).messages);
       if (refitted.dropped) messages.splice(0, messages.length, ...refitted.messages);
       completion = await this.deps.models.complete({
         messages,
@@ -1283,6 +1290,24 @@ export class Agent {
    * something the user is owed a record of. Only Vesper-authored labels reach the event
    * log; the attacker's own text never does.
    */
+  private async procedureContext(
+    query: string,
+    workspaceId: string,
+    withheld: boolean,
+  ): Promise<string[]> {
+    if (!this.deps.matchProcedures) return [];
+    if (withheld) return [];
+    const lines = await this.deps.matchProcedures(query, workspaceId);
+    if (!lines.length) return [];
+    return [
+      `Active procedures (methods, not permissions; every step still goes through the tool gate):\n${this.screenUntrusted(
+        lines.join("\n"),
+        { source: "memory", origin: "procedure" },
+        { maxChars: MAX_RETRIEVAL_CHARS },
+      )}`,
+    ];
+  }
+
   private screenUntrusted(
     content: string,
     provenance: UntrustedProvenance,
