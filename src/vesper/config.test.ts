@@ -22,6 +22,7 @@ describe("config", () => {
     assert.equal(config.sync.privacyDefault, "private");
     assert.equal(config.voice.wakeWord.enabled, false);
     assert.equal(config.voice.enabled, false);
+    assert.equal(config.intelligence.instincts, true);
   });
 
   it("rejects invalid config and falls back to defaults", () => {

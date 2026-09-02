@@ -107,6 +107,8 @@ const TRUSTED_ONLY_TOOLS: readonly string[] = [
   // A trusted phone asking "why did you do that" is the feature; a restricted one
   // reading it is disclosure of the same activity `task_list` already hides.
   "governor_decisions",
+  "job_list",
+  "job_create",
 ];
 
 /**
@@ -129,6 +131,11 @@ const TOOL_SCOPE: Readonly<Record<string, ClientScope>> = {
   // default for any trusted or restricted device, so this is stated rather than left
   // to the fall-through.
   corrections_list: "memory.read",
+  context_now: "memory.read",
+  instinct_list: "memory.read",
+  instinct_observe: "memory.write",
+  graph_relate: "memory.write",
+  vesper_route: "memory.read",
 };
 
 export function scopeForTool(toolName: string): ClientScope | null {

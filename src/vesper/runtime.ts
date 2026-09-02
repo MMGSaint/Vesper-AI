@@ -53,6 +53,7 @@ import { SkillRegistry } from "./skills.ts";
 import { AutomationStore } from "./automation.ts";
 import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
 import { coercePreview } from "./preview.ts";
+import { PersonalIntelligence } from "./intelligence/facade.ts";
 import { ContinuityEngine } from "./continuity/engine.ts";
 import { DisabledCloudProvider, MemoryCloudProvider } from "./continuity/cloud.ts";
 import { createKeyring } from "./continuity/crypto.ts";
@@ -150,6 +151,7 @@ export class VesperRuntime {
   readonly voiceSession: VoiceSession;
   readonly scheduler: IdleScheduler;
   readonly benchmark: BenchmarkHarness;
+  readonly intelligence: PersonalIntelligence;
   capability: CapabilityProfile | null = null;
   firstBootReport: FirstBootReport | null = null;
   private discoveryPromise: Promise<void> | null = null;
@@ -192,6 +194,7 @@ export class VesperRuntime {
       voiceSession: VoiceSession;
       scheduler: IdleScheduler;
       benchmark: BenchmarkHarness;
+      intelligence: PersonalIntelligence;
     },
   ) {
     this.config = config;
@@ -228,6 +231,7 @@ export class VesperRuntime {
     this.voiceSession = parts.voiceSession;
     this.scheduler = parts.scheduler;
     this.benchmark = parts.benchmark;
+    this.intelligence = parts.intelligence;
   }
 
   async start() {
@@ -1109,6 +1113,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   });
   const skills = new SkillRegistry(storage);
   const automations = new AutomationStore(storage);
+  const intelligence = new PersonalIntelligence(storage);
   const autonomy = new AutonomyGovernor({
     policy: defaultAutonomyPolicy(),
     events,
@@ -1337,6 +1342,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     procedures,
     skills,
     automations,
+    intelligence,
     getDiagnostics: async () => {
       if (!runtimeRef.current) throw new Error("Runtime not ready");
       return runtimeRef.current.diagnostics();
@@ -1437,6 +1443,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     voiceSession,
     scheduler,
     benchmark,
+    intelligence,
   });
   runtimeRef.current = runtime;
   return runtime;

@@ -39,6 +39,12 @@ import { classifyDeviceIntent, resolveTarget } from "../distributed/intent.ts";
 import { ProcedureStore, ProcedureValidationError } from "../procedures.ts";
 import { SkillRegistry, SkillError } from "../skills.ts";
 import { AutomationStore, AutomationError, AUTOMATION_KINDS, type AutomationKind } from "../automation.ts";
+import { PersonalIntelligence } from "../intelligence/facade.ts";
+import { assembleContext, renderAssembled } from "../intelligence/assembly.ts";
+import { planExecution } from "../intelligence/route.ts";
+import { GraphError, GRAPH_EDGE_TYPES, GRAPH_NODE_TYPES, type GraphEdgeType, type GraphNodeType } from "../intelligence/graph.ts";
+import { InstinctError } from "../intelligence/instincts.ts";
+import { JobError } from "../intelligence/jobs.ts";
 
 function str(args: JsonObject, key: string): string {
   const value = args[key];
@@ -97,6 +103,7 @@ export function registerBuiltinTools(input: {
   procedures?: ProcedureStore;
   skills?: SkillRegistry;
   automations?: AutomationStore;
+  intelligence?: PersonalIntelligence;
 }) {
   const {
     checkpointStore,
@@ -128,6 +135,7 @@ export function registerBuiltinTools(input: {
     procedures,
     skills,
     automations,
+    intelligence,
   } = input;
 
   registry.register(
@@ -1605,6 +1613,210 @@ export function registerBuiltinTools(input: {
             summary: error instanceof AutomationError ? error.message : String(error),
           };
         }
+      },
+    );
+  }
+
+  if (intelligence) {
+    registry.register(
+      spec(
+        "context_now",
+        "Assemble the smallest useful personal context for the current query. Instincts are labeled inferred and are not policy.",
+        "read",
+        { query: { type: "string" } },
+        ["query"],
+      ),
+      async (args, context) => {
+        const query = str(args, "query");
+        const memories = await memory.search(query, { workspaceId: context.workspaceId, limit: 12 });
+        const instincts = await intelligence.instincts.list();
+        const proceduresList = procedures ? await procedures.list({ state: "active", workspaceId: context.workspaceId }) : [];
+        const assembled = assembleContext({ query, memories, instincts, procedures: proceduresList });
+        return {
+          ok: true,
+          epistemic: "checked",
+          summary: assembled.facts.length
+            ? renderAssembled(assembled)
+            : "No personal context matched. Instincts are not treated as facts.",
+          data: {
+            facts: assembled.facts.length,
+            instincts: assembled.instincts.length,
+            dropped: assembled.dropped,
+          },
+        };
+      },
+    );
+
+    registry.register(
+      spec("instinct_list", "List inferred behavioral patterns. These are not permissions.", "read", {}),
+      async () => {
+        const items = await intelligence.instincts.list();
+        return {
+          ok: true,
+          epistemic: "checked",
+          summary: items.length
+            ? items.map((item) => `${item.state} (${item.confidence.toFixed(2)}): when ${item.situation} → ${item.action}`).join("; ")
+            : "No instincts recorded.",
+          data: { count: items.length },
+        };
+      },
+    );
+
+    registry.register(
+      spec(
+        "instinct_observe",
+        "Record a behavioral observation. Repeated observations may become a candidate instinct, never a grant.",
+        "safe",
+        { situation: { type: "string" }, action: { type: "string" } },
+        ["situation", "action"],
+      ),
+      async (args, context) => {
+        try {
+          const instinct = await intelligence.instincts.observe({
+            situation: str(args, "situation"),
+            action: str(args, "action"),
+            workspaceId: context.workspaceId,
+          });
+          return {
+            ok: true,
+            epistemic: "changed",
+            summary: `Recorded observation (${instinct.state}, confidence ${instinct.confidence.toFixed(2)}). Not policy.`,
+            data: { id: instinct.id, state: instinct.state, policy: false },
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: error instanceof InstinctError ? error.message : String(error),
+          };
+        }
+      },
+    );
+
+    registry.register(
+      spec(
+        "graph_relate",
+        "Relate two personal-knowledge nodes. Data only — not a tool grant.",
+        "safe",
+        {
+          fromLabel: { type: "string" },
+          fromType: { type: "string", enum: [...GRAPH_NODE_TYPES] },
+          toLabel: { type: "string" },
+          toType: { type: "string", enum: [...GRAPH_NODE_TYPES] },
+          edge: { type: "string", enum: [...GRAPH_EDGE_TYPES] },
+        },
+        ["fromLabel", "fromType", "toLabel", "toType", "edge"],
+      ),
+      async (args) => {
+        try {
+          const from = await intelligence.graph.upsertNode({
+            type: str(args, "fromType") as GraphNodeType,
+            label: str(args, "fromLabel"),
+          });
+          const to = await intelligence.graph.upsertNode({
+            type: str(args, "toType") as GraphNodeType,
+            label: str(args, "toLabel"),
+          });
+          const edge = await intelligence.graph.relate({
+            type: str(args, "edge") as GraphEdgeType,
+            from: from.id,
+            to: to.id,
+          });
+          return {
+            ok: true,
+            epistemic: "changed",
+            summary: `Related ${from.label} -${edge.type}-> ${to.label}.`,
+            data: { from: from.id, to: to.id, edge: edge.id },
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: error instanceof GraphError ? error.message : String(error),
+          };
+        }
+      },
+    );
+
+    registry.register(
+      spec("job_list", "List durable Vesper jobs. A job is not a tool call.", "read", {}),
+      async () => {
+        const items = await intelligence.jobs.list();
+        return {
+          ok: true,
+          epistemic: "checked",
+          summary: items.length
+            ? items.map((item) => `${item.state} ${item.title}`).join("; ")
+            : "No durable jobs.",
+          data: { count: items.length },
+        };
+      },
+    );
+
+    registry.register(
+      spec(
+        "job_create",
+        "Record a durable job. Does not execute tools. World-change still goes through the gate.",
+        "safe",
+        { title: { type: "string" } },
+        ["title"],
+      ),
+      async (args, context) => {
+        try {
+          const job = await intelligence.jobs.create({
+            title: str(args, "title"),
+            workspaceId: context.workspaceId,
+            ownerDeviceId: selfDeviceId ?? "local",
+          });
+          return {
+            ok: true,
+            epistemic: "changed",
+            summary: `Queued job '${job.title}'. It has not executed anything.`,
+            data: { id: job.id, state: job.state, executed: false },
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: error instanceof JobError ? error.message : String(error),
+          };
+        }
+      },
+    );
+
+    registry.register(
+      spec(
+        "vesper_route",
+        "Show the deterministic-first plan for an intent. Does not execute it.",
+        "read",
+        { intent: { type: "string" } },
+        ["intent"],
+      ),
+      async (args, context) => {
+        const proceduresList = procedures ? await procedures.list({ workspaceId: context.workspaceId }) : [];
+        const skillsList = skills ? await skills.list() : [];
+        const plan = planExecution({
+          intent: str(args, "intent"),
+          catalog: {
+            procedures: proceduresList,
+            skills: skillsList,
+            tools: registry.list(context.workspaceId).map((tool) => ({
+              name: tool.name,
+              permission: tool.permission,
+            })),
+          },
+        });
+        return {
+          ok: true,
+          epistemic: "checked",
+          summary: `${plan.step}: ${plan.name}. ${plan.reason}`,
+          data: {
+            step: plan.step,
+            name: plan.name,
+            executed: false,
+            permissionCeiling: plan.permissionCeiling,
+          },
+        };
       },
     );
   }

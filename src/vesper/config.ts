@@ -345,6 +345,17 @@ export const vesperConfigSchema = z.object({
       privacyDefault: z.enum(["private", "device_only", "shared", "global"]).default("private"),
     })
     .default({ enabled: false, provider: "none", privacyDefault: "private" }),
+  /**
+   * Personal intelligence layer. Instincts never auto-promote to policy.
+   * The graph is data, not a grant. External packets redact secrets.
+   */
+  intelligence: z
+    .object({
+      graph: z.boolean().default(true),
+      instincts: z.boolean().default(true),
+      jobs: z.boolean().default(true),
+    })
+    .default({ graph: true, instincts: true, jobs: true }),
 });
 
 export type VesperConfig = z.infer<typeof vesperConfigSchema>;
