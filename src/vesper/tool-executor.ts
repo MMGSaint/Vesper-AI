@@ -110,10 +110,15 @@ export function createToolCallExecutor(deps: ToolCallExecutorDeps): TaskExecutor
       return { ok: false, summary: "The runtime is shutting down; the task was not started." };
     }
 
+    const workspaceId =
+      typeof task.workspaceId === "string" && task.workspaceId
+        ? task.workspaceId
+        : deps.workspaceId();
+
     const call = await deps.tools.invoke({
       name: parsed.tool,
       args: parsed.args,
-      workspaceId: deps.workspaceId(),
+      workspaceId,
       origin: SCHEDULED_ORIGIN,
       // `confirmed` is deliberately absent. It means "a person approved this", and the
       // whole point of a scheduled task is that no person is here.

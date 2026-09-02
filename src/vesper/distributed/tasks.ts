@@ -41,6 +41,22 @@ export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 export interface RetryPolicy {
   maxAttempts: number;
   attempts: number;
+  /** Base delay before a retry. Zero (the default) keeps the old immediate requeue. */
+  backoffMs?: number;
+  /** Multiplier applied per attempt. Default 2 when backoff is in use. */
+  backoffMultiplier?: number;
+  /** Earliest time a retry may start. Scheduler skips the task until then. */
+  nextRetryAt?: string;
+  /** Per-attempt timeout, consumed by the scheduler. */
+  timeoutMs?: number;
+}
+
+export function nextBackoffMs(policy: RetryPolicy): number {
+  const base = policy.backoffMs ?? 0;
+  if (base <= 0) return 0;
+  const multiplier = policy.backoffMultiplier && policy.backoffMultiplier > 0 ? policy.backoffMultiplier : 2;
+  const exp = Math.max(0, policy.attempts - 1);
+  return Math.min(60_000, Math.floor(base * multiplier ** exp));
 }
 
 export interface VesperTask {
@@ -89,6 +105,16 @@ export interface VesperTask {
    * recorded as a limitation rather than claimed as solved.
    */
   claim?: string;
+  /**
+   * When false, a task caught `running` after a crash is failed rather than requeued.
+   * Repeating a write or a send would duplicate a side effect Vesper cannot see.
+   * Assigned-but-not-started work is still requeued: it never ran.
+   *
+   * Absent on records from older trees, which keep the historical requeue behaviour.
+   */
+  idempotent?: boolean;
+  /** Workspace the work belongs to. The executor must not silently use "whatever is current". */
+  workspaceId?: string;
 }
 
 export interface CreateTaskInput {
@@ -103,6 +129,10 @@ export interface CreateTaskInput {
   private?: boolean;
   kind?: string;
   args?: import("../types.ts").JsonObject;
+  idempotent?: boolean;
+  workspaceId?: string;
+  backoffMs?: number;
+  timeoutMs?: number;
 }
 
 export type RoutingOutcome =
@@ -259,13 +289,29 @@ export class TaskQueue {
     if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
     const task = item as Partial<VesperTask>;
     if (typeof task.id !== "string" || typeof task.description !== "string") return null;
-    const state = (TASK_STATES as readonly string[]).includes(String(task.state))
+    const stateRaw = (TASK_STATES as readonly string[]).includes(String(task.state))
       ? (task.state as TaskState)
       : "queued";
+    const idempotent =
+      task.idempotent === true ? true : task.idempotent === false ? false : undefined;
+    let state = stateRaw;
+    let error = typeof task.error === "string" ? task.error : null;
+    let assignedTo = typeof task.assignedTo === "string" ? task.assignedTo : null;
+    if (requeueInFlight && (stateRaw === "running" || stateRaw === "assigned")) {
+      if (stateRaw === "running" && idempotent === false) {
+        state = "failed";
+        assignedTo = null;
+        error =
+          error ??
+          "Interrupted while running; not retried because the task is not marked idempotent.";
+      } else {
+        state = "queued";
+      }
+    }
     return {
       id: task.id,
       description: task.description,
-      state: requeueInFlight && (state === "running" || state === "assigned") ? "queued" : state,
+      state,
       priority: (TASK_PRIORITIES as readonly string[]).includes(String(task.priority))
         ? (task.priority as TaskPriority)
         : "normal",
@@ -282,15 +328,28 @@ export class TaskQueue {
       dependsOn: Array.isArray(task.dependsOn)
         ? task.dependsOn.filter((d): d is string => typeof d === "string")
         : [],
-      assignedTo: typeof task.assignedTo === "string" ? task.assignedTo : null,
+      assignedTo,
       result: typeof task.result === "string" ? task.result : null,
-      error: typeof task.error === "string" ? task.error : null,
+      error,
       retry: {
         maxAttempts:
           typeof task.retry?.maxAttempts === "number" && task.retry.maxAttempts > 0
             ? Math.floor(task.retry.maxAttempts)
             : 3,
         attempts: typeof task.retry?.attempts === "number" ? Math.max(0, Math.floor(task.retry.attempts)) : 0,
+        backoffMs:
+          typeof task.retry?.backoffMs === "number" && task.retry.backoffMs > 0
+            ? Math.floor(task.retry.backoffMs)
+            : undefined,
+        backoffMultiplier:
+          typeof task.retry?.backoffMultiplier === "number" && task.retry.backoffMultiplier > 0
+            ? task.retry.backoffMultiplier
+            : undefined,
+        nextRetryAt: typeof task.retry?.nextRetryAt === "string" ? task.retry.nextRetryAt : undefined,
+        timeoutMs:
+          typeof task.retry?.timeoutMs === "number" && task.retry.timeoutMs > 0
+            ? Math.floor(task.retry.timeoutMs)
+            : undefined,
       },
       private: task.private !== false,
       kind: typeof task.kind === "string" ? task.kind : undefined,
@@ -298,6 +357,8 @@ export class TaskQueue {
         ? (task.args as import("../types.ts").JsonObject)
         : undefined,
       claim: typeof task.claim === "string" ? task.claim : undefined,
+      idempotent,
+      workspaceId: typeof task.workspaceId === "string" ? task.workspaceId : undefined,
     };
   }
 
@@ -352,11 +413,18 @@ export class TaskQueue {
         assignedTo: null,
         result: null,
         error: null,
-        retry: { maxAttempts: Math.max(1, input.maxAttempts ?? 3), attempts: 0 },
+        retry: {
+          maxAttempts: Math.max(1, input.maxAttempts ?? 3),
+          attempts: 0,
+          backoffMs: input.backoffMs && input.backoffMs > 0 ? Math.floor(input.backoffMs) : undefined,
+          timeoutMs: input.timeoutMs && input.timeoutMs > 0 ? Math.floor(input.timeoutMs) : undefined,
+        },
         // Private by default: work is assumed personal unless stated otherwise.
         private: input.private !== false,
         kind: input.kind,
         args: input.args,
+        idempotent: input.idempotent === true,
+        workspaceId: input.workspaceId,
       };
       this.tasks.set(task.id, task);
       await this.persist();
@@ -561,7 +629,14 @@ export class TaskQueue {
       task.error = error;
       task.assignedTo = null;
       const exhausted = task.retry.attempts >= task.retry.maxAttempts;
-      task.state = opts.retryable === false || exhausted ? "failed" : "queued";
+      const giveUp = opts.retryable === false || exhausted;
+      task.state = giveUp ? "failed" : "queued";
+      if (task.state === "queued") {
+        const wait = nextBackoffMs(task.retry);
+        task.retry.nextRetryAt = wait > 0 ? new Date(Date.now() + wait).toISOString() : undefined;
+      } else {
+        task.retry.nextRetryAt = undefined;
+      }
     });
     if (refused) return undefined;
     if (updated) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MemoryStorage } from "../storage.ts";
-import { TaskQueue, routeTask, type VesperTask } from "./tasks.ts";
+import { TaskQueue, routeTask, nextBackoffMs, type VesperTask } from "./tasks.ts";
 import type { DeviceRecord } from "./registry.ts";
 import type { CapabilityManifest } from "./capabilities.ts";
 import type { PublicDeviceIdentity, TrustState } from "./identity.ts";
@@ -208,6 +208,7 @@ test("task queue", async (t) => {
       description: "benchmark",
       createdBy: "dev_phone",
       requiredCapabilities: ["local_llm"],
+      idempotent: true,
     });
     await first.schedule([device({ id: "dev_desktop", capabilities: ["local_llm", "task_execute"] })]);
     await first.start(created.id);
@@ -219,6 +220,21 @@ test("task queue", async (t) => {
     assert.ok(restored, "the task survived the restart");
     assert.equal(restored?.state, "queued", "a task caught running is requeued, not assumed done");
     assert.equal(restored?.result, null);
+  });
+
+  await t.test("does not requeue a non-idempotent task caught running", async () => {
+    const storage = new MemoryStorage();
+    const first = new TaskQueue({ storage });
+    const created = await first.create({
+      description: "send a message",
+      createdBy: "dev_phone",
+      idempotent: false,
+    });
+    await first.start(created.id);
+    const second = new TaskQueue({ storage });
+    const restored = await second.get(created.id);
+    assert.equal(restored?.state, "failed");
+    assert.match(restored?.error ?? "", /not marked idempotent/);
   });
 
   await t.test("retries until the policy is exhausted, then stops", async () => {
@@ -236,6 +252,30 @@ test("task queue", async (t) => {
     after = await queue.fail(created.id, "boom again");
     assert.equal(after?.state, "failed");
     assert.match(after?.error ?? "", /boom again/);
+  });
+
+  await t.test("backoff grows with attempts and is capped", () => {
+    assert.equal(nextBackoffMs({ maxAttempts: 5, attempts: 1, backoffMs: 100 }), 100);
+    assert.equal(nextBackoffMs({ maxAttempts: 5, attempts: 2, backoffMs: 100 }), 200);
+    assert.equal(nextBackoffMs({ maxAttempts: 5, attempts: 3, backoffMs: 100 }), 400);
+    assert.equal(nextBackoffMs({ maxAttempts: 5, attempts: 10, backoffMs: 10_000 }), 60_000);
+    assert.equal(nextBackoffMs({ maxAttempts: 5, attempts: 1 }), 0);
+  });
+
+  await t.test("a retryable failure records nextRetryAt when backoff is set", async () => {
+    const queue = new TaskQueue({ storage: new MemoryStorage() });
+    const created = await queue.create({
+      description: "flaky",
+      createdBy: "dev_a",
+      maxAttempts: 3,
+      backoffMs: 5_000,
+    });
+    await queue.start(created.id);
+    const after = await queue.fail(created.id, "boom");
+    assert.equal(after?.state, "queued");
+    assert.ok(after?.retry.nextRetryAt, "retry should be delayed");
+    const wait = Date.parse(after!.retry.nextRetryAt!) - Date.now();
+    assert.ok(wait > 1000, `expected a future retry, got ${wait}ms`);
   });
 
   await t.test("scheduling records the honest reason when nothing can run it", async () => {

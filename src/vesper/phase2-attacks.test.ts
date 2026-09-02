@@ -885,7 +885,7 @@ describe("scheduler attack #7: the retry budget is bounded from both ends", () =
     // Repeat. Without a cap in start(), that loop never terminates.
     const storage = new MemoryStorage();
     const t = await new TaskQueue({ storage }).create({
-      description: "crashy", createdBy: "u", kind: "noop", maxAttempts: 2,
+      description: "crashy", createdBy: "u", kind: "noop", maxAttempts: 2, idempotent: true,
     });
     // Each "process" is a fresh queue over the same storage — load() requeues the
     // task it finds in `running`, exactly as a crash-restart would.

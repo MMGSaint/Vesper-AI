@@ -381,6 +381,7 @@ describe("TaskScheduler — the executor loop", () => {
       createdBy: "user",
       requiredCapabilities: ["task_execute"],
       kind: "noop",
+      idempotent: true,
     });
     // Route + start manually, but simulate a crash BEFORE the executor completes:
     await q1.schedule([device({ id: "self", capabilities: ["task_execute"] })]);
@@ -439,5 +440,47 @@ describe("TaskScheduler — the executor loop", () => {
     h.scheduler.stop();
     await new Promise((r) => setTimeout(r, 50));
     assert.ok(sawAbort, "executor context signal must fire on stop()");
+  });
+
+  it("times out a hung executor and does not retry a non-idempotent timeout", async () => {
+    const h = harness({
+      executors: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        return { ok: true, summary: "should not finish" };
+      },
+    });
+    const created = await h.queue.create({
+      description: "hung",
+      createdBy: "user",
+      requiredCapabilities: ["task_execute"],
+      kind: "noop",
+      timeoutMs: 40,
+      idempotent: false,
+    });
+    await h.scheduler.tick();
+    await new Promise((r) => setTimeout(r, 80));
+    const final = await h.queue.get(created.id);
+    assert.equal(final?.state, "failed", `expected failed, got ${final?.state}`);
+    assert.match(final?.error ?? "", /timed out/i);
+  });
+
+  it("skips a task whose backoff window has not elapsed", async () => {
+    const h = harness();
+    const created = await h.queue.create({
+      description: "later",
+      createdBy: "user",
+      requiredCapabilities: ["task_execute"],
+      kind: "noop",
+      backoffMs: 60_000,
+    });
+    await h.queue.start(created.id);
+    await h.queue.fail(created.id, "try later");
+    const waiting = await h.queue.get(created.id);
+    assert.equal(waiting?.state, "queued");
+    const tick = await h.scheduler.tick();
+    assert.ok(tick.reasons.some((reason) => reason.endsWith(":backoff")));
+    const still = await h.queue.get(created.id);
+    assert.notEqual(still?.state, "done");
+    assert.notEqual(still?.state, "running");
   });
 });

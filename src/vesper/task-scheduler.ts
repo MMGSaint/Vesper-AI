@@ -38,6 +38,7 @@ import { manifestHas } from "./distributed/capabilities.ts";
 import type { EventBus } from "./events.ts";
 import type { Logger } from "./logging.ts";
 import type { JsonObject } from "./types.ts";
+import { withTimeout } from "./recover.ts";
 
 export interface TaskExecutionResult {
   ok: boolean;
@@ -182,10 +183,16 @@ export class TaskScheduler {
     const reasons: string[] = [];
     let started = 0;
     const cap = this.opts.maxPerTick ?? 4;
+    const now = Date.now();
     for (const task of candidates) {
       if (started >= cap) {
         reasons.push(`per-tick cap ${cap} reached`);
         break;
+      }
+      const waitUntil = task.retry.nextRetryAt ? Date.parse(task.retry.nextRetryAt) : NaN;
+      if (Number.isFinite(waitUntil) && waitUntil > now) {
+        reasons.push(`${task.id.slice(-8)}:backoff`);
+        continue;
       }
       const outcome = await this.tryStart(task, devices);
       reasons.push(`${task.id.slice(-8)}:${outcome}`);
@@ -300,7 +307,12 @@ export class TaskScheduler {
       log: this.opts.log,
     };
     try {
-      const result = await executor(task, ctx);
+      const timeoutMs = task.retry.timeoutMs;
+      const work = executor(task, ctx);
+      const result =
+        timeoutMs && timeoutMs > 0
+          ? await withTimeout(work, timeoutMs, `task '${task.description}'`)
+          : await work;
       // Before writing the result: the task must still be ours AND still running.
       // A task cancelled while the executor ran is no longer this scheduler's
       // business, and one re-assigned elsewhere belongs to another device now.
@@ -337,7 +349,10 @@ export class TaskScheduler {
         provenance: { author: "subsystem", source: "task-scheduler" },
         data: { taskId: task.id, error: message } as JsonObject,
       });
-      await this.opts.taskQueue.fail(task.id, message);
+      const timedOut = /timed out/i.test(message);
+      await this.opts.taskQueue.fail(task.id, message, {
+        retryable: timedOut && task.idempotent !== true ? false : undefined,
+      });
     }
   }
 }
