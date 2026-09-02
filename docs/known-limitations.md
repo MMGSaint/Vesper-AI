@@ -5,8 +5,10 @@
 - **Jobs execute through the scheduler** when a named read/safe tool is given.
   Confirm-tier jobs wait; they do not self-approve. Never-tier names are refused.
   A title-only job records a plan and does not invent a tool grant.
-- **Cloud sync** remains the local mock unless credentials exist. Ciphertext only.
-  Quiet ticks never wake the model.
+- **Cloud sync** remains the local mock or the Cloudflare stub unless credentials
+  exist. Ciphertext only. Quiet ticks never wake the model. The stub is not live.
+- **Pairing** has offer/accept/suspend tools and a ledger. There is no network
+  listener and no production transport.
 - **Command Center** is a briefing and a software-only loop. It does not speak
   to Ollama. `--ask` on the Windows host is still the live inference path.
 
