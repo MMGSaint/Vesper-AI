@@ -16,6 +16,40 @@ export function hintRole(name: string): ModelRole | undefined {
   return ROLE_HINTS.find((entry) => entry.pattern.test(name))?.role;
 }
 
+const EMBED_MODEL = /embed|nomic-embed|bge-|minilm|e5-/i;
+
+export function isChatModel(name: string): boolean {
+  return !EMBED_MODEL.test(name);
+}
+
+/** Ollama treats a missing tag as `:latest`; a listed `:latest` matches the untagged name. */
+export function modelNamesMatch(installed: string, wanted: string): boolean {
+  const strip = (name: string) => name.replace(/:latest$/i, "");
+  return installed === wanted || strip(installed) === strip(wanted);
+}
+
+/**
+ * Pick a model to ask a local backend for.
+ *
+ * The configured name wins when it is installed. Substituting is only for the
+ * first-boot case where the config still names a candidate that was never pulled.
+ * Embedding-only names are never used for chat. The config file is not rewritten.
+ */
+export function pickInstalledModel(
+  installed: readonly { name: string; available?: boolean; roleHint?: ModelRole }[],
+  wanted: string,
+  role: ModelRole,
+): string {
+  const chat = installed.filter((entry) => entry.available !== false && isChatModel(entry.name));
+  if (chat.length === 0) return wanted;
+  if (chat.some((entry) => modelNamesMatch(entry.name, wanted))) return wanted;
+  const hinted = chat.find((entry) => (entry.roleHint ?? hintRole(entry.name)) === role);
+  if (hinted) return hinted.name;
+  const everyday = chat.find((entry) => (entry.roleHint ?? hintRole(entry.name)) === "everyday");
+  if (everyday) return everyday.name;
+  return chat[0].name;
+}
+
 export async function commandExists(
   name: string,
   platform: NodeJS.Platform = process.platform,

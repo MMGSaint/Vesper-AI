@@ -207,6 +207,30 @@ describe("inference end to end from the host layer", () => {
     }
   });
 
+  it("asks for an installed chat model when the config still names a missing one", async () => {
+    // First-boot default is qwen2.5:14b. A real install often has qwen3:14b (or
+    // whatever was pulled) and not the candidate. Asking for the missing name
+    // makes a reachable backend look like an outage.
+    const backend = await startOllama("Paris.");
+    const dirs = dirsUnder("live-inference-substitute");
+    await writeConfig(dirs, backend.url, "qwen2.5:14b");
+    const host = await createProductionHost({ dirs, runtime: { skipDiscovery: true } });
+    try {
+      const turn = await host.runtime.chat("What is the capital of France?");
+      assert.equal(turn.reply, "Paris.");
+      assert.equal(turn.model?.providerId, "ollama");
+      assert.equal(turn.model?.model, "qwen3:14b");
+      assert.deepEqual(
+        backend.chats.map((chat) => chat.model),
+        ["qwen3:14b"],
+        `server saw ${JSON.stringify(backend.chats)}`,
+      );
+    } finally {
+      await host.shutdown();
+      await backend.close();
+    }
+  });
+
   it("reports the model it actually used, not the one it was configured with", async () => {
     // When the backend is down the turn must say so rather than reporting the
     // configured model as though it had served the reply. `turn.model` is the only
