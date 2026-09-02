@@ -94,4 +94,63 @@ describe("intelligence security", () => {
     });
     assert.equal(result.result?.ok, false);
   });
+
+  it("a durable job cannot run never-tier or confirm-tier tools unattended", async () => {
+    const runtime = await testRuntime();
+    const wipe = await runtime.tools.invoke({
+      name: "job_create",
+      args: { title: "wipe", tool: "disk_wipe" },
+      workspaceId: "general",
+    });
+    assert.equal(wipe.result?.ok, false);
+    const write = await runtime.tools.invoke({
+      name: "job_create",
+      args: { title: "write", tool: "fs_write", toolArgs: { path: "secret.txt", content: "x" } },
+      workspaceId: "general",
+    });
+    assert.equal(write.result?.ok, true);
+    const jobId = (write.result?.data as { id?: string }).id!;
+    assert.equal((await runtime.intelligence.jobs.get(jobId))?.state, "waiting_confirm");
+    await runtime.stop();
+  });
+
+  it("assembled context labels instincts as not policy and still screens memory", async () => {
+    const seen: string[] = [];
+    const runtime = await testRuntime({
+      providers: [
+        {
+          id: "recorder",
+          kind: "local",
+          isAvailable: () => true,
+          async probe() {
+            return { available: true, detail: "recorder" };
+          },
+          async complete(request, model) {
+            seen.push(request.messages.find((message) => message.role === "system")?.content ?? "");
+            return { text: "noted", toolCalls: [], providerId: "recorder", model, role: request.role };
+          },
+        },
+      ],
+    });
+    await runtime.memory.remember({
+      category: "preference",
+      key: "favourite-colour",
+      value: "blue",
+      source: "user",
+    });
+    for (let i = 0; i < 3; i += 1) {
+      await runtime.tools.invoke({
+        name: "instinct_observe",
+        args: { situation: "picking colours", action: "use blue first" },
+        workspaceId: "general",
+      });
+    }
+    await runtime.chat("what is my favourite colour for picking colours");
+    const system = seen.at(-1) ?? "";
+    assert.match(system, /Relevant memory:/);
+    assert.match(system, /favourite-colour/);
+    assert.match(system, /not policy/);
+    assert.match(system, /preference\/stated|preference/);
+    await runtime.stop();
+  });
 });
