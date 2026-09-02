@@ -197,3 +197,9 @@ export function resolveContinuity(
 export function continuityPayload(continuity: ConversationContinuity): JsonObject {
   return JSON.parse(JSON.stringify(continuity)) as JsonObject;
 }
+
+/** Compact recent context. The full transcript is not this. */
+export function compactRecentContext(continuity: ConversationContinuity): string {
+  return continuity.recentWindow.map((turn) => `${turn.role}: ${turn.text}`).join("\n");
+}
+

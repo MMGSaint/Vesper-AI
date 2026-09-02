@@ -52,6 +52,11 @@ export interface RequestOrigin {
  */
 export const HOST_ONLY_TOOLS: readonly string[] = [
   "device_trust",
+  "pairing_offer",
+  "pairing_accept",
+  "pairing_approve",
+  "pairing_suspend",
+  "pairing_revoke",
   // Registering, removing, or reindexing a knowledge source decides which directories
   // Vesper will read from disk. That is filesystem policy, and policy is set at the
   // machine — a remote device that could widen it would have found the long way round

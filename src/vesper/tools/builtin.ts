@@ -46,6 +46,8 @@ import { planExecution } from "../intelligence/route.ts";
 import { GraphError, GRAPH_EDGE_TYPES, GRAPH_NODE_TYPES, type GraphEdgeType, type GraphNodeType } from "../intelligence/graph.ts";
 import { InstinctError } from "../intelligence/instincts.ts";
 import { JobError } from "../intelligence/jobs.ts";
+import { acceptPairing, createPairingOffer, PairingLedger, type PairingOffer } from "../continuity/pairing.ts";
+import type { PublicDeviceIdentity } from "../distributed/identity.ts";
 
 function str(args: JsonObject, key: string): string {
   const value = args[key];
@@ -111,6 +113,8 @@ export function registerBuiltinTools(input: {
    * go through TaskScheduler.tick — not around the gate.
    */
   driveJobs?: () => Promise<void>;
+  pairingLedger?: PairingLedger;
+  selfIdentity?: PublicDeviceIdentity;
 }) {
   const {
     checkpointStore,
@@ -144,6 +148,8 @@ export function registerBuiltinTools(input: {
     automations,
     intelligence,
     driveJobs,
+    pairingLedger,
+    selfIdentity,
   } = input;
 
   registry.register(
@@ -1055,6 +1061,136 @@ export function registerBuiltinTools(input: {
         summary: result.ok
           ? `${result.record?.identity.name ?? "device"} is now '${result.record?.trust}'.`
           : (result.reason ?? "The trust change was refused."),
+      };
+    },
+  );
+
+  registry.register(
+    spec("pairing_offer", "Issue a pairing offer from this device. The code is shown once and never stored.", "confirm", {}),
+    async () => {
+      if (!selfIdentity) {
+        return { ok: false, epistemic: "could_not_access", summary: "This device has no public identity attached." };
+      }
+      const { offer, code } = createPairingOffer({ from: selfIdentity });
+      return {
+        ok: true,
+        epistemic: "changed",
+        summary: `Pairing code ${code} issued. Enrolment will be pending, not trusted. The code is not stored.`,
+        data: { offer: offer as unknown as JsonObject, code, stored: false },
+      };
+    },
+  );
+
+  registry.register(
+    spec(
+      "pairing_accept",
+      "Accept a pairing offer. The device enrols as pending on the registry and pending on the pairing ledger. Trust is a separate act.",
+      "confirm",
+      {
+        offer: { type: "object", description: "The pairing offer object from the other device" },
+        code: { type: "string", description: "The one-time pairing code" },
+      },
+      ["offer", "code"],
+    ),
+    async (args) => {
+      if (!deviceRegistry) {
+        return { ok: false, epistemic: "could_not_access", summary: "No device registry is attached." };
+      }
+      const raw = args.offer;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        return { ok: false, epistemic: "could_not_access", summary: "Pairing offer is malformed." };
+      }
+      const accepted = await acceptPairing({
+        offer: raw as unknown as PairingOffer,
+        code: str(args, "code"),
+        registry: deviceRegistry,
+        ledger: pairingLedger,
+      });
+      return {
+        ok: accepted.ok,
+        epistemic: accepted.ok ? "changed" : "could_not_access",
+        summary: accepted.ok
+          ? `Device ${accepted.deviceId} enrolled pending. Pairing is pending, not trusted.`
+          : accepted.reason,
+      };
+    },
+  );
+
+  registry.register(
+    spec(
+      "pairing_approve",
+      "Mark a pending or suspended pairing as trusted for sync. Independent of device_trust. Does not grant OS authority.",
+      "confirm",
+      { deviceId: { type: "string", description: "The paired device" } },
+      ["deviceId"],
+    ),
+    async (args) => {
+      if (!pairingLedger) {
+        return { ok: false, epistemic: "could_not_access", summary: "No pairing ledger is attached." };
+      }
+      try {
+        const entry = await pairingLedger.approve(str(args, "deviceId"));
+        return {
+          ok: true,
+          epistemic: "changed",
+          summary: `Pairing for ${entry.deviceId} is ${entry.state}. Sync admission only; device_trust is unchanged.`,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  );
+
+  registry.register(
+    spec(
+      "pairing_suspend",
+      "Pause sync for a trusted pairing without revoking the device. Restricted (portable) is a different state and is not this.",
+      "confirm",
+      { deviceId: { type: "string", description: "The paired device" } },
+      ["deviceId"],
+    ),
+    async (args) => {
+      if (!pairingLedger) {
+        return { ok: false, epistemic: "could_not_access", summary: "No pairing ledger is attached." };
+      }
+      try {
+        const entry = await pairingLedger.suspend(str(args, "deviceId"));
+        return {
+          ok: true,
+          epistemic: "changed",
+          summary: `Pairing for ${entry.deviceId} is suspended. It cannot sync until resumed.`,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  );
+
+  registry.register(
+    spec(
+      "pairing_revoke",
+      "Revoke a pairing. Terminal for this pairing; the device must be forgotten and paired again.",
+      "confirm",
+      { deviceId: { type: "string", description: "The paired device" } },
+      ["deviceId"],
+    ),
+    async (args) => {
+      if (!pairingLedger) {
+        return { ok: false, epistemic: "could_not_access", summary: "No pairing ledger is attached." };
+      }
+      const entry = await pairingLedger.revoke(str(args, "deviceId"));
+      return {
+        ok: true,
+        epistemic: "changed",
+        summary: `Pairing for ${entry.deviceId} is revoked and cannot be restored.`,
       };
     },
   );

@@ -224,4 +224,25 @@ describe("multi-device scenarios", () => {
       null,
     );
   });
+
+  it("a suspended pairing cannot apply inbound records", async () => {
+    const { cloud, ring, pcAuth, usbAuth } = await pairedCloud();
+    const pc = new ContinuityEngine({ localDeviceId: "dev_pc" });
+    pc.enqueue(sharedMemory("dev_pc", "goal", "one assistant"));
+    await pc.exchange({ provider: cloud, auth: pcAuth, ring, local: [], apply: () => undefined });
+    const usb = new ContinuityEngine({ localDeviceId: "dev_usb" });
+    const applied: string[] = [];
+    const outcome = await usb.exchange({
+      provider: cloud,
+      auth: usbAuth,
+      ring,
+      local: [],
+      apply: (record) => {
+        applied.push(record.entityId);
+      },
+      senderSuspended: (id) => id === "dev_pc",
+    });
+    assert.equal(applied.length, 0);
+    assert.ok(outcome.withheld.some((item) => /suspended/.test(item.reason)));
+  });
 });

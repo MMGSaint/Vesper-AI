@@ -116,5 +116,5 @@ export interface EncryptedEnvelope {
   aad: string;
 }
 
-export const CLOUD_PROVIDER_KINDS = ["none", "local-mock", "live"] as const;
+export const CLOUD_PROVIDER_KINDS = ["none", "local-mock", "cloudflare-stub", "live"] as const;
 export type CloudProviderKind = (typeof CLOUD_PROVIDER_KINDS)[number];

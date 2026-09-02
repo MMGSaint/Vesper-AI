@@ -28,7 +28,8 @@ export async function runQuietSyncTick(input: {
   ring: Keyring;
   local: SyncRecord[];
   apply: InboxApply;
-  senderRevoked?: (deviceId: string) => boolean;
+  senderRevoked?: (deviceId: string) => boolean | Promise<boolean>;
+  senderSuspended?: (deviceId: string) => boolean | Promise<boolean>;
 }): Promise<SyncTickResult> {
   if (!input.enabled) {
     return { ran: false, wokeModel: false, outcome: null, reason: "sync is disabled" };
@@ -47,6 +48,7 @@ export async function runQuietSyncTick(input: {
     local: input.local,
     apply: input.apply,
     senderRevoked: input.senderRevoked,
+    senderSuspended: input.senderSuspended,
   });
   return { ran: true, wokeModel: false, outcome, reason: outcome.offlineReason ?? "ok" };
 }

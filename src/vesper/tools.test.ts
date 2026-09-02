@@ -14,6 +14,9 @@ describe("tools", () => {
       "memory_remember",
       "optimizer_status",
       "disk_wipe",
+      "pairing_offer",
+      "pairing_accept",
+      "pairing_suspend",
     ]) {
       assert.ok(names.includes(required), `missing ${required}`);
     }
@@ -78,5 +81,37 @@ describe("tools", () => {
       workspaceId: "general",
     });
     assert.equal(record.result?.ok, false);
+  });
+
+  it("pairing_offer is confirm-gated and pairing_suspend cannot revive a revoked pairing", async () => {
+    const runtime = await testRuntime();
+    const queued = await runtime.tools.invoke({
+      name: "pairing_offer",
+      args: {},
+      workspaceId: "general",
+    });
+    assert.equal(queued.decision.requiresConfirmation, true);
+    assert.equal(queued.result, undefined);
+    const issued = await runtime.tools.invoke({
+      name: "pairing_offer",
+      args: {},
+      workspaceId: "general",
+      confirmed: true,
+    });
+    assert.equal(issued.result?.ok, true);
+    assert.match(issued.result?.summary ?? "", /pending, not trusted/);
+    const data = issued.result?.data as { stored?: boolean } | undefined;
+    assert.equal(data?.stored, false);
+
+    await runtime.continuity.pairing.revoke("dev_gone");
+    const resume = await runtime.tools.invoke({
+      name: "pairing_suspend",
+      args: { deviceId: "dev_gone" },
+      workspaceId: "general",
+      confirmed: true,
+    });
+    assert.equal(resume.result?.ok, false);
+    assert.match(resume.result?.summary ?? "", /cannot be restored|not trusted/i);
+    await runtime.stop();
   });
 });

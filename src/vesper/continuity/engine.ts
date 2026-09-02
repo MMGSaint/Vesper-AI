@@ -11,7 +11,7 @@
 import type { JsonObject } from "../types.ts";
 import type { CloudAuth, CloudSyncProvider } from "./cloud.ts";
 import { decryptEnvelope, encryptEnvelope, type Keyring } from "./crypto.ts";
-import { mayApplyIncoming, mayEnterCloud } from "./policy.ts";
+import { conflictKindFor, mayApplyIncoming, mayEnterCloud } from "./policy.ts";
 import { verifyRecordIntegrity } from "./records.ts";
 import { trustAfterSync, type EncryptedEnvelope, type SyncRecord } from "./types.ts";
 import { MAX_SYNC_RECORDS_PER_PUSH } from "./types.ts";
@@ -39,7 +39,7 @@ export interface ExchangeOutcome {
   pushed: number;
   pulled: number;
   applied: number;
-  conflicts: { entityId: string; reason: string }[];
+  conflicts: { entityId: string; reason: string; kind: string; resolution: string }[];
   withheld: { recordId: string; reason: string }[];
   rejected: { recordId: string; reason: string }[];
   offlineReason: string | null;
@@ -112,11 +112,12 @@ export class ContinuityEngine {
     ring: Keyring;
     local: SyncRecord[];
     apply: InboxApply;
-    senderRevoked?: (deviceId: string) => boolean;
+    senderRevoked?: (deviceId: string) => boolean | Promise<boolean>;
+    senderSuspended?: (deviceId: string) => boolean | Promise<boolean>;
   }): Promise<ExchangeOutcome> {
     const withheld: { recordId: string; reason: string }[] = [];
     const rejected: { recordId: string; reason: string }[] = [];
-    const conflicts: { entityId: string; reason: string }[] = [];
+    const conflicts: ExchangeOutcome["conflicts"] = [];
     let pushed = 0;
     let pulled = 0;
     let applied = 0;
@@ -224,7 +225,8 @@ export class ContinuityEngine {
       const applyGate = mayApplyIncoming({
         record: incoming,
         localDeviceId: this.localDeviceId,
-        senderRevoked: Boolean(input.senderRevoked?.(incoming.sourceDeviceId)),
+        senderRevoked: Boolean(await input.senderRevoked?.(incoming.sourceDeviceId)),
+        senderSuspended: Boolean(await input.senderSuspended?.(incoming.sourceDeviceId)),
       });
       if (!applyGate.allowed) {
         withheld.push({ recordId: incoming.recordId, reason: applyGate.reason });
@@ -242,6 +244,8 @@ export class ContinuityEngine {
       if (existing && existing.version > incoming.version) {
         conflicts.push({
           entityId: incoming.entityId,
+          kind: conflictKindFor(incoming.entityType),
+          resolution: "keep_local",
           reason: `local version ${existing.version} is newer than incoming ${incoming.version}; remote is not applied`,
         });
         continue;
@@ -249,6 +253,8 @@ export class ContinuityEngine {
       if (existing && existing.version === incoming.version && JSON.stringify(existing.payload) !== JSON.stringify(incoming.payload)) {
         conflicts.push({
           entityId: incoming.entityId,
+          kind: conflictKindFor(incoming.entityType),
+          resolution: "keep_both",
           reason: `both devices edited version ${incoming.version} independently. Neither version is discarded.`,
         });
         continue;

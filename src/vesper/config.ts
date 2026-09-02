@@ -341,7 +341,7 @@ export const vesperConfigSchema = z.object({
   sync: z
     .object({
       enabled: z.boolean().default(false),
-      provider: z.enum(["none", "local-mock"]).default("none"),
+      provider: z.enum(["none", "local-mock", "cloudflare-stub"]).default("none"),
       privacyDefault: z.enum(["private", "device_only", "shared", "global"]).default("private"),
     })
     .default({ enabled: false, provider: "none", privacyDefault: "private" }),

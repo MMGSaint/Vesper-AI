@@ -60,8 +60,13 @@ import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
 import { coercePreview } from "./preview.ts";
 import { ContinuityEngine } from "./continuity/engine.ts";
 import { DisabledCloudProvider, MemoryCloudProvider } from "./continuity/cloud.ts";
+import { CloudflareCloudProvider } from "./continuity/cloudflare.ts";
 import { createKeyring } from "./continuity/crypto.ts";
 import { runQuietSyncTick } from "./continuity/heartbeat.ts";
+import { persistContinuity, restoreContinuity } from "./continuity/persist.ts";
+import { VesperIdentityStore, type VesperIdentityRecord } from "./continuity/vesper-identity.ts";
+import { PairingLedger } from "./continuity/pairing.ts";
+import { runIdleConsolidation } from "./continuity/consolidation.ts";
 import { buildDiagnostics } from "./diagnostics.ts";
 import { createId } from "./id.ts";
 import { createObsClient, type ObsClient } from "./specialists/obs.ts";
@@ -156,6 +161,12 @@ export class VesperRuntime {
   readonly scheduler: IdleScheduler;
   readonly benchmark: BenchmarkHarness;
   readonly intelligence: PersonalIntelligence;
+  readonly continuity: {
+    identity: VesperIdentityRecord;
+    engine: ContinuityEngine;
+    persist: () => Promise<void>;
+    pairing: PairingLedger;
+  };
   capability: CapabilityProfile | null = null;
   firstBootReport: FirstBootReport | null = null;
   private discoveryPromise: Promise<void> | null = null;
@@ -199,6 +210,12 @@ export class VesperRuntime {
       scheduler: IdleScheduler;
       benchmark: BenchmarkHarness;
       intelligence: PersonalIntelligence;
+      continuity: {
+        identity: VesperIdentityRecord;
+        engine: ContinuityEngine;
+        persist: () => Promise<void>;
+        pairing: PairingLedger;
+      };
     },
   ) {
     this.config = config;
@@ -236,6 +253,7 @@ export class VesperRuntime {
     this.scheduler = parts.scheduler;
     this.benchmark = parts.benchmark;
     this.intelligence = parts.intelligence;
+    this.continuity = parts.continuity;
   }
 
   async start() {
@@ -453,6 +471,7 @@ export class VesperRuntime {
     // signal on the way down rather than being left running against a runtime that has
     // released its subsystems.
     this.taskScheduler.stop();
+    await this.continuity.persist().catch(() => undefined);
     await this.persistConfirmations();
     this.obs.disconnect();
     await this.events.flush();
@@ -1035,11 +1054,29 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   });
 
   const continuityEngine = new ContinuityEngine({ localDeviceId: deviceIdentity.deviceId });
+  const restoredRing = await restoreContinuity(storage, continuityEngine);
+  let continuityRing = restoredRing ?? createKeyring();
+  const vesperIdentityStore = new VesperIdentityStore(storage);
+  const vesperIdentity = await vesperIdentityStore.getOrCreate(deviceIdentity.deviceId);
+  if (continuityRing.keyVersion !== vesperIdentity.keyVersion) {
+    await vesperIdentityStore.setKeyVersion(continuityRing.keyVersion);
+  }
+  const pairingLedger = new PairingLedger(storage);
   const continuityProvider =
     config.sync.enabled && config.sync.provider === "local-mock"
       ? new MemoryCloudProvider()
-      : new DisabledCloudProvider();
-  const continuityRing = createKeyring();
+      : config.sync.enabled && config.sync.provider === "cloudflare-stub"
+        ? new CloudflareCloudProvider()
+        : new DisabledCloudProvider();
+  let continuityAuth: Awaited<ReturnType<typeof continuityProvider.authenticate>> | null = null;
+  if (config.sync.enabled) {
+    const auth = await continuityProvider.authenticate(deviceIdentity.deviceId);
+    if ("token" in auth) {
+      continuityAuth = auth;
+      await continuityProvider.registerDevice(auth, deviceIdentity.publicIdentity().publicKey);
+    }
+  }
+  const persistBodies = () => persistContinuity(storage, continuityEngine, continuityRing);
 
   const scheduler = createIdleScheduler({
     events,
@@ -1107,11 +1144,18 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
             enabled: true,
             engine: continuityEngine,
             provider: continuityProvider,
-            auth: null,
+            auth: continuityAuth && "token" in continuityAuth ? continuityAuth : null,
             ring: continuityRing,
             local: [],
             apply: () => undefined,
+            senderRevoked: async (id) => {
+              if ((await devices.get(id))?.trust === "revoked") return true;
+              return (await pairingLedger.get(id))?.state === "revoked";
+            },
+            senderSuspended: async (id) => (await pairingLedger.get(id))?.state === "suspended",
           });
+          await persistBodies();
+          runIdleConsolidation({ enabled: true, candidates: [] });
           if (tick.wokeModel) {
             log.warn("lifecycle", "sync tick claimed to wake the model; that is a bug");
           }
@@ -1375,6 +1419,8 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     skills,
     automations,
     intelligence,
+    pairingLedger,
+    selfIdentity: deviceIdentity.publicIdentity(),
     driveJobs: async () => {
       await taskScheduler.tick({ force: true, wait: true });
     },
@@ -1511,6 +1557,12 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     scheduler,
     benchmark,
     intelligence,
+    continuity: {
+      identity: vesperIdentity,
+      engine: continuityEngine,
+      persist: persistBodies,
+      pairing: pairingLedger,
+    },
   });
   runtimeRef.current = runtime;
   return runtime;

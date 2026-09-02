@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   bumpContinuity,
+  compactRecentContext,
   createContinuity,
   formatHandoff,
   resolveContinuity,
@@ -24,6 +25,9 @@ describe("conversation continuity", () => {
     assert.match(handoff, /Current goal: Finish the outbox contract/);
     assert.match(handoff, /We're working on Vesper sync/);
     assert.equal(handoff.includes("full transcript"), false);
+    const compact = compactRecentContext(onPc);
+    assert.match(compact, /We're working on Vesper sync/);
+    assert.equal(compact.includes("full transcript"), false);
   });
 
   it("a newer remote version wins; an older reconnect does not overwrite", () => {

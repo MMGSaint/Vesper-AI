@@ -4,8 +4,10 @@ import {
   createKeyring,
   decryptEnvelope,
   encryptEnvelope,
+  restoreKeyring,
   revokeDevice,
   rotateKeyring,
+  serializeKeyring,
 } from "./crypto.ts";
 
 describe("continuity crypto", () => {
@@ -85,5 +87,47 @@ describe("continuity crypto", () => {
     const second = rotateKeyring(first);
     assert.equal(second.keyVersion, first.keyVersion + 1);
     assert.notEqual(second.rootKey.equals(first.rootKey), true);
+  });
+
+  it("rotated keyring decrypts envelopes from previous versions", () => {
+    const first = createKeyring();
+    const envelope = encryptEnvelope({
+      recordId: "sync_old",
+      entityType: "memory",
+      sourceDeviceId: "dev_a",
+      plaintext: "legacy-envelope",
+      ring: first,
+    });
+    const rotated = rotateKeyring(first);
+    const result = decryptEnvelope(envelope, rotated);
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.plaintext.toString("utf8"), "legacy-envelope");
+  });
+
+  it("unknown key versions fail honestly", () => {
+    const ring = createKeyring();
+    const envelope = encryptEnvelope({
+      recordId: "sync_1",
+      entityType: "memory",
+      sourceDeviceId: "dev_a",
+      plaintext: "x",
+      ring,
+    });
+    envelope.keyVersion = 99;
+    envelope.aad = `sync_1|dev_a|99`;
+    const result = decryptEnvelope(envelope, ring);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, /unknown key version/);
+  });
+
+  it("serialize/restore round-trips previous keys and revocations", () => {
+    const first = createKeyring();
+    revokeDevice(first, "dev_lost");
+    const rotated = rotateKeyring(first);
+    const restored = restoreKeyring(serializeKeyring(rotated));
+    assert.ok(restored);
+    assert.equal(restored.keyVersion, rotated.keyVersion);
+    assert.equal(restored.revokedDeviceIds.has("dev_lost"), true);
+    assert.equal(restored.previous.length, 1);
   });
 });

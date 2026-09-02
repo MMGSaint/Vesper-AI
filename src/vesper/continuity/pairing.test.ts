@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { MemoryStorage } from "../storage.ts";
 import { loadDeviceIdentity } from "../distributed/identity.ts";
 import { DeviceRegistry } from "../distributed/registry.ts";
-import { acceptPairing, createPairingOffer } from "./pairing.ts";
+import { acceptPairing, createPairingOffer, PairingLedger } from "./pairing.ts";
 
 async function device(name: string, type: "desktop" | "laptop" | "portable" = "desktop") {
   const dirs = { data: await mkdtemp(join(tmpdir(), "vesper-pair-")) };
@@ -45,5 +45,38 @@ describe("pairing", () => {
       now: () => new Date("2026-01-01T00:01:00.000Z"),
     });
     assert.equal(expired.ok, false);
+  });
+
+  it("ledger: pending → trusted → suspended, revoked cannot restore", async () => {
+    const ledger = new PairingLedger(new MemoryStorage());
+    await ledger.markPending("dev_usb");
+    assert.equal(await ledger.maySync("dev_usb"), false);
+    await ledger.approve("dev_usb");
+    assert.equal(await ledger.maySync("dev_usb"), true);
+    await ledger.suspend("dev_usb");
+    assert.equal(await ledger.maySync("dev_usb"), false);
+    await ledger.resume("dev_usb");
+    assert.equal(await ledger.maySync("dev_usb"), true);
+    await ledger.revoke("dev_usb");
+    await assert.rejects(() => ledger.approve("dev_usb"), /cannot be restored/);
+    await assert.rejects(() => ledger.resume("dev_usb"), /cannot be restored/);
+  });
+
+  it("restricted is not suspended — a device with no ledger entry may still sync", async () => {
+    const ledger = new PairingLedger(new MemoryStorage());
+    assert.equal(await ledger.maySync("dev_usb"), true);
+  });
+
+  it("acceptPairing can stamp the ledger pending", async () => {
+    const pc = await device("pc");
+    const usb = await device("usb", "portable");
+    const storage = new MemoryStorage();
+    const registry = new DeviceRegistry({ storage, self: pc.publicIdentity() });
+    const ledger = new PairingLedger(storage);
+    const { offer, code } = createPairingOffer({ from: usb.publicIdentity() });
+    const accepted = await acceptPairing({ offer, code, registry, ledger });
+    assert.equal(accepted.ok, true);
+    assert.equal((await ledger.get(usb.deviceId))?.state, "pending");
+    assert.equal((await registry.get(usb.deviceId))?.trust, "pending");
   });
 });
