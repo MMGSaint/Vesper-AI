@@ -1,0 +1,3 @@
+Use /vesper-roadmap.
+
+Determine the verified current state, dependencies, what can be completed now, what is blocked externally, and the highest-value next milestone. Do not reopen completed work without evidence. Keep the roadmap truthful: DONE, NEXT, BLOCKED, DEFERRED.

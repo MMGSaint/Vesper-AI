@@ -1,0 +1,3 @@
+Use /vesper-orchestrator for this task.
+
+First inspect the repo and current Vesper state. Decide which specialist skill(s) are actually needed. Use the smallest sufficient route and explain the routing briefly before acting. Preserve architecture, security, roadmap, and integration boundaries. Do not invent missing facts.

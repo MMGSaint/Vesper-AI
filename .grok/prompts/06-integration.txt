@@ -1,0 +1,3 @@
+Use /vesper-integration.
+
+Review the actual integration boundary before implementing. Separate interface design, adapter implementation, mock/simulation verification, and real integration verification. For NEXUS, preserve a distinct component boundary and do not invent a private API. Clearly identify environmental, hardware, credential, or external-service blockers.

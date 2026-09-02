@@ -1,0 +1,3 @@
+Use /vesper-architect.
+
+Review the current Vesper implementation before proposing changes. Identify the existing components, trust/data flow, affected boundaries, tradeoffs, migration impact, and verification plan. Prefer a focused change over a wholesale redesign. Verify every architectural claim against repository evidence.

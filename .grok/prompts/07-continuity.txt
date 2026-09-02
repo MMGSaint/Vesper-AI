@@ -1,0 +1,3 @@
+Use /vesper-continuity.
+
+Review this change against current code, tests, project instructions, architecture/decision docs, roadmap, security model, integration contracts, and established naming/UX. Classify findings as CONSISTENT, DRIFT RISK, CONFLICT, UNKNOWN, or DEPRECATED. Do not silently rewrite prior decisions.

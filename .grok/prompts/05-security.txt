@@ -1,0 +1,3 @@
+Use /vesper-security.
+
+Treat this request as security-sensitive. Review the relevant permissions, filesystem/process boundaries, secrets, data privacy, tool execution, and integration trust boundaries. Identify attack surface, existing controls, gaps, smallest safe fix, and verification. Do not weaken security merely for convenience.

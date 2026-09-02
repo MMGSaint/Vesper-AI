@@ -1,0 +1,3 @@
+Use /vesper-builder.
+
+Inspect first, then implement the smallest complete change. Reuse existing abstractions. Run relevant tests/checks and clearly distinguish locally verified behavior from mocks, simulations, CI-only verification, and external blockers. Report files changed, behavior changed, checks run, and remaining limitations.

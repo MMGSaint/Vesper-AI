@@ -31,6 +31,10 @@ Do **not**:
 
 Vesper may talk to Mortis later through APIs, adapters, curated files, or the Mortis workspace.
 
+## Grok Build skills
+
+Reusable operating skills live in `.grok/skills/` and are discovered from that project directory. Task prompts should state goals and current intent; they should not restate the full engineering methodology. Route non-trivial work through `vesper-orchestrator` and invoke only the specialists required.
+
 ## Architecture
 
 ```
