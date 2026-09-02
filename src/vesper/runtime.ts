@@ -53,6 +53,10 @@ import { SkillRegistry } from "./skills.ts";
 import { AutomationStore } from "./automation.ts";
 import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
 import { coercePreview } from "./preview.ts";
+import { ContinuityEngine } from "./continuity/engine.ts";
+import { DisabledCloudProvider, MemoryCloudProvider } from "./continuity/cloud.ts";
+import { createKeyring } from "./continuity/crypto.ts";
+import { runQuietSyncTick } from "./continuity/heartbeat.ts";
 import { buildDiagnostics } from "./diagnostics.ts";
 import { createId } from "./id.ts";
 import { createObsClient, type ObsClient } from "./specialists/obs.ts";
@@ -1006,6 +1010,13 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     maxPerTick: config.agent.tasksPerTick,
   });
 
+  const continuityEngine = new ContinuityEngine({ localDeviceId: deviceIdentity.deviceId });
+  const continuityProvider =
+    config.sync.enabled && config.sync.provider === "local-mock"
+      ? new MemoryCloudProvider()
+      : new DisabledCloudProvider();
+  const continuityRing = createKeyring();
+
   const scheduler = createIdleScheduler({
     events,
     log,
@@ -1065,6 +1076,26 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
         log.warn("lifecycle", "automation tick threw", {
           error: error instanceof Error ? error.message : String(error),
         });
+      }
+      if (config.sync.enabled) {
+        try {
+          const tick = await runQuietSyncTick({
+            enabled: true,
+            engine: continuityEngine,
+            provider: continuityProvider,
+            auth: null,
+            ring: continuityRing,
+            local: [],
+            apply: () => undefined,
+          });
+          if (tick.wokeModel) {
+            log.warn("lifecycle", "sync tick claimed to wake the model; that is a bug");
+          }
+        } catch (error) {
+          log.warn("lifecycle", "sync tick threw", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
     },
   });
