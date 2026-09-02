@@ -25,8 +25,16 @@ export function previewAction(input: {
   toolName: string;
   args: JsonObject;
   decision: PermissionDecision;
+  /** Handler result from a dry-run, if the tool supports one and it was attempted. */
+  dryRun?: { ok: boolean; summary: string };
+  dryRunAttempted?: boolean;
 }): ActionPreview {
   const specific = specificPreview(input.toolName, input.args);
+  const wouldHappen = input.dryRun
+    ? input.dryRun.summary
+    : input.dryRunAttempted
+      ? "dry-run was attempted but produced no summary"
+      : undefined;
   return {
     toolName: input.toolName,
     summary: specific.summary,
@@ -35,6 +43,9 @@ export function previewAction(input: {
     reversibility: specific.reversibility,
     rollbackHint: specific.rollbackHint,
     reason: input.decision.reason,
+    executed: false,
+    wouldHappen,
+    dryRunAttempted: input.dryRunAttempted === true,
   };
 }
 
@@ -44,6 +55,8 @@ export function formatPreview(preview: ActionPreview): string {
     preview.affected.length ? `affected: ${preview.affected.join("; ")}` : null,
     preview.sideEffects.length ? `side effects: ${preview.sideEffects.join("; ")}` : null,
     `reversibility: ${reversibilityLine(preview)}`,
+    preview.wouldHappen ? `would happen: ${preview.wouldHappen}` : null,
+    `executed: no — this is a preview, not a receipt`,
     `reason: ${preview.reason}`,
   ];
   return lines.filter((line): line is string => line !== null).join("\n");
@@ -89,6 +102,10 @@ export function coercePreview(raw: unknown): ActionPreview | undefined {
     reversibility,
     rollbackHint: typeof rec.rollbackHint === "string" ? rec.rollbackHint : undefined,
     reason: rec.reason,
+    // A restored preview that claims the action already ran is lying or tampered.
+    executed: false,
+    wouldHappen: typeof rec.wouldHappen === "string" ? rec.wouldHappen : undefined,
+    dryRunAttempted: rec.dryRunAttempted === true,
   };
 }
 

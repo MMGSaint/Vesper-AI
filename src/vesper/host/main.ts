@@ -362,6 +362,9 @@ async function main() {
                     sideEffects: pending.preview.sideEffects,
                     reversibility: pending.preview.reversibility,
                     rollbackHint: pending.preview.rollbackHint ?? null,
+                    executed: false,
+                    wouldHappen: pending.preview.wouldHappen ?? null,
+                    dryRunAttempted: pending.preview.dryRunAttempted === true,
                   }
                 : null,
             })),
@@ -382,6 +385,10 @@ async function main() {
           console.error(
             `  reversibility: ${pending.preview.rollbackHint ?? pending.preview.reversibility}`,
           );
+          if (pending.preview.wouldHappen) {
+            console.error(`  would happen: ${pending.preview.wouldHappen}`);
+          }
+          console.error("  executed: no — this is a preview, not a receipt");
         }
       }
     }

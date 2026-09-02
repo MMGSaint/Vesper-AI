@@ -46,12 +46,14 @@ function spec(
   permission: ToolSpec["permission"],
   properties: ToolSpec["parameters"]["properties"],
   required: string[] = [],
+  extras: { supportsDryRun?: boolean } = {},
 ): ToolSpec {
   return {
     name,
     description,
     permission,
     parameters: { type: "object", properties, required },
+    supportsDryRun: extras.supportsDryRun,
   };
 }
 
@@ -627,6 +629,7 @@ export function registerBuiltinTools(input: {
       "confirm",
       { path: { type: "string" }, content: { type: "string" } },
       ["path", "content"],
+      { supportsDryRun: true },
     ),
     async (args, context) =>
       writeApproved(config.approvedRoots, str(args, "path"), str(args, "content"), context.dryRun, {

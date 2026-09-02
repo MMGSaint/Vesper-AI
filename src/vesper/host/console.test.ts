@@ -242,6 +242,7 @@ test("interactive console", async (t) => {
                 reversibility: "not_reversible" as const,
                 rollbackHint: "closing an app is not undone by Vesper; you would reopen it yourself",
                 reason: "Closing an application needs confirmation.",
+                executed: false,
               },
             },
           ],
@@ -256,6 +257,7 @@ test("interactive console", async (t) => {
     assert.match(out, /reason: Closing an application needs confirmation\./);
     assert.match(out, /intended: Close a running approved application/);
     assert.match(out, /reversibility: closing an app is not undone/);
+    assert.match(out, /executed: no — this is a preview, not a receipt/);
     assert.match(out, /obs64\.exe/, "the arguments are shown before approving");
     assert.equal(calls[1]?.confirmId, "conf-1");
     assert.equal(calls[1]?.approve, true);

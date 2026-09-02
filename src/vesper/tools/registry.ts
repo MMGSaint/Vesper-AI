@@ -344,6 +344,24 @@ export class ToolRegistry {
           result: { ok: false, summary: reason, epistemic: "could_not_access" },
         };
       }
+      let dryRunAttempted = false;
+      let dryRunResult: { ok: boolean; summary: string } | undefined;
+      // Only tools that advertise they honour `context.dryRun` are invoked here.
+      // Calling any other handler would turn a preview into a real side effect.
+      if (registered.spec.supportsDryRun === true) {
+        dryRunAttempted = true;
+        try {
+          const previewed = await registered.handler(args, {
+            workspaceId: input.workspaceId,
+            dryRun: true,
+            origin: { kind: origin.kind, deviceId: origin.deviceId },
+          });
+          dryRunResult = { ok: previewed.ok, summary: previewed.summary };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          dryRunResult = { ok: false, summary: `dry-run failed: ${message}` };
+        }
+      }
       const pending: PendingConfirmation = {
         id: createId("confirm"),
         toolName: input.name,
@@ -359,7 +377,13 @@ export class ToolRegistry {
           kind: origin.kind === "remote" ? "remote" : "local",
           deviceId: origin.deviceId,
         },
-        preview: previewAction({ toolName: input.name, args, decision }),
+        preview: previewAction({
+          toolName: input.name,
+          args,
+          decision,
+          dryRun: dryRunResult,
+          dryRunAttempted: Boolean(dryRunResult) || dryRunAttempted,
+        }),
       };
       this.confirmations.set(pending.id, pending);
       this.log.info("permission", "Queued confirmation", { id: pending.id, tool: input.name });

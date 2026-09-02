@@ -34,4 +34,51 @@ describe("confined filesystem tools", () => {
     });
     assert.equal(pending.decision.requiresConfirmation, true);
   });
+
+  it("dry-runs fs_write when queueing confirmation, without writing the file", async () => {
+    const approved = join(tmpdir(), `vesper-dryrun-${Date.now()}`);
+    await mkdir(approved, { recursive: true });
+    const runtime = await testRuntime({ config: { approvedRoots: [approved] } });
+    const content = "DRY_RUN_BODY_MUST_NOT_LAND";
+    const queued = await runtime.tools.invoke({
+      name: "fs_write",
+      args: { path: "dry-run.md", content },
+      workspaceId: "general",
+    });
+    assert.equal(queued.decision.requiresConfirmation, true);
+    assert.ok(queued.confirmationId);
+    const pending = runtime.confirmations.get(queued.confirmationId!);
+    assert.ok(pending?.preview);
+    assert.equal(pending?.preview?.executed, false);
+    assert.equal(pending?.preview?.dryRunAttempted, true);
+    assert.match(pending?.preview?.wouldHappen ?? "", /Would create/);
+    assert.equal(pending?.preview?.wouldHappen?.includes(content), false);
+
+    const listed = await runtime.tools.invoke({
+      name: "fs_list",
+      args: { path: "." },
+      workspaceId: "general",
+    });
+    assert.equal(
+      JSON.stringify(listed.result?.data ?? {}).includes("dry-run.md"),
+      false,
+      "queueing a confirmation must not create the file",
+    );
+
+    const approvedWrite = await runtime.tools.invoke({
+      name: "fs_write",
+      args: { path: "dry-run.md", content },
+      workspaceId: "general",
+      confirmed: true,
+    });
+    assert.equal(approvedWrite.result?.ok, true, approvedWrite.result?.summary);
+    const read = await runtime.tools.invoke({
+      name: "fs_read",
+      args: { path: "dry-run.md" },
+      workspaceId: "general",
+    });
+    assert.equal(read.result?.ok, true);
+    const text = (read.result?.data as { text?: string } | undefined)?.text ?? "";
+    assert.equal(text, content);
+  });
 });

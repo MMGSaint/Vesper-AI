@@ -545,10 +545,22 @@ export async function writeApproved(
     return { ok: false, epistemic: "could_not_access", summary: "Write exceeds the 256 KB limit." };
   }
   if (dryRun) {
+    let existed = false;
+    try {
+      await lstat(resolved.path);
+      existed = true;
+    } catch {
+      existed = false;
+    }
+    const rel = relative(resolved.root, resolved.path);
     return {
       ok: true,
       epistemic: "requested",
-      summary: `Dry-run write to ${relative(resolved.root, resolved.path)}.`,
+      changed: false,
+      summary: existed
+        ? `Would overwrite ${rel} (${content.length} character(s); not written).`
+        : `Would create ${rel} (${content.length} character(s); not written).`,
+      data: { path: rel, chars: content.length, existed, executed: false },
     };
   }
   try {

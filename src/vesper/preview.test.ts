@@ -27,6 +27,8 @@ describe("action preview", () => {
     assert.match(formatPreview(preview), /11 character/);
     assert.match(formatPreview(preview), /checkpoint/);
     assert.match(formatPreview(preview), /requires explicit confirmation/);
+    assert.equal(preview.executed, false);
+    assert.match(formatPreview(preview), /executed: no — this is a preview, not a receipt/);
   });
 
   it("says forgetting a memory cannot be undone", () => {
@@ -70,8 +72,26 @@ describe("action preview", () => {
       sideEffects: ["overwrite"],
       reversibility: "reversible",
       reason: "needs confirmation",
+      executed: true,
     });
     assert.equal(ok?.toolName, "fs_write");
+    assert.equal(ok?.executed, false, "a restored preview must not claim the action ran");
+  });
+
+  it("attaches a dry-run summary as would-happen, never as a receipt", () => {
+    const preview = previewAction({
+      toolName: "fs_write",
+      args: { path: "notes/todo.md", content: "hi" },
+      decision: confirm("fs_write"),
+      dryRunAttempted: true,
+      dryRun: { ok: true, summary: "Would create notes/todo.md (2 character(s); not written)." },
+    });
+    assert.equal(preview.executed, false);
+    assert.equal(preview.dryRunAttempted, true);
+    assert.match(preview.wouldHappen ?? "", /Would create/);
+    assert.match(formatPreview(preview), /would happen: Would create/);
+    assert.match(formatPreview(preview), /executed: no/);
+    assert.equal(/has written|did write|wrote the file/i.test(formatPreview(preview)), false);
   });
 });
 

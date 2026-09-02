@@ -133,6 +133,10 @@ async function resolveConfirmations(
       io.writeLine(
         `  reversibility: ${pending.preview.rollbackHint ?? pending.preview.reversibility}`,
       );
+      if (pending.preview.wouldHappen) {
+        io.writeLine(`  would happen: ${pending.preview.wouldHappen}`);
+      }
+      io.writeLine("  executed: no — this is a preview, not a receipt");
     }
     if (pending.args && Object.keys(pending.args).length) {
       io.writeLine(`  arguments: ${JSON.stringify(pending.args)}`);

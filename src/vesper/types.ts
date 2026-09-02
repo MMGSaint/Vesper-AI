@@ -103,6 +103,13 @@ export interface ToolSpec {
   parameters: ToolParameterSchema;
   workspaces?: string[];
   specialist?: string;
+  /**
+   * When true, the confirmation path may invoke the handler with `dryRun: true` to
+   * learn what *would* happen, without performing the side effect. Tools that do not
+   * honour `context.dryRun` must leave this unset — otherwise a "preview" would be a
+   * real write.
+   */
+  supportsDryRun?: boolean;
 }
 
 export interface ToolParameterSchema {
@@ -170,6 +177,16 @@ export interface ActionPreview {
   reversibility: Reversibility;
   rollbackHint?: string;
   reason: string;
+  /**
+   * Always false on a preview. A preview is a claim about an intended action, never
+   * evidence that it ran. Restoring a tampered record that says otherwise is coerced
+   * back to false.
+   */
+  executed: boolean;
+  /** What a dry-run of the handler reported, when the tool supports one. */
+  wouldHappen?: string;
+  /** True when the confirmation path actually invoked the handler with dryRun. */
+  dryRunAttempted?: boolean;
 }
 
 export interface PendingConfirmation {
