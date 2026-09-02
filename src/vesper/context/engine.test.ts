@@ -53,6 +53,7 @@ describe("context engine", () => {
     const observations = await engine.snapshot();
     const process = observations.find((item) => item.source === "process");
     assert.equal(process?.kind, "observed");
+    assert.equal(process?.trust, "system");
     assert.deepEqual(process?.data?.names, ["VRChat.exe", "obs64.exe"]);
     assert.equal(process?.summary.includes("screenshot"), false);
   });
@@ -63,5 +64,17 @@ describe("context engine", () => {
     assert.equal(observations.find((item) => item.source === "screen")?.kind, "unavailable");
     assert.equal(observations.find((item) => item.source === "clipboard")?.kind, "unavailable");
     assert.match(observations.find((item) => item.source === "screen")?.summary ?? "", /not implemented/);
+    assert.equal(observations.find((item) => item.source === "screen")?.trust, "system");
+  });
+
+  it("does not label process observations as user or trusted_local", async () => {
+    const engine = createContextEngine({
+      config: { process: true },
+      listProcesses: () => [{ name: "obs64.exe" }],
+    });
+    const observations = await engine.snapshot();
+    for (const item of observations) {
+      assert.equal(item.trust === "user" || item.trust === "trusted_local", false, `${item.source} trust=${item.trust}`);
+    }
   });
 });

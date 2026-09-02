@@ -15,7 +15,7 @@
  */
 
 import { nowIso } from "../id.ts";
-import type { JsonObject } from "../types.ts";
+import type { ContextTrust, JsonObject } from "../types.ts";
 
 export const CONTEXT_SOURCE_IDS = [
   "process",
@@ -37,6 +37,13 @@ export interface ContextObservation {
   kind: ContextObservationKind;
   summary: string;
   data?: JsonObject;
+  /**
+   * Who produced this observation. Provenance is a label, not a permission.
+   * Process lists are SYSTEM. Unimplemented capture, if it existed, would be
+   * UNTRUSTED_EXTERNAL — it is content Vesper did not author.
+   */
+  trust: ContextTrust;
+  scope?: string;
 }
 
 export interface ContextSource {
@@ -114,6 +121,8 @@ function processSource(input: {
         kind: "observed",
         summary: names.length ? `${names.length} process name(s) visible` : "no processes reported",
         data: { names: names.slice(0, 64) },
+        trust: "system",
+        scope: "device",
       };
     },
   };
@@ -130,6 +139,8 @@ function inertSource(id: ContextSourceId, enabled: boolean): ContextSource {
         at: nowIso(),
         kind: "unavailable",
         summary: `${id} capture is not implemented; enabling it does not record anything`,
+        trust: "system",
+        scope: "device",
       };
     },
   };
@@ -141,5 +152,7 @@ function disabled(id: ContextSourceId): ContextObservation {
     at: nowIso(),
     kind: "disabled",
     summary: `${id} source is off`,
+    trust: "system",
+    scope: "device",
   };
 }

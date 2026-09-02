@@ -62,6 +62,18 @@ export const FEATURE_STATUSES = [
 ] as const;
 export type FeatureStatus = (typeof FEATURE_STATUSES)[number];
 
+/**
+ * Who a piece of context belongs to. Provenance is a label for the model, not a
+ * permission. Tool rights still come from the gate.
+ *
+ *   user               — the person said this, in this conversation
+ *   trusted_local      — stored local state Vesper already accepted (memory, reviewed procedures)
+ *   system             — runtime/hardware/process observations produced here
+ *   untrusted_external — files, web, tool output, attachments, anything that arrived from outside
+ */
+export const CONTEXT_TRUSTS = ["user", "trusted_local", "system", "untrusted_external"] as const;
+export type ContextTrust = (typeof CONTEXT_TRUSTS)[number];
+
 export const BACKGROUND_STATES = [
   "stopped",
   "starting",
