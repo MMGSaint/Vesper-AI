@@ -1,6 +1,16 @@
 # Known limitations
 
-## Hardware, unchanged
+## Software-only beta, still blocked on the outside world
+
+- **Jobs execute through the scheduler** when a named read/safe tool is given.
+  Confirm-tier jobs wait; they do not self-approve. Never-tier names are refused.
+  A title-only job records a plan and does not invent a tool grant.
+- **Cloud sync** remains the local mock unless credentials exist. Ciphertext only.
+  Quiet ticks never wake the model.
+- **Command Center** is a briefing and a software-only loop. It does not speak
+  to Ollama. `--ask` on the Windows host is still the live inference path.
+
+
 
 The target Windows PC (Ryzen 9 9950X / RX 7900 XT 20 GB / 96 GB) was powered off for
 all of this work. Nothing below has been observed on it.

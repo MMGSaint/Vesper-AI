@@ -1,223 +1,64 @@
 # Project status
 
-Phase: **distributed and portable architecture, on top of the retracted
-"software-only complete" claim.**
+Phase: **software-only beta.** Personal intelligence is no longer a foothold
+sitting next to the agent — it is the agent's default context path, and durable
+jobs actually drive the existing scheduler.
 
-Current validation, on a Linux development host: **491 tests**, **25 security tests**,
-typecheck and hygiene clean. CI and CodeQL results for the distributed branch are
-recorded in the section for that work, and are not claimed before they are observed.
+Treat gate numbers below as the last measured run on this branch. Re-run
+`npm test`, `npm run security`, `npm run typecheck`, `npm run hygiene` from
+the checkout rather than copying this file forward.
 
-For what the distributed layer does and does not do, see
-[distributed.md](distributed.md). For portable/USB, see [portable.md](portable.md).
+For the intelligence layer, see [intelligence.md](intelligence.md). For
+continuity, [continuity.md](continuity.md). For hardware that is still
+simulated, [known-limitations.md](known-limitations.md).
+
+## Software-only beta (this branch)
+
+Wired and tested:
+
+- **Context assembly in the agent loop.** Retrieved memory is ranked by kind
+  and provenance, secrets and session scope are dropped, instincts are labeled
+  `not policy`, and the block is still screened as untrusted content. The
+  `Relevant memory:` header is preserved so injection probes still find it.
+- **Deterministic-first routing in the prompt.** When a procedure, skill, or
+  tool matches, the system prompt states a preferred path and that it is not
+  executed. Every tool still goes through the gate.
+- **Durable jobs.** `job_create` enqueues a `durable_job` task. The executor
+  plans, checkpoints, and may invoke read/safe tools under a `scheduled`
+  origin. Confirm-tier waits. Never-tier is refused. Restart recovery
+  re-queues open jobs and does not resume waiting-confirm unattended.
+- **Command Center** is a playable beta surface for the same loop. It is not
+  the Windows host.
+
+Still true, and still not claimed as done:
+
+- Production cloud credentials are absent. Continuity uses the local mock.
+- NEXUS control API is unpublished. Mock stays mock.
+- Target PC hardware (AMD telemetry, tray, WASAPI, USB) is unimplemented live.
+- Startup registration stays off.
 
 ## Distributed and portable work
 
-Built and tested:
+The distributed layer remains in place under the beta. Device identity, trust
+states, capability manifests, memory scopes, remote authority limits, and the
+untrusted content boundary were already built and tested before this branch.
 
-- **Device identity** — ed25519, generated on first run, private half never synced,
-  logged, or exported; a stored key is signature-self-tested before it is trusted.
-  Hardware fingerprints deliberately not used: spoofable, and they leak.
-- **Trust states** — `unknown → pending → restricted ⇄ trusted → revoked`, revocation
-  terminal. Trust is re-read on every request rather than cached, so revoking a lost
-  phone ends its live sessions immediately instead of at token expiry.
-- **Capability manifests** — discovered by asking the component that would do the work,
-  never assumed from device type. `AVAILABLE` / `UNAVAILABLE` / `NOT_CONFIGURED` are
-  three distinct claims and are not collapsed.
-- **Memory scopes** — five scopes with visibility and syncability owned by one module,
-  so the store and the sync engine cannot drift. Device facts about another machine are
-  attributed to it rather than stated bare.
-- **Cross-device tasks** — persistent, capability-routed, never degraded onto an
-  incapable device; a named device is a hard constraint, not a preference.
-- **Client protocol v2** — sessions bound to a registered device id rather than a
-  free-text label.
-- **Remote authority limits** — filesystem, Windows control, and trust administration
-  are refused to every remote device at every trust class, enforced at the point tools
-  run.
-- **Untrusted content boundary** — every byte of retrieved text (tool results, knowledge
-  hits, memory) is sealed in a per-wrap nonce boundary it cannot close, screened, and
-  withheld outright when it scores high.
+Implemented and tested but **not a hosted service**:
 
-Defects found by running the product rather than reading the code, each now a
-regression test:
+- **Sync engine.** Conflict resolution and the engine are tested; calling them
+  needs a transport. Capability discovery reports `sync` as `NOT_CONFIGURED`
+  unless `sync.enabled` is on, which is accurate.
+- **Session grants.** The signed portable grant model exists; the companion
+  path uses device-bound client sessions instead.
 
-- A companion device holding only the `conversation` scope could drive the agent into
-  filesystem tools on the host's disk. The permission gate returned `allowed: true`,
-  because the request was indistinguishable from the person at the machine.
-- Client sessions survived device revocation for up to an hour, because the gateway
-  never consulted the registry.
-- No device ever built a capability manifest, so routing refused every capability-bearing
-  task on machines that could have done the work.
-- The mock optimizer reported itself as a live `nexus` capability.
-- `search` hid `user`-scoped memories outside the workspace they were recorded in — the
-  opposite of what user scope is for.
-- A single long memory consumed 68% of the whole context budget, and the system prompt
-  is the one part `fitContext` cannot trim.
+Not built: any production transport, a mobile client, live NEXUS control.
 
-Implemented and tested but **not wired**, stated plainly rather than counted as done:
+## Historical retraction (kept)
 
-- **Sync engine.** Conflict resolution, sync filtering, and the engine itself are
-  tested; nothing calls them, because calling them needs a transport. Capability
-  discovery reports `sync` as `NOT_CONFIGURED` on every device today, which is accurate.
-- **Session grants.** The signed, replay-guarded portable grant model exists and is
-  tested; the companion path uses device-bound client sessions instead.
-- **Presence between machines.** A device records its own presence; nothing heartbeats
-  across devices, again for want of a transport.
+The last session recorded "software-only target complete" too early, before
+intelligence was the agent's default path and before jobs drove the scheduler.
+That over-claim is why this file now describes wiring rather than class names.
 
-Not built: any transport, pairing flow, or listener; a mobile client application;
-portable packaging or Windows isolation. See the "Genuinely not implemented" section
-below for why the transport in particular is not being built unattended.
-
-## The earlier retraction, kept for the record
-
-## What changed, and why the previous status was retracted
-
-The last session recorded "software-only target complete; remaining work is
-hardware-dependent or unpublished APIs". An independent audit of the repository, plus
-direct verification against the running product, found that this was not true. Among
-what was still outstanding, and is now fixed:
-
-- A real installation booted with **zero workspaces, zero approved applications, and
-  zero knowledge sources**. "Get me ready for VRChat" answered "I could not launch the
-  usual apps". Tests missed it because they never load a config file.
-- The permission gate **failed open**: any level that was not `never` or `confirm` was
-  allowed.
-- A **symlink planted inside an approved directory escaped confinement** and its
-  contents were returned. Reproduced before the fix.
-- After the first tool use, **every later turn degraded to the offline stub**, because
-  history kept tool calls that were never answered.
-- Model tool arguments were **never validated**, though `required` and `enum` were
-  advertised to the model.
-- The benchmark harness — the file whose purpose is refusing fake numbers — reported
-  **total latency as time-to-first-token** and **estimated tokens from character
-  count**.
-- On Windows, every path under `C:\Users` was refused as dangerous, making the confined
-  filesystem tools and knowledge indexing **unusable on the only OS Vesper targets**.
-  Found within minutes of adding a Windows CI job.
-- Voice detected its backends and then never invoked them.
-- There was **no background mode** and **no single-instance lock**.
-
-The lesson is recorded in `CLAUDE.md` under "Invariants": each one is a defect that
-shipped, with a regression test named after what broke.
-
-## Validation (the retraction session, on a Linux development host)
-
-- Tests: **314 passing** (baseline at that session's start: 125)
-- Security tests: **25 passing** (was 15)
-- Typecheck (`tsc --noEmit`, test files included): passing
-- Hygiene: passing
-- Production check (`npm run build`): passing
-- CI: **passing on ubuntu-latest and windows-latest** on every commit of this branch
-- CodeQL (`security-extended`): **completed successfully on this branch's HEAD** —
-  [run 32980070409](https://github.com/MMGSaint/Vesper-AI/actions/runs/32980070409).
-  CodeQL is configured to run on `main` only, so it had never scanned this branch; it
-  was dispatched explicitly to cover the ~10,000 changed lines.
-- Secret scanning alerts: 0 · Dependabot alerts: 0
-
-The shipped artifact was installed from scratch and run: extracted, `npm ci` from the
-bundled lockfile, `--doctor` reporting OK, and a conversation that used tools and stored
-memory — all from the packaged tree rather than the working copy. On Linux, not Windows.
-
-Behaviour verified by running the product, not only by tests:
-
-- Background mode stays alive with no TTY and exits cleanly on SIGTERM.
-- A second host refuses to start; a lock left by a dead process is reclaimed.
-- Crash post-mortem on next start: "The health file claims Vesper is running as pid
-  28800, but that process is gone."
-- The console holds a conversation, stores and retrieves memory, switches workspace,
-  and prepares VRChat.
-- The whole stack runs over a real socket against a server speaking Ollama's protocol:
-  streaming, native tool calls, permission gate, and a well-formed later turn.
-- `npm run package` produces a deterministic zip, byte-identical across builds and
-  readable by an independent parser.
-
-**None of this is hardware validation.** See "Blocked" below.
-
-## Completed this session
-
-Foundation and local AI
-- Streaming, caller cancellation, and provider-reported token accounting in the model
-  contract; benchmark reports only real measurements.
-- Native Ollama provider; SSE streaming and tool-call reassembly for OpenAI-compatible
-  backends; router fallback and lazy re-probe fixes.
-
-Memory, knowledge, and context
-- Scored memory retrieval; corrupt-entry resilience; BM25 with IDF and length
-  normalisation; incremental reindex and globs; model-backed embeddings with lexical
-  fallback and an honest downgrade report.
-- Context budgeting, tool-result truncation, history integrity, serialized turns.
-
-Product surface
-- An interactive console that can approve confirmations, stream replies, cancel a turn
-  with Ctrl-C, and manage memory and workspaces.
-- Diagnostics that name the active embedding backend.
-- Event log persistence and time correlation (`explain_change`), which is what lets
-  Vesper say "OBS started recording 40s before" — timing only, never causation.
-
-Windows and packaging
-- Background mode, single-instance lock, honest health with pid and heartbeat, crash
-  post-mortem, a real Windows adapter behind the abstraction, a chosen tray mechanism.
-- Installer and runtime now agree on the config path, asserted by a test.
-- `npm run package` builds a reproducible artifact with a manifest.
-- CI runs on Windows as well as Linux.
-
-Security
-- Symlink-aware path confinement; default-deny permissions; tool argument validation;
-  SSRF hardening and endpoint validation; audit trail for state-changing optimizer
-  calls; audit-write failures can no longer kill the process.
-
-## Blocked — requires the physical PC
-
-Nothing below has been observed. See `docs/known-limitations.md`.
-
-- Live AMD telemetry, clocks, power, temperatures
-- Real Vulkan vs ROCm throughput on the 7900 XT
-- Native tray icon, HKCU startup, toast delivery, `tasklist`, application launch/close
-- Microphone capture and speaker playback
-- Actual Ollama / llama.cpp model assignment and benchmarking
-- Installer, uninstaller, and reset executed on Windows
-
-## Blocked — requires an external API
-
-- The real PC optimizer API is unpublished. The adapter, its transport hardening, and
-  its audit trail are ready; the contract is a placeholder until the real one exists.
-
-## Genuinely not implemented (software-only work that remains)
-
-Stated plainly rather than classified as complete:
-
-- **Companion transport.** `vesper.client` v2 is in-process only: no pairing, no
-  listener, no LAN TLS. This is deliberately **not** built autonomously. Opening an
-  inbound network listener on a personal machine is an outward-facing security decision
-  that belongs to the owner, not to an agent working unattended. The scoped protocol and
-  the in-process gateway are ready for it.
-
-Completed since that list was first written: the **MCP client** (real stdio JSON-RPC,
-namespaced and permission-gated) and **OBS WebSocket** (observed recording and streaming
-state, feeding the event log so correlation can use it).
-
-## Next on the real PC
-
-1. Install Node 22, run `packaging/windows/install.ps1`, then `npm ci` in the install root
-2. Launch the host; run `--doctor` and read the first-boot report
-3. Install Ollama and/or llama.cpp with Vulkan; pull an embedding model
-4. Re-run first-boot and the benchmark harness, and record the real numbers
-5. Validate tray, startup registration, toasts, and application control
-6. Point the optimizer adapter at the real API when it is published
-
-When hardware becomes available, **validate every hardware-dependent item rather than
-simulating success**.
-
-## Integration
-
-All of this work is **merged into `main`** as of `f1b08e7`.
-
-PR #6 had taken only the first commit of this line of work; PR #7 integrated the
-remaining 23. `agent/continuation` was a strict descendant of `main` — merge-base *was*
-`main`, with no commits on `main` that the branch lacked — so it merged with no rebase,
-squash, or cherry-pick, and every commit kept its original SHA. The merged tree is
-byte-identical to the branch tip that CI had already validated.
-
-Verified on the merge commit itself: 314 tests, 25 security tests, typecheck, hygiene,
-and build all clean, with CI green on ubuntu-latest and windows-latest and CodeQL
-(`security-extended`) green. The head branch was auto-deleted on merge; nothing is lost,
-since every commit is reachable from `main`.
+Earlier defects that shipped and were fixed (permission fail-open, symlink
+escape, dangling tool calls, unbounded retrieval, Windows path refusal, and
+the rest) stay as named regression tests. See `CLAUDE.md` invariants.
