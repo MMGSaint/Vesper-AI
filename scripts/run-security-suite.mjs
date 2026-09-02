@@ -42,6 +42,7 @@ const SUITE = [
   ["src/vesper/security-startup.test.ts", "startup registration and config patching are not authority surfaces"],
   ["src/vesper/security-decisions.test.ts", "decision journal is evidence; remote task_create keeps its author"],
   ["src/vesper/security-hardening.test.ts", "procedures, skills, compaction, and retries cannot bypass the gate"],
+  ["src/vesper/security-continuity.test.ts", "sync cannot execute tools, upgrade trust, or revive a revoked device"],
   ["src/vesper/distributed/discovery.test.ts", "capabilities are discovered, never assumed"],
   ["src/vesper/logging.test.ts", "secret redaction on the audit path"],
   ["src/vesper/resource-bounds.test.ts", "nothing untrusted chooses how much the host allocates"],
