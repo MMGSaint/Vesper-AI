@@ -75,6 +75,12 @@ describe("a remote device cannot reach OS authority through a conversation", () 
     assert.match(record?.result?.summary ?? "", /only be run at the machine/);
   });
 
+  it("denies pairing administration from another device", async () => {
+    const record = await remoteTurn("pairing_suspend", { deviceId: "dev_x" });
+    assert.equal(record?.decision.allowed, false);
+    assert.match(record?.result?.summary ?? "", /only be run at the machine/);
+  });
+
   it("still allows what a trusted device is granted and this device can do", async () => {
     // The control must narrow, not sever: a trusted phone asking for something this
     // machine actually reports is a legitimate request.

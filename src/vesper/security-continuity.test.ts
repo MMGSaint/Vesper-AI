@@ -7,11 +7,13 @@ import { testRuntime } from "./test-helpers.ts";
 import { MemoryCloudProvider } from "./continuity/cloud.ts";
 import { createKeyring, decryptEnvelope, encryptEnvelope, revokeDevice } from "./continuity/crypto.ts";
 import { ContinuityEngine } from "./continuity/engine.ts";
-import { mayApplyIncoming, mayEnterCloud } from "./continuity/policy.ts";
+import { mayApplyIncoming, mayEnterCloud, planDemotion, conflictKindFor } from "./continuity/policy.ts";
 import { buildSyncRecord, SyncRecordError } from "./continuity/records.ts";
 import { proposeSkillFromProcedure } from "./continuity/bridge.ts";
 import { trustAfterSync } from "./continuity/types.ts";
 import { MAX_SYNC_PAYLOAD_BYTES } from "./continuity/types.ts";
+import { PairingLedger } from "./continuity/pairing.ts";
+import { CloudflareCloudProvider } from "./continuity/cloudflare.ts";
 
 describe("continuity security", () => {
   it("authentication failure rejects a push", async () => {
@@ -236,5 +238,91 @@ describe("continuity security", () => {
       mayApplyIncoming({ record: shared, localDeviceId: "dev_pc", senderRevoked: true }).allowed,
       false,
     );
+  });
+
+  it("demoting SHARED to PRIVATE retracts the remote copy without leaking the value", () => {
+    const plan = planDemotion({ entityId: "sarah.employer", from: "shared", to: "private" });
+    assert.equal(plan.action, "tombstone_remote");
+    assert.equal(plan.operation, "delete");
+    assert.equal(plan.payload.retract, true);
+    assert.equal("value" in plan.payload, false);
+    const tombstone = buildSyncRecord({
+      entityType: "memory",
+      entityId: "sarah.employer",
+      sourceDeviceId: "dev_pc",
+      operation: "delete",
+      payload: plan.payload,
+      privacy: "private",
+      trust: "user",
+      origin: "pc",
+    });
+    assert.equal(mayEnterCloud(tombstone).allowed, true);
+    assert.equal(JSON.stringify(tombstone.payload).includes("Y"), false);
+  });
+
+  it("a suspended sender cannot apply incoming records", () => {
+    const incoming = buildSyncRecord({
+      entityType: "memory",
+      entityId: "x",
+      sourceDeviceId: "dev_usb",
+      operation: "update",
+      payload: { value: "from-suspended" },
+      privacy: "shared",
+      trust: "user",
+      origin: "usb",
+    });
+    const decision = mayApplyIncoming({
+      record: incoming,
+      localDeviceId: "dev_pc",
+      senderRevoked: false,
+      senderSuspended: true,
+    });
+    assert.equal(decision.allowed, false);
+    assert.match(decision.reason, /suspended/);
+  });
+
+  it("oversized incoming payloads are refused even if privacy is shared", () => {
+    const incoming = buildSyncRecord({
+      entityType: "memory",
+      entityId: "x",
+      sourceDeviceId: "dev_other",
+      operation: "update",
+      payload: { value: "ok" },
+      privacy: "shared",
+      trust: "user",
+      origin: "other",
+    });
+    incoming.payload = { value: "n".repeat(MAX_SYNC_PAYLOAD_BYTES + 8) };
+    const decision = mayApplyIncoming({
+      record: incoming,
+      localDeviceId: "dev_pc",
+      senderRevoked: false,
+    });
+    assert.equal(decision.allowed, false);
+    assert.match(decision.reason, /bytes/);
+  });
+
+  it("conflict kinds are classified, not last-write-wins everywhere", () => {
+    assert.equal(conflictKindFor("decision"), "append_only");
+    assert.equal(conflictKindFor("preference"), "mergeable");
+    assert.equal(conflictKindFor("memory"), "current_value");
+    assert.equal(conflictKindFor("conversation_continuity"), "special");
+  });
+
+  it("pairing ledger independent of DeviceRegistry: suspended cannot sync, restricted is not that", async () => {
+    const ledger = new PairingLedger(new MemoryStorage());
+    await ledger.markPending("dev_phone");
+    await ledger.approve("dev_phone");
+    await ledger.suspend("dev_phone");
+    assert.equal(await ledger.maySync("dev_phone"), false);
+    assert.equal(await ledger.maySync("dev_usb_never_listed"), true);
+  });
+
+  it("Cloudflare stub never reports live", async () => {
+    const cloud = new CloudflareCloudProvider();
+    const status = await cloud.getStatus();
+    assert.equal(status.live, false);
+    assert.equal(status.kind, "cloudflare-stub");
+    assert.notEqual(status.kind, "live");
   });
 });
