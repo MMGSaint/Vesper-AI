@@ -62,7 +62,7 @@ function device(input: {
   } as DeviceRecord;
 }
 
-function harness(options: { enabled?: boolean; deviceId?: string; devices?: DeviceRecord[]; executors?: TaskExecutor | { [kind: string]: TaskExecutor } } = {}) {
+function harness(options: { enabled?: boolean; deviceId?: string; devices?: DeviceRecord[]; executors?: TaskExecutor | { [kind: string]: TaskExecutor }; now?: () => number } = {}) {
   const storage = new MemoryStorage();
   const events = new EventBus(silentLog());
   const queue = new TaskQueue({ storage });
@@ -90,6 +90,7 @@ function harness(options: { enabled?: boolean; deviceId?: string; devices?: Devi
     deviceId,
     devices: async () => devices,
     enabled: options.enabled ?? true,
+    now: options.now,
   });
   return { storage, events, queue, registry, scheduler, deviceId };
 }
@@ -482,5 +483,86 @@ describe("TaskScheduler — the executor loop", () => {
     const still = await h.queue.get(created.id);
     assert.notEqual(still?.state, "done");
     assert.notEqual(still?.state, "running");
+  });
+
+  it("does not start a task whose dueAt is still in the future", async () => {
+    let now = Date.parse("2026-09-01T20:00:00.000Z");
+    let called = 0;
+    const h = harness({
+      now: () => now,
+      executors: async () => {
+        called += 1;
+        return { ok: true, summary: "ran" };
+      },
+    });
+    const created = await h.queue.create({
+      description: "later",
+      createdBy: "user",
+      requiredCapabilities: ["task_execute"],
+      kind: "noop",
+      dueAt: "2026-09-01T20:01:00.000Z",
+    });
+    const first = await h.scheduler.tick();
+    await new Promise((r) => setImmediate(r));
+    assert.equal(called, 0, "a future dueAt must not reach the executor");
+    assert.ok(first.reasons.some((r) => r.endsWith(":not-due")), `expected not-due, got ${first.reasons}`);
+    assert.equal((await h.queue.get(created.id))?.state, "assigned");
+
+    now = Date.parse("2026-09-01T20:01:00.000Z");
+    await h.scheduler.tick();
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(called, 1);
+    assert.equal((await h.queue.get(created.id))?.state, "done");
+  });
+
+  it("fails a task with a garbage dueAt instead of firing it or skipping forever", async () => {
+    const h = harness();
+    const created = await h.queue.create({
+      description: "broken clock",
+      createdBy: "user",
+      requiredCapabilities: ["task_execute"],
+      kind: "noop",
+      dueAt: "not-a-timestamp",
+    });
+    await h.scheduler.tick();
+    await new Promise((r) => setImmediate(r));
+    const final = await h.queue.get(created.id);
+    assert.equal(final?.state, "failed");
+    assert.match(final?.error ?? "", /dueAt is not a valid timestamp/);
+  });
+
+  it("a not-due task does not consume the per-tick cap", async () => {
+    let now = Date.parse("2026-09-01T20:00:00.000Z");
+    let called = 0;
+    const h = harness({
+      now: () => now,
+      executors: async (task) => {
+        called += 1;
+        return { ok: true, summary: task.description };
+      },
+    });
+    // Four future reminders would starve due work if they counted against maxPerTick
+    // (default 4) the way a started task does.
+    for (let i = 0; i < 4; i += 1) {
+      await h.queue.create({
+        description: `later-${i}`,
+        createdBy: "user",
+        requiredCapabilities: ["task_execute"],
+        kind: "noop",
+        dueAt: "2026-09-01T21:00:00.000Z",
+      });
+    }
+    const due = await h.queue.create({
+      description: "now",
+      createdBy: "user",
+      requiredCapabilities: ["task_execute"],
+      kind: "noop",
+    });
+    await h.scheduler.tick();
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(called, 1, "the due task must still start");
+    assert.equal((await h.queue.get(due.id))?.state, "done");
   });
 });

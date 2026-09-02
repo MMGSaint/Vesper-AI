@@ -7,6 +7,7 @@ import { createPermissionGate } from "./permissions.ts";
 import { ToolRegistry } from "./tools/registry.ts";
 import { registerBuiltinTools } from "./tools/builtin.ts";
 import { TOOL_CALL_TASK_KIND, createToolCallExecutor } from "./tool-executor.ts";
+import { REMINDER_TASK_KIND, createReminderExecutor } from "./reminder-executor.ts";
 import { CorrectionStore } from "./corrections.ts";
 import { HardwareProbeRegistry, registerPlaceholderProbes } from "./hardware/probes.ts";
 import { ReadinessMonitor } from "./host/readiness.ts";
@@ -1093,6 +1094,14 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     createToolCallExecutor({
       tools,
       workspaceId: () => workspaces.current().id,
+    }),
+  );
+  taskExecutors.register(
+    REMINDER_TASK_KIND,
+    createReminderExecutor({
+      notifications,
+      events,
+      notifyHost: (title, body) => windows.notify(title, body),
     }),
   );
   const models = createModelRouter({

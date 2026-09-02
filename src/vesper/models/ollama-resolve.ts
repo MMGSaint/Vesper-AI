@@ -102,9 +102,9 @@ export function pickInstalledModel(input: {
   if (input.installed.includes(input.requested)) return input.requested;
 
   const chat = input.installed.filter((name) => !isNonChatModel(name));
-  const pool = chat.length > 0 ? chat : [...input.installed];
-  const hinted = pool.find((name) => roleHint(name) === input.role);
-  return hinted ?? pool[0]!;
+  if (chat.length === 0) return input.requested;
+  const hinted = chat.find((name) => roleHint(name) === input.role);
+  return hinted ?? chat[0]!;
 }
 
 function isNonChatModel(name: string): boolean {

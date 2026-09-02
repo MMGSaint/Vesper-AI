@@ -43,6 +43,8 @@ export type AnyProvider = {
   defaultModel?: string;
   /** Last successful probe's installed model names, if the provider caches them. */
   installedNames?: () => string[];
+  /** Alias used by the main-line tests and openai-compat provider. */
+  installedModels?: () => string[];
 };
 
 export function createModelRouter(input: {
@@ -129,7 +131,7 @@ export function createModelRouter(input: {
     return pickInstalledModel({
       requested,
       role,
-      installed: provider.installedNames?.() ?? [],
+      installed: provider.installedNames?.() ?? provider.installedModels?.() ?? [],
     });
   }
 

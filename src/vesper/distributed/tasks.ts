@@ -92,6 +92,12 @@ export interface VesperTask {
    */
   args?: import("../types.ts").JsonObject;
   /**
+   * When set, the scheduler must not start this task before this instant.
+   * ISO-8601, stored as an absolute timestamp so a restart does not re-delay it.
+   * Absent means "due as soon as it is assigned" — the previous behaviour.
+   */
+  dueAt?: string;
+  /**
    * Optimistic-concurrency claim, written by `start()`.
    *
    * The StorageAdapter interface is get/set/delete/keys — it has no compare-and-swap,
@@ -133,6 +139,64 @@ export interface CreateTaskInput {
   workspaceId?: string;
   backoffMs?: number;
   timeoutMs?: number;
+  /** Absolute ISO-8601 instant. Prefer this over `inSeconds` at the call site. */
+  dueAt?: string;
+}
+
+/**
+ * Ten years. A delay that large is not a timer anyone will wait for, and some Date
+ * implementations overflow well before the JS spec's maximum.
+ */
+export const MAX_TASK_DELAY_SECONDS = 10 * 365 * 24 * 60 * 60;
+
+/**
+ * Turn the two ways a caller can say "when" into one absolute timestamp, or refuse.
+ *
+ * `dueAt` and `inSeconds` together are ambiguous — they can disagree — so both is an
+ * error rather than a preference. `inSeconds` is converted at parse time so a restart
+ * does not add the delay again.
+ */
+export function parseTaskDueAt(input: {
+  dueAt?: unknown;
+  inSeconds?: unknown;
+  nowMs?: number;
+}): { dueAt: string } | { dueAt?: undefined } | { error: string } {
+  const hasDue = typeof input.dueAt === "string" && input.dueAt.trim().length > 0;
+  const hasIn = input.inSeconds !== undefined && input.inSeconds !== null;
+  if (hasDue && hasIn) {
+    return { error: "Pass dueAt or inSeconds, not both." };
+  }
+  if (!hasDue && !hasIn) return {};
+  if (hasDue) {
+    const ms = Date.parse((input.dueAt as string).trim());
+    if (!Number.isFinite(ms)) return { error: "dueAt must be an ISO-8601 timestamp." };
+    return { dueAt: new Date(ms).toISOString() };
+  }
+  if (typeof input.inSeconds !== "number" || !Number.isFinite(input.inSeconds) || input.inSeconds < 0) {
+    return { error: "inSeconds must be a non-negative number." };
+  }
+  if (input.inSeconds > MAX_TASK_DELAY_SECONDS) {
+    return { error: "inSeconds is larger than the ten-year maximum." };
+  }
+  const now = input.nowMs ?? Date.now();
+  return { dueAt: new Date(now + input.inSeconds * 1000).toISOString() };
+}
+
+/**
+ * Whether the scheduler may start this task *now*.
+ *
+ * A missing dueAt is due immediately (the previous behaviour). A garbage timestamp is
+ * its own state so the scheduler can fail the task rather than fire it or skip it
+ * forever.
+ */
+export function taskDueState(
+  task: { dueAt?: string },
+  nowMs: number,
+): "due" | "not-due" | "invalid-dueAt" {
+  if (!task.dueAt) return "due";
+  const ms = Date.parse(task.dueAt);
+  if (!Number.isFinite(ms)) return "invalid-dueAt";
+  return nowMs < ms ? "not-due" : "due";
 }
 
 export type RoutingOutcome =
@@ -356,6 +420,7 @@ export class TaskQueue {
       args: (task.args && typeof task.args === "object" && !Array.isArray(task.args))
         ? (task.args as import("../types.ts").JsonObject)
         : undefined,
+      dueAt: typeof task.dueAt === "string" && task.dueAt.length > 0 ? task.dueAt : undefined,
       claim: typeof task.claim === "string" ? task.claim : undefined,
       idempotent,
       workspaceId: typeof task.workspaceId === "string" ? task.workspaceId : undefined,
@@ -425,6 +490,7 @@ export class TaskQueue {
         args: input.args,
         idempotent: input.idempotent === true,
         workspaceId: input.workspaceId,
+        dueAt: input.dueAt,
       };
       this.tasks.set(task.id, task);
       await this.persist();

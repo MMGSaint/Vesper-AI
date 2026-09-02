@@ -102,7 +102,7 @@ describe("pickInstalledModel", () => {
         role: "everyday",
         installed: ["nomic-embed-text:latest"],
       }),
-      "nomic-embed-text:latest",
+      "qwen2.5:14b",
     );
   });
 

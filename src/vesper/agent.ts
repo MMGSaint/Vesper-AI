@@ -1106,7 +1106,13 @@ export class Agent {
         const breakdown = [...byState.entries()].map(([state, n]) => `${n} ${state}`).join(", ");
         const examples = open
           .slice(0, 2)
-          .map((task) => sanitiseInline(task.description, 60))
+          .map((task) => {
+            const desc = sanitiseInline(task.description, 60);
+            if (!task.dueAt) return desc;
+            const ms = Date.parse(task.dueAt);
+            if (!Number.isFinite(ms) || ms <= Date.now()) return desc;
+            return `${desc} (due ${task.dueAt})`;
+          })
           .join(" · ");
         lines.push(`Still outstanding (${open.length}): ${breakdown}. ${examples}`);
       }

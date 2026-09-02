@@ -181,6 +181,11 @@ export function createOllamaProvider(options: OllamaOptions) {
         .map((tag) => tag.name ?? tag.model)
         .filter((name): name is string => typeof name === "string" && name.length > 0),
 
+    /** Names from the last successful /api/tags. Empty means unknown, not "none installed". */
+    installedModels: () =>
+      tags.map((tag) => tag.name ?? tag.model).filter((name): name is string => Boolean(name)),
+
+
     async probe(): Promise<{ available: boolean; detail: string }> {
       const results = await Promise.all(
         candidates.map(async (candidate) => {

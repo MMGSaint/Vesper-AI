@@ -30,6 +30,8 @@ import type { CorrectionStore } from "../corrections.ts";
 import type { OptimizerCorrectionProducer } from "../correction-producer.ts";
 import { listApproved, readApproved, writeApproved } from "./filesystem.ts";
 import { TOOL_CALL_TASK_KIND } from "../tool-executor.ts";
+import { REMINDER_TASK_KIND } from "../reminder-executor.ts";
+import { parseTaskDueAt } from "../distributed/tasks.ts";
 import { collectDecisions, formatDecisions } from "../decisions.ts";
 import { mcpBridgeStatus } from "../integrations/mcp.ts";
 import { detectApprovedApps } from "../windows/apps.ts";
@@ -1044,7 +1046,7 @@ export function registerBuiltinTools(input: {
   registry.register(
     spec(
       "task_create",
-      "Queue a task. Vesper routes it to a device that has the capabilities it needs.",
+      "Queue a task. Vesper routes it to a device that has the capabilities it needs. Pass dueAt or inSeconds to wait; without a tool that is a reminder.",
       "safe",
       {
         description: { type: "string", description: "What needs doing" },
@@ -1065,6 +1067,20 @@ export function registerBuiltinTools(input: {
         toolArgs: {
           type: "object",
           description: "Optional. Arguments for `tool`, validated against that tool's own schema when it runs.",
+        },
+        dueAt: {
+          type: "string",
+          description:
+            "Optional. ISO-8601 instant when the task becomes due. A reminder or tool_call waits until then.",
+        },
+        inSeconds: {
+          type: "number",
+          description:
+            "Optional. Delay from now, in seconds. Converted to an absolute dueAt at queue time so a restart does not re-delay it. Do not pass with dueAt.",
+        },
+        message: {
+          type: "string",
+          description: "Optional. Body of a reminder. Defaults to the description.",
         },
       },
       ["description"],
@@ -1101,8 +1117,11 @@ export function registerBuiltinTools(input: {
         eligibleDevices = [resolved.device.identity.deviceId];
       }
 
-      // A task that names a tool gets the executor kind; one that does not stays a
-      // description-only reminder that no scheduler will start on its own.
+      // A task that names a tool gets the executor kind; one that names a due time
+      // without a tool is a reminder. A description-only task with neither stays a
+      // description-only reminder that no scheduler will start on its own — that
+      // previous behaviour is load-bearing for catch-up of "I still owe this" items
+      // that are not timed.
       //
       // This does not widen what the caller can do. Whoever can call `task_create` can
       // already call any tool they are permitted; queueing one only defers it, and the
@@ -1110,11 +1129,18 @@ export function registerBuiltinTools(input: {
       // a live request — no confirm-tier tool, nothing that administers trust, nothing
       // on the trusted-only list. The task record is not a stored permission: the whole
       // chain is re-evaluated at execution time against the state that holds then.
+      // A reminder never reaches that chain at all.
       const namedTool = str(args, "tool");
       const toolArgs =
         args.toolArgs && typeof args.toolArgs === "object" && !Array.isArray(args.toolArgs)
           ? (args.toolArgs as JsonObject)
           : {};
+      const due = parseTaskDueAt({ dueAt: args.dueAt, inSeconds: args.inSeconds });
+      if ("error" in due) {
+        return { ok: false, epistemic: "could_not_access", summary: due.error };
+      }
+      const message = str(args, "message");
+      const kind = namedTool ? TOOL_CALL_TASK_KIND : due.dueAt ? REMINDER_TASK_KIND : undefined;
       const created = await tasks.create({
         description: str(args, "description"),
         // A remote device that queued this must remain the author. Recording the host
@@ -1128,8 +1154,13 @@ export function registerBuiltinTools(input: {
         requiredCapabilities: required,
         preferredDevice: str(args, "preferredDevice") || undefined,
         eligibleDevices,
-        kind: namedTool ? TOOL_CALL_TASK_KIND : undefined,
-        args: namedTool ? ({ tool: namedTool, args: toolArgs } as JsonObject) : undefined,
+        kind,
+        args: namedTool
+          ? ({ tool: namedTool, args: toolArgs } as JsonObject)
+          : kind === REMINDER_TASK_KIND && message
+            ? ({ message } as JsonObject)
+            : undefined,
+        dueAt: due.dueAt,
         workspaceId: context.workspaceId,
         idempotent: false,
       });
@@ -1140,11 +1171,12 @@ export function registerBuiltinTools(input: {
         outcome?.kind === "assigned"
           ? `Assigned to ${outcome.deviceId}.`
           : `Not assigned yet: ${outcome?.reason ?? "no routing decision was made."}`;
+      const when = created.dueAt ? ` Due ${created.dueAt}.` : "";
       return {
         ok: true,
         epistemic: "changed",
-        summary: `Queued "${created.description}". ${where}`,
-        data: { taskId: created.id } as unknown as JsonObject,
+        summary: `Queued "${created.description}". ${where}${when}`,
+        data: { taskId: created.id, dueAt: created.dueAt ?? null, kind: created.kind ?? null } as unknown as JsonObject,
       };
     },
   );

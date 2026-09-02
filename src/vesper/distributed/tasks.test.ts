@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MemoryStorage } from "../storage.ts";
-import { TaskQueue, routeTask, nextBackoffMs, type VesperTask } from "./tasks.ts";
+import { TaskQueue, routeTask, nextBackoffMs, parseTaskDueAt, taskDueState, MAX_TASK_DELAY_SECONDS, type VesperTask } from "./tasks.ts";
 import type { DeviceRecord } from "./registry.ts";
 import type { CapabilityManifest } from "./capabilities.ts";
 import type { PublicDeviceIdentity, TrustState } from "./identity.ts";
@@ -388,5 +388,50 @@ test("task lifecycle events reach the runtime's event bus", async (t) => {
     const catchup = await runtime.chat("catch me up");
     assert.match(catchup.reply, /Tasks:.*1 queued/);
     assert.match(catchup.reply, /Tasks:.*1 cancelled/);
+  });
+});
+
+test("dueAt parsing and persistence", async (t) => {
+  await t.test("parseTaskDueAt accepts ISO and rejects both forms together", () => {
+    const parsed = parseTaskDueAt({ dueAt: "2026-09-01T20:00:00Z" });
+    if ("error" in parsed) throw new Error(parsed.error);
+    assert.equal(parsed.dueAt, "2026-09-01T20:00:00.000Z");
+    const both = parseTaskDueAt({ dueAt: "2026-09-01T20:00:00Z", inSeconds: 10 });
+    assert.equal("error" in both, true);
+    const bad = parseTaskDueAt({ dueAt: "soon" });
+    assert.equal("error" in bad, true);
+    const negative = parseTaskDueAt({ inSeconds: -1 });
+    assert.equal("error" in negative, true);
+    const huge = parseTaskDueAt({ inSeconds: MAX_TASK_DELAY_SECONDS + 1 });
+    assert.equal("error" in huge, true);
+  });
+
+  await t.test("inSeconds is converted once, against the supplied clock", () => {
+    const parsed = parseTaskDueAt({ inSeconds: 60, nowMs: Date.parse("2026-09-01T20:00:00.000Z") });
+    if ("error" in parsed) throw new Error(parsed.error);
+    assert.equal(parsed.dueAt, "2026-09-01T20:01:00.000Z");
+  });
+
+  await t.test("taskDueState treats missing as due and garbage as invalid", () => {
+    const now = Date.parse("2026-09-01T20:00:00.000Z");
+    assert.equal(taskDueState({}, now), "due");
+    assert.equal(taskDueState({ dueAt: "2026-09-01T19:59:00.000Z" }, now), "due");
+    assert.equal(taskDueState({ dueAt: "2026-09-01T20:00:01.000Z" }, now), "not-due");
+    assert.equal(taskDueState({ dueAt: "nope" }, now), "invalid-dueAt");
+  });
+
+  await t.test("dueAt survives a restart", async () => {
+    const storage = new MemoryStorage();
+    const first = new TaskQueue({ storage });
+    const created = await first.create({
+      description: "later",
+      createdBy: "dev_a",
+      kind: "reminder",
+      dueAt: "2026-09-01T21:00:00.000Z",
+    });
+    const second = new TaskQueue({ storage });
+    const restored = await second.get(created.id);
+    assert.equal(restored?.dueAt, "2026-09-01T21:00:00.000Z");
+    assert.equal(restored?.kind, "reminder");
   });
 });

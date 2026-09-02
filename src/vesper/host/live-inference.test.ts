@@ -249,7 +249,6 @@ describe("inference end to end from the host layer", () => {
       await backend.close();
     }
   });
-
   it("reports the model it actually used, not the one it was configured with", async () => {
     // When the backend is down the turn must say so rather than reporting the
     // configured model as though it had served the reply. `turn.model` is the only

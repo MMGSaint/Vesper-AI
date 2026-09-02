@@ -63,6 +63,19 @@ describe("catch-up reports outstanding work from the queue", () => {
       `a completed task must not be reported as outstanding:\n${turn.reply}`,
     );
   });
+
+  it("names a waiting reminder's dueAt", async () => {
+    const runtime = await testRuntime();
+    const dueAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    await runtime.tools.invoke({
+      name: "task_create",
+      args: { description: "take out the bins", dueAt },
+      workspaceId: "general",
+    });
+    const turn = await runtime.chat("catch me up");
+    assert.match(turn.reply, /take out the bins/);
+    assert.match(turn.reply, new RegExp(dueAt.replaceAll(".", "\\.")));
+  });
 });
 
 describe("catch-up reports decisions, including the ones to do nothing", () => {
