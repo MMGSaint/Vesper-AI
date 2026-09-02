@@ -34,6 +34,7 @@ import type {
   EpistemicTag,
   JsonObject,
   MemoryCategory,
+  MemoryEntry,
   PendingConfirmation,
   ToolCallRecord,
 } from "./types.ts";
@@ -94,6 +95,29 @@ interface AgentDeps {
    * without a procedure store behaves as before. These are methods, not permissions.
    */
   matchProcedures?: (query: string, workspaceId: string) => Promise<string[]> | string[];
+  /**
+   * Smallest-useful personal context, already rendered. Optional so a runtime without
+   * the intelligence layer keeps the previous memory dump. The agent still screens
+   * the returned text; this callback must not be treated as a trust boundary.
+   */
+  assemblePersonal?: (input: {
+    query: string;
+    workspaceId: string;
+    memories: MemoryEntry[];
+  }) => Promise<string> | string;
+  /**
+   * Deterministic-first plan for this turn. Plans only — the agent never treats a
+   * returned plan as authorization to skip the gate.
+   */
+  planRoute?: (input: {
+    intent: string;
+    workspaceId: string;
+  }) => Promise<{ step: string; name: string; reason: string; executed: false } | null> | {
+    step: string;
+    name: string;
+    reason: string;
+    executed: false;
+  } | null;
   history: ChatMessage[];
   maxToolIterations: number;
 }
@@ -468,7 +492,7 @@ export class Agent {
 
     const memories = memoryWithheld
       ? []
-      : await this.deps.memory.search(retrievalQuery, { workspaceId: workspace.id, limit: 6 });
+      : await this.deps.memory.search(retrievalQuery, { workspaceId: workspace.id, limit: 12 });
     // Awaitable retrieval so a model-backed embedder can actually influence ranking;
     // it falls back to lexical scoring when no embedding backend is reachable.
     const knowledge = knowledgeWithheld
@@ -481,6 +505,13 @@ export class Agent {
     const optimizer = await this.deps.optimizer.getStatus().catch(() => null);
 
     const nowContext = this.deps.describeNow ? await this.deps.describeNow() : null;
+    const memoryBlock = await this.personalMemoryBlock(
+      retrievalQuery,
+      workspace.id,
+      memories,
+      memoryWithheld,
+    );
+    const routeBlock = await this.routePlanBlock(retrievalQuery, workspace.id, memoryWithheld);
     const system = [
       VESPER_SYSTEM_PROMPT,
       nowContext,
@@ -505,22 +536,7 @@ export class Agent {
             .filter(Boolean)
             .join("\n")
         : "Optimizer: could not query.",
-      memories.length
-        ? `Relevant memory:\n${
-            this.screenUntrusted(
-              memories
-                .map(
-                  (entry) =>
-                    `- [${entry.category}] ${entry.key}: ${attribute(entry, { deviceId: this.deps.deviceId })}`,
-                )
-                .join("\n"),
-              { source: "memory", origin: `${memories.length} stored memor(y|ies)` },
-              { maxChars: MAX_RETRIEVAL_CHARS },
-            )
-          }`
-        : memoryWithheld
-          ? "Stored memory is not readable by this session. Say it is unavailable rather than guessing at it."
-          : "No relevant memory hits.",
+      memoryBlock,
       knowledge.length
         ? `Knowledge hits:\n${
             this.screenUntrusted(
@@ -532,6 +548,7 @@ export class Agent {
         : knowledgeWithheld
           ? "Indexed documents are not readable by this session. Say so rather than guessing at them."
           : "",
+      routeBlock,
       ...(await this.procedureContext(retrievalQuery, workspace.id, memoryWithheld)),
     ]
       .filter(Boolean)
@@ -1284,6 +1301,46 @@ export class Agent {
       const kept = historyWindow(this.deps.history, HISTORY_LIMIT);
       this.deps.history.splice(0, this.deps.history.length, ...kept);
     }
+  }
+
+  private async personalMemoryBlock(
+    query: string,
+    workspaceId: string,
+    memories: MemoryEntry[],
+    withheld: boolean,
+  ): Promise<string> {
+    if (withheld) {
+      return "Stored memory is not readable by this session. Say it is unavailable rather than guessing at it.";
+    }
+    let rendered = "";
+    if (this.deps.assemblePersonal && memories.length) {
+      rendered = await this.deps.assemblePersonal({ query, workspaceId, memories });
+    }
+    if (!rendered && memories.length) {
+      rendered = memories
+        .map(
+          (entry) =>
+            `- [${entry.category}] ${entry.key}: ${attribute(entry, { deviceId: this.deps.deviceId })}`,
+        )
+        .join("\n");
+    }
+    if (!rendered) return "No relevant memory hits.";
+    return `Relevant memory:\n${this.screenUntrusted(
+      rendered,
+      { source: "memory", origin: `${memories.length} stored memor(y|ies)` },
+      { maxChars: MAX_RETRIEVAL_CHARS },
+    )}`;
+  }
+
+  private async routePlanBlock(
+    intent: string,
+    workspaceId: string,
+    withheld: boolean,
+  ): Promise<string> {
+    if (withheld || !this.deps.planRoute) return "";
+    const plan = await this.deps.planRoute({ intent, workspaceId });
+    if (!plan || plan.step === "model") return "";
+    return `Preferred path (not executed; every tool still goes through the gate): ${sanitiseInline(plan.step, 24)} '${sanitiseInline(plan.name, 80)}'. ${sanitiseInline(plan.reason, 240)}`;
   }
 
   /**

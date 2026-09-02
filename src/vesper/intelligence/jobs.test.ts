@@ -26,4 +26,23 @@ describe("durable jobs", () => {
     await jobs.cancel(job.id);
     await assert.rejects(() => jobs.complete(job.id, "nope"), JobError);
   });
+
+  it("cannot start unattended while waiting for confirmation", async () => {
+    const jobs = new JobStore(new MemoryStorage());
+    const job = await jobs.create({ title: "write", workspaceId: "dev", ownerDeviceId: "pc" });
+    await jobs.waitConfirm(job.id, { tool: "fs_write" });
+    await assert.rejects(() => jobs.start(job.id), JobError);
+    const open = await jobs.recoverOpen();
+    assert.equal(open.length, 0);
+  });
+
+  it("recoverOpen returns queued and checkpointed jobs, not terminal ones", async () => {
+    const jobs = new JobStore(new MemoryStorage());
+    const live = await jobs.create({ title: "live", workspaceId: "dev", ownerDeviceId: "pc" });
+    const done = await jobs.create({ title: "done", workspaceId: "dev", ownerDeviceId: "pc" });
+    await jobs.complete(done.id, "finished");
+    const open = await jobs.recoverOpen();
+    assert.equal(open.length, 1);
+    assert.equal(open[0]?.id, live.id);
+  });
 });

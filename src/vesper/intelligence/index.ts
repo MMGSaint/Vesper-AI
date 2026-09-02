@@ -8,3 +8,4 @@ export * from "./jobs.ts";
 export * from "./assembly.ts";
 export * from "./eval.ts";
 export * from "./facade.ts";
+export * from "./driver.ts";

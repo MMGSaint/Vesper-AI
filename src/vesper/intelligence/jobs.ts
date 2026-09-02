@@ -141,6 +141,47 @@ export class JobStore {
     }));
   }
 
+  async get(id: string): Promise<DurableJob | undefined> {
+    await this.load();
+    const job = this.items.get(id);
+    return job ? { ...job, checkpoint: job.checkpoint ? { ...job.checkpoint } : undefined } : undefined;
+  }
+
+  async start(id: string): Promise<DurableJob> {
+    return this.transition(id, (job) => {
+      if (job.state === "done" || job.state === "failed" || job.state === "cancelled") {
+        throw new JobError(`A ${job.state} job cannot start.`);
+      }
+      if (job.state === "waiting_confirm") {
+        throw new JobError("A job waiting for confirmation cannot start unattended.");
+      }
+      return { ...job, state: "running", updatedAt: nowIso() };
+    });
+  }
+
+  async waitConfirm(id: string, checkpoint: JsonObject): Promise<DurableJob> {
+    return this.transition(id, (job) => {
+      if (job.state === "cancelled" || job.state === "done" || job.state === "failed") {
+        throw new JobError(`A ${job.state} job cannot wait for confirmation.`);
+      }
+      if (looksSecret(checkpoint)) throw new JobError("A checkpoint cannot store secret-shaped values.");
+      return {
+        ...job,
+        state: "waiting_confirm",
+        checkpoint,
+        updatedAt: nowIso(),
+      };
+    });
+  }
+
+  /** Non-terminal jobs a restart must re-drive. Waiting-confirm stays paused. */
+  async recoverOpen(): Promise<DurableJob[]> {
+    await this.load();
+    return [...this.items.values()].filter((job) =>
+      job.state === "queued" || job.state === "running" || job.state === "checkpointed",
+    );
+  }
+
   async list(): Promise<DurableJob[]> {
     await this.load();
     return [...this.items.values()];

@@ -162,9 +162,13 @@ export class TaskScheduler {
   /**
    * One scheduler pass. Called by the idle-scheduler's onTick, but also directly
    * from tests. Returns a summary that a diagnostic can display.
+   *
+   * `force` is for an explicit drive (a durable job that asked to run now). It uses
+   * the same tick path as idle — same authorization, same origin, same in-flight
+   * guard — and does not turn idle task-driving on for everything else.
    */
-  async tick(): Promise<{ routed: number; started: number; skipped: number; reasons: string[] }> {
-    if (!this.opts.enabled || this.stopping) {
+  async tick(options?: { force?: boolean; wait?: boolean }): Promise<{ routed: number; started: number; skipped: number; reasons: string[] }> {
+    if ((!this.opts.enabled && !options?.force) || this.stopping) {
       return { routed: 0, started: 0, skipped: 0, reasons: ["scheduler-disabled"] };
     }
     const devices = await this.opts.devices();
@@ -203,6 +207,11 @@ export class TaskScheduler {
       const outcome = await this.tryStart(task, devices);
       reasons.push(`${task.id.slice(-8)}:${outcome}`);
       if (outcome === "started") started += 1;
+    }
+    if (options?.wait) {
+      while (this.inFlight.size > 0) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
     }
     return {
       routed: routingResults.length,

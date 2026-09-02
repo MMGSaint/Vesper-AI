@@ -31,6 +31,7 @@ import type { OptimizerCorrectionProducer } from "../correction-producer.ts";
 import { listApproved, readApproved, writeApproved } from "./filesystem.ts";
 import { TOOL_CALL_TASK_KIND } from "../tool-executor.ts";
 import { REMINDER_TASK_KIND } from "../reminder-executor.ts";
+import { DURABLE_JOB_TASK_KIND } from "../intelligence/driver.ts";
 import { parseTaskDueAt } from "../distributed/tasks.ts";
 import { collectDecisions, formatDecisions } from "../decisions.ts";
 import { mcpBridgeStatus } from "../integrations/mcp.ts";
@@ -104,6 +105,12 @@ export function registerBuiltinTools(input: {
   skills?: SkillRegistry;
   automations?: AutomationStore;
   intelligence?: PersonalIntelligence;
+  /**
+   * Drive the task scheduler after enqueueing a durable job. Optional so a
+   * registry built without a scheduler still records the job. The callback must
+   * go through TaskScheduler.tick — not around the gate.
+   */
+  driveJobs?: () => Promise<void>;
 }) {
   const {
     checkpointStore,
@@ -136,6 +143,7 @@ export function registerBuiltinTools(input: {
     skills,
     automations,
     intelligence,
+    driveJobs,
   } = input;
 
   registry.register(
@@ -1756,23 +1764,109 @@ export function registerBuiltinTools(input: {
     registry.register(
       spec(
         "job_create",
-        "Record a durable job. Does not execute tools. World-change still goes through the gate.",
+        "Record a durable job and enqueue it on the scheduler. Named tools still go through the gate. Confirm-tier work waits; never-tier is refused.",
         "safe",
-        { title: { type: "string" } },
+        {
+          title: { type: "string" },
+          tool: {
+            type: "string",
+            description: "Optional. Tool the scheduler may invoke under a scheduled origin.",
+          },
+          toolArgs: { type: "object", description: "Optional. Arguments for the named tool." },
+        },
         ["title"],
       ),
       async (args, context) => {
         try {
+          const namedTool = str(args, "tool");
+          if (namedTool) {
+            const spec = registry.get(namedTool)?.spec;
+            if (!spec) {
+              return { ok: false, epistemic: "could_not_access", summary: `Unknown tool '${namedTool}'.` };
+            }
+            if (spec.permission === "never") {
+              return {
+                ok: false,
+                epistemic: "could_not_access",
+                summary: "A job cannot name a never-tier tool.",
+              };
+            }
+          }
+          const toolArgs =
+            args.toolArgs && typeof args.toolArgs === "object" && !Array.isArray(args.toolArgs)
+              ? (args.toolArgs as JsonObject)
+              : {};
           const job = await intelligence.jobs.create({
             title: str(args, "title"),
             workspaceId: context.workspaceId,
             ownerDeviceId: selfDeviceId ?? "local",
           });
+          let taskId: string | null = null;
+          if (tasks) {
+            const created = await tasks.create({
+              description: `Job: ${job.title}`,
+              createdBy:
+                context.origin?.kind === "remote" && context.origin.deviceId
+                  ? context.origin.deviceId
+                  : (selfDeviceId ?? "unknown"),
+              kind: DURABLE_JOB_TASK_KIND,
+              args: namedTool
+                ? ({ jobId: job.id, tool: namedTool, args: toolArgs } as JsonObject)
+                : ({ jobId: job.id } as JsonObject),
+              workspaceId: context.workspaceId,
+              preferredDevice: selfDeviceId,
+              eligibleDevices: selfDeviceId ? [selfDeviceId] : undefined,
+              idempotent: false,
+            });
+            taskId = created.id;
+            if (deviceRegistry) await tasks.schedule(await deviceRegistry.list());
+            if (driveJobs) await driveJobs();
+          }
+          const latest = (await intelligence.jobs.get(job.id)) ?? job;
           return {
             ok: true,
             epistemic: "changed",
-            summary: `Queued job '${job.title}'. It has not executed anything.`,
-            data: { id: job.id, state: job.state, executed: false },
+            summary:
+              latest.state === "done"
+                ? `Job '${latest.title}' finished. ${latest.summary ?? ""}`.trim()
+                : latest.state === "waiting_confirm"
+                  ? `Job '${latest.title}' is waiting for a person at the keyboard.`
+                  : latest.state === "failed"
+                    ? `Job '${latest.title}' failed. ${latest.error ?? ""}`.trim()
+                    : `Queued job '${latest.title}' on the scheduler. World-change still goes through the gate.`,
+            data: {
+              id: latest.id,
+              state: latest.state,
+              taskId,
+              executed: latest.state === "done" && Boolean(namedTool),
+            },
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: error instanceof JobError ? error.message : String(error),
+          };
+        }
+      },
+    );
+
+    registry.register(
+      spec(
+        "job_cancel",
+        "Cancel a durable job. Does not reverse work that already passed the gate.",
+        "safe",
+        { id: { type: "string" } },
+        ["id"],
+      ),
+      async (args) => {
+        try {
+          const job = await intelligence.jobs.cancel(str(args, "id"));
+          return {
+            ok: true,
+            epistemic: "changed",
+            summary: `Cancelled job '${job.title}'.`,
+            data: { id: job.id, state: job.state },
           };
         } catch (error) {
           return {

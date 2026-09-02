@@ -8,6 +8,11 @@ import { ToolRegistry } from "./tools/registry.ts";
 import { registerBuiltinTools } from "./tools/builtin.ts";
 import { TOOL_CALL_TASK_KIND, createToolCallExecutor } from "./tool-executor.ts";
 import { REMINDER_TASK_KIND, createReminderExecutor } from "./reminder-executor.ts";
+import { PersonalIntelligence } from "./intelligence/facade.ts";
+import { assembleContext, renderAssembled } from "./intelligence/assembly.ts";
+import { planExecution } from "./intelligence/route.ts";
+import { createJobExecutor, DURABLE_JOB_TASK_KIND, recoverOpenJobs } from "./intelligence/driver.ts";
+import { attribute } from "./memory/scopes.ts";
 import { CorrectionStore } from "./corrections.ts";
 import { HardwareProbeRegistry, registerPlaceholderProbes } from "./hardware/probes.ts";
 import { ReadinessMonitor } from "./host/readiness.ts";
@@ -53,7 +58,6 @@ import { SkillRegistry } from "./skills.ts";
 import { AutomationStore } from "./automation.ts";
 import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
 import { coercePreview } from "./preview.ts";
-import { PersonalIntelligence } from "./intelligence/facade.ts";
 import { ContinuityEngine } from "./continuity/engine.ts";
 import { DisabledCloudProvider, MemoryCloudProvider } from "./continuity/cloud.ts";
 import { createKeyring } from "./continuity/crypto.ts";
@@ -349,6 +353,22 @@ export class VesperRuntime {
     // are all live. Optional subsystems (model probes, knowledge index) are still
     // catching up — the monitor advances to READY or DEGRADED when they answer.
     this.readiness.advanceTo("CORE_READY");
+
+    const recoveredJobs = await recoverOpenJobs({
+      jobs: this.intelligence.jobs,
+      tasks: this.taskQueue,
+      deviceId: this.deviceIdentity.deviceId,
+    });
+    if (recoveredJobs) {
+      this.log.info("lifecycle", "Re-queued durable jobs after restart", { recoveredJobs });
+      try {
+        await this.taskScheduler.tick({ force: true, wait: true });
+      } catch (error) {
+        this.log.warn("lifecycle", "recovered job tick threw", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     return this.capability;
   }
 
@@ -1140,6 +1160,18 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
       notifyHost: (title, body) => windows.notify(title, body),
     }),
   );
+  taskExecutors.register(
+    DURABLE_JOB_TASK_KIND,
+    createJobExecutor({
+      jobs: intelligence.jobs,
+      tools,
+      procedures,
+      skills,
+      events,
+      notifications,
+      workspaceId: () => workspaces.current().id,
+    }),
+  );
   const models = createModelRouter({
     config,
     providers: options.providers,
@@ -1343,6 +1375,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     skills,
     automations,
     intelligence,
+    driveJobs: async () => {
+      await taskScheduler.tick({ force: true, wait: true });
+    },
     getDiagnostics: async () => {
       if (!runtimeRef.current) throw new Error("Runtime not ready");
       return runtimeRef.current.diagnostics();
@@ -1371,6 +1406,38 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     matchProcedures: async (query, workspaceId) => {
       const hits = await procedures.search(query, { workspaceId, limit: 3 });
       return hits.map((hit) => formatProcedure(hit.procedure));
+    },
+    assemblePersonal: async ({ query, memories }) => {
+      const attributed = memories.map((entry) => ({
+        ...entry,
+        value: attribute(entry, { deviceId: deviceIdentity.deviceId }),
+      }));
+      const instincts = await intelligence.instincts.list();
+      const assembled = assembleContext({
+        query,
+        memories: attributed,
+        instincts,
+        budgetChars: 1200,
+      });
+      return renderAssembled(assembled);
+    },
+    planRoute: async ({ intent, workspaceId }) => {
+      const [procedureList, skillList] = await Promise.all([
+        procedures.list({ workspaceId }),
+        skills.list(),
+      ]);
+      const plan = planExecution({
+        intent,
+        catalog: {
+          procedures: procedureList,
+          skills: skillList,
+          tools: tools.list(workspaceId).map((tool) => ({
+            name: tool.name,
+            permission: tool.permission,
+          })),
+        },
+      });
+      return plan.step === "model" ? null : plan;
     },
     deviceTrust: async (id: string) => (await devices.get(id))?.trust ?? "unknown",
     selfManifest: async () =>

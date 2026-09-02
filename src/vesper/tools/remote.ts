@@ -109,6 +109,7 @@ const TRUSTED_ONLY_TOOLS: readonly string[] = [
   "governor_decisions",
   "job_list",
   "job_create",
+  "job_cancel",
 ];
 
 /**
