@@ -37,6 +37,7 @@ import {
   type CrashNote,
 } from "./crash.ts";
 import { createRotatingAuditSink, type RotatingAuditSink } from "./audit-rotation.ts";
+import { formatMemoryWiki } from "../memory/wiki.ts";
 
 /** Thrown instead of starting a second host over a live one's state. */
 export class InstanceAlreadyRunningError extends Error {
@@ -255,11 +256,14 @@ export async function createProductionHost(options?: {
     async exportMemory() {
       const entries = await runtime.memory.exportPersistent();
       const path = join(dirs.data, "memory-export.json");
+      const wikiPath = join(dirs.data, "memory-export.md");
+      const exportedAt = new Date().toISOString();
       await writeFile(
         path,
-        `${JSON.stringify({ exportedAt: new Date().toISOString(), count: entries.length, memories: entries }, null, 2)}\n`,
+        `${JSON.stringify({ exportedAt, count: entries.length, memories: entries }, null, 2)}\n`,
         "utf8",
       );
+      await writeFile(wikiPath, formatMemoryWiki(entries, exportedAt), "utf8");
       return path;
     },
     async doctor() {

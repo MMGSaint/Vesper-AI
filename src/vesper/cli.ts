@@ -119,7 +119,7 @@ Commands:
   --health          Write health.json and print the path
   --doctor          Run local self-checks (no hardware claims)
   --config-check    Parse config and exit
-  --export-memory   Write persistent memories to data/memory-export.json
+  --export-memory   Write persistent memories to data/memory-export.json and a readable memory-export.md
   --client-hello    Print the companion protocol hello (no listener, no token)
   --first-boot-report
                     Run first-boot discovery to completion and print the report

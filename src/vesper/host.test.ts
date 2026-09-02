@@ -36,6 +36,8 @@ describe("production host", () => {
     const exportPath = await host.exportMemory();
     const exported = JSON.parse(await readFile(exportPath, "utf8")) as { count: number };
     assert.equal(typeof exported.count, "number");
+    const wiki = await readFile(join(root, "data", "memory-export.md"), "utf8");
+    assert.match(wiki, /# Vesper memory/);
     await host.shutdown();
     assert.equal(host.runtime.started, false);
     assert.equal(host.runtime.background.state(), "stopped");
