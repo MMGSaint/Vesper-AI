@@ -21,8 +21,10 @@ all of this work. Nothing below has been observed on it.
 
 ## Not implemented
 
-- **MCP client.** `integrations/mcp.ts` reports configuration status. It is not an MCP
-  client, it speaks no JSON-RPC, and it contacts no server.
+- **MCP configuration surface.** `integrations/mcp.ts` implements a real stdio JSON-RPC
+  MCP client with permission-gated tool bridging. The library is tested, but production
+  runtime does not yet expose a config surface to attach servers (`mcp_status` reports
+  `configurable: false`). No external MCP process is spawned until that surface exists.
 - **Companion transport.** `vesper.client` v1 is in-process only. There is no pairing,
   no listener, and no LAN TLS.
 - **Wake word.** Deliberately out of scope; push-to-talk is the activation model.
