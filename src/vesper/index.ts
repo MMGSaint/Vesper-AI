@@ -9,6 +9,12 @@ export { createScriptedProvider } from "./models/scripted.ts";
 export { createEchoProvider } from "./models/echo.ts";
 export { createBenchmarkHarness, emptyBenchmarkReport } from "./models/benchmark.ts";
 export { createMockOptimizer, createHttpOptimizerAdapter } from "./specialists/optimizer.ts";
+export {
+  createNexusIpcOptimizerAdapter,
+  createNexusIpcClient,
+  resolveNexusIpcEndpoint,
+  isNexusIpcConfigured,
+} from "./specialists/nexus-ipc.ts";
 export { inspectWorkload, explainPerformance } from "./specialists/context.ts";
 export { detectObs, detectVrchat, groundedConclusions, readyPlan } from "./specialists/gaming.ts";
 export { VESPER_SYSTEM_PROMPT } from "./personality.ts";

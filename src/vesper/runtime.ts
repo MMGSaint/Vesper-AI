@@ -38,6 +38,11 @@ import {
   createHttpOptimizerAdapter,
   type OptimizerAdapter,
 } from "./specialists/optimizer.ts";
+import {
+  createNexusIpcOptimizerAdapter,
+  isNexusIpcConfigured,
+  resolveNexusIpcEndpoint,
+} from "./specialists/nexus-ipc.ts";
 import { inspectWorkload } from "./specialists/context.ts";
 import { createSimulatedWindowsHost } from "./windows/host.ts";
 import { createBackgroundRuntime, createTrayMenu, type BackgroundRuntime } from "./windows/runtime.ts";
@@ -729,6 +734,70 @@ export class VesperRuntime {
   }
 }
 
+
+function createOptimizerFromConfig(
+  config: VesperConfig,
+  hardware: ReturnType<typeof createSimulatedHardware>,
+  log: Logger,
+): OptimizerAdapter {
+  if (config.optimizer.mode !== "live") {
+    return createMockOptimizer(hardware, log);
+  }
+
+  if (isNexusIpcConfigured(config.optimizer)) {
+    const resolved = resolveNexusIpcEndpoint({
+      socketPath: config.optimizer.socketPath,
+      pipeName: config.optimizer.pipeName,
+      home: config.optimizer.home,
+      tokenPath: config.optimizer.tokenPath,
+    });
+    if (!resolved.ok) {
+      log.error("optimizer", "NEXUS IPC config refused", { reason: resolved.reason });
+      // Degrade to an unavailable live-shaped refusal rather than silently pretending mock.
+      return createNexusIpcOptimizerAdapter({
+        endpoint: "",
+        tokenPath: "",
+        timeoutMs: config.optimizer.timeoutMs,
+        log,
+      });
+    }
+    if (!resolved.value.tokenPath) {
+      log.error("optimizer", "NEXUS IPC config refused", {
+        reason: "tokenPath could not be derived; set optimizer.tokenPath or optimizer.home.",
+      });
+      return createNexusIpcOptimizerAdapter({
+        endpoint: "",
+        tokenPath: "",
+        timeoutMs: config.optimizer.timeoutMs,
+        log,
+      });
+    }
+    log.info("optimizer", "Using NEXUS IPC adapter", {
+      transport: resolved.value.transport,
+      // Endpoint is a local path / pipe name — fine to log. Never log the token.
+      endpoint: resolved.value.endpoint,
+      tokenPath: resolved.value.tokenPath,
+    });
+    return createNexusIpcOptimizerAdapter({
+      endpoint: resolved.value.endpoint,
+      tokenPath: resolved.value.tokenPath,
+      timeoutMs: config.optimizer.timeoutMs,
+      log,
+    });
+  }
+
+  if (config.optimizer.endpoint) {
+    return createHttpOptimizerAdapter(config.optimizer.endpoint, {
+      timeoutMs: config.optimizer.timeoutMs,
+      retries: config.optimizer.retries,
+      allowRemoteEndpoint: config.optimizer.allowRemoteEndpoint,
+      log,
+    });
+  }
+
+  return createMockOptimizer(hardware, log);
+}
+
 export async function createRuntime(options: RuntimeOptions = {}): Promise<VesperRuntime> {
   const parsed = parseConfig({ ...defaultConfig(), ...(options.config ?? {}) });
   const config: VesperConfig = {
@@ -957,14 +1026,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     config.notifications.cooldownMs,
   );
   const hardware = createSimulatedHardware(config);
-  const optimizer: OptimizerAdapter =
-    config.optimizer.mode === "live" && config.optimizer.endpoint
-      ? createHttpOptimizerAdapter(config.optimizer.endpoint, {
-          timeoutMs: config.optimizer.timeoutMs,
-          retries: config.optimizer.retries,
-          log,
-        })
-      : createMockOptimizer(hardware);
+  const optimizer: OptimizerAdapter = createOptimizerFromConfig(config, hardware, log);
   if (config.optimizer.mode === "off") optimizer.setAvailable?.(false);
   const windows = createSimulatedWindowsHost(hardware, {
     nativeNotifications: config.windows.nativeNotifications,

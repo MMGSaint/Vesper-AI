@@ -44,9 +44,12 @@ all of this work. Nothing below has been observed on it.
 - **The context budget is measured in characters, not tokens.** Vesper cannot count a
   backend's tokens without asking it, and will not present an estimate as a
   measurement. The budget is used for trimming only.
-- **The optimizer is a mock.** Its contract is a placeholder until the real API is
-  published. Vesper never claims an optimization happened without an authoritative
-  `accepted: true` from the adapter.
+- **The optimizer defaults to a mock.** A real NEXUS IPC client exists
+  (`transport: "ipc"` + local socket/pipe/home) and speaks the published NEXUS contract,
+  but it has not been validated against a live NEXUS process on the target PC. The legacy
+  HTTP adapter remains a placeholder. Vesper never claims a live hardware change when
+  NEXUS reports `mocked`/`simulated` fidelity, and never claims an optimization happened
+  without an authoritative acceptance from the adapter.
 - **Correlation is timing, not causation.** `explain_change` reports what Vesper
   observed near a moment and says explicitly that this does not prove one thing caused
   another.

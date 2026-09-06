@@ -68,7 +68,10 @@ export async function discoverCapabilityProfile(config: VesperConfig): Promise<C
     // the runtime, so classifying it as hardware-dependent claims a connection that
     // does not exist. Same rule as the first-boot report's optimizer step.
     optimizer:
-      config.optimizer.mode === "live" && config.optimizer.endpoint
+      config.optimizer.mode === "live" &&
+      (Boolean(config.optimizer.endpoint) ||
+        Boolean(config.optimizer.socketPath || config.optimizer.pipeName || config.optimizer.home) ||
+        config.optimizer.transport === "ipc")
         ? "implemented_hardware_dependent"
         : "mocked_simulated",
     voice: config.voice.enabled ? "implemented_hardware_dependent" : "documented_not_implemented",

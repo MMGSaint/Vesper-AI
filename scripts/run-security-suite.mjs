@@ -39,6 +39,7 @@ const SUITE = [
   ["src/vesper/security-corrections.test.ts", "a correction is evidence and never authority"],
   ["src/vesper/memory/scopes.test.ts", "memory scope visibility and attribution"],
   ["src/vesper/security-nexus-boundary.test.ts", "the optimizer specialist is data, never authority"],
+  ["src/vesper/nexus-ipc.test.ts", "NEXUS IPC: local paths only, token not logged, mocked fidelity honesty"],
   ["src/vesper/security-startup.test.ts", "startup registration and config patching are not authority surfaces"],
   ["src/vesper/security-decisions.test.ts", "decision journal is evidence; remote task_create keeps its author"],
   ["src/vesper/distributed/discovery.test.ts", "capabilities are discovered, never assumed"],

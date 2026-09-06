@@ -127,7 +127,12 @@ export async function writeConfigIfMissing(configPath: string, config: VesperCon
     },
     optimizer: {
       mode: config.optimizer.mode,
+      transport: config.optimizer.transport,
       endpoint: config.optimizer.endpoint,
+      socketPath: config.optimizer.socketPath,
+      pipeName: config.optimizer.pipeName,
+      home: config.optimizer.home,
+      tokenPath: config.optimizer.tokenPath,
       timeoutMs: config.optimizer.timeoutMs,
       retries: config.optimizer.retries,
     },
