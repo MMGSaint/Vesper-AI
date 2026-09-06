@@ -151,7 +151,7 @@ Run for long enough to see a normal day.
 
 NEXUS is a separate specialist. Vesper does not rebuild it, replace it, or absorb it.
 
-Point `optimizer.endpoint` at the real API and set `optimizer.mode: "live"`.
+Prefer NEXUS IPC: set `optimizer.mode: "live"`, `optimizer.transport: "ipc"`, and `optimizer.home` (or `socketPath` / `pipeName`). The HTTP `optimizer.endpoint` path remains a legacy placeholder.
 
 **Evidence:** `optimizer_status` reports `mode: "live"`, and the capability manifest and
 the client gateway both report `AVAILABLE`. Those two surfaces read one classifier, so

@@ -18,6 +18,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { classifyOptimizerCapability } from "./specialists/optimizer.ts";
+import {
+  createNexusIpcOptimizerAdapter,
+  isSafeLocalPath,
+  isSafePipeName,
+} from "./specialists/nexus-ipc.ts";
 import { testRuntime, enrolCompanion } from "./test-helpers.ts";
 import { createClientGateway } from "./client/gateway.ts";
 import { isClientError } from "./client/protocol.ts";
@@ -141,5 +146,35 @@ describe("Vesper does not claim an optimization it cannot evidence", () => {
     const runtime = await testRuntime();
     const diagnostics = await runtime.diagnostics();
     assert.equal(diagnostics.optimizer.mode, "mock");
+  });
+});
+
+describe("NEXUS IPC adapter cannot redefine Vesper mode or smuggle authority", () => {
+  it("keeps mode=live even when the specialist payload looks mocked", async () => {
+    const adapter = createNexusIpcOptimizerAdapter({
+      endpoint: "/tmp/vesper-does-not-exist.sock",
+      tokenPath: "/tmp/vesper-does-not-exist-token",
+      timeoutMs: 50,
+      token: "test-token-that-is-long-enough-1234567890",
+      clientFactory: () => ({
+        async call() {
+          return {
+            ok: true as const,
+            fidelity: "mocked" as const,
+            result: { runState: "ready", activeProfileId: "x", mode: "mock" },
+            latencyMs: 1,
+          };
+        },
+      }),
+    });
+    const status = await adapter.getStatus();
+    assert.equal(status.mode, "live", "Vesper assigns live; NEXUS does not");
+    assert.equal(classifyOptimizerCapability(status), "AVAILABLE");
+  });
+
+  it("refuses remote pipe and URL paths at the boundary helpers", () => {
+    assert.equal(isSafeLocalPath("https://evil.example/sock"), false);
+    assert.equal(isSafePipeName("\\\\evil\\pipe\\nexus"), false);
+    assert.equal(isSafePipeName("\\\\.\\pipe\\nexus-abcd1234"), true);
   });
 });

@@ -197,7 +197,7 @@ describe("the report does not contradict itself about the optimizer", () => {
     );
 
     assert.equal(optimizer?.status, "mocked_simulated");
-    assert.match(optimizer!.detail, /no endpoint is configured/);
+    assert.match(optimizer!.detail, /no (?:IPC path or HTTP )?endpoint is configured|no IPC path or HTTP endpoint is configured/);
   });
 
   it("classifies mock mode as simulated", async () => {
