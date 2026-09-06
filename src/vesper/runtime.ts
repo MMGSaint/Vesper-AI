@@ -87,6 +87,15 @@ export interface RuntimeOptions {
   providers?: Parameters<typeof createModelRouter>[0]["providers"];
   skipDiscovery?: boolean;
   /**
+   * Keep the Windows host simulated even on win32.
+   *
+   * Default: simulated whenever `dirs` is absent (tests / in-memory embeds), real when
+   * `dirs` is provided (production host). Explicit true/false always wins. This stops
+   * CI on windows-latest from shelling out to tasklist/launch during unit tests while
+   * still letting the installed host attach the real adapter.
+   */
+  forceSimulatedWindows?: boolean;
+  /**
    * Where Vesper's own files live.
    *
    * `data` is where the device keypair goes; absent (as in tests) the identity is kept
@@ -974,8 +983,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
         })
       : createMockOptimizer(hardware);
   if (config.optimizer.mode === "off") optimizer.setAvailable?.(false);
+  const forceSimulatedWindows =
+    options.forceSimulatedWindows ?? options.dirs == null;
   const windows = createWindowsHost(hardware, {
     nativeNotifications: config.windows.nativeNotifications,
+    forceSimulated: forceSimulatedWindows,
   });
   const voice = config.voice.enabled
     ? await createVoiceModule({

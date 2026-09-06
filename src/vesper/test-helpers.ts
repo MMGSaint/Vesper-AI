@@ -22,6 +22,7 @@ export async function testRuntime(options?: {
   const runtime = await createRuntime({
     storage: new MemoryStorage(),
     skipDiscovery: true,
+    forceSimulatedWindows: true,
     providers,
     config: options?.config,
   });

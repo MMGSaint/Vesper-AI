@@ -43,3 +43,13 @@ describe("createWindowsHost selects the adapter honestly", () => {
     assert.equal(host.platform, "win32");
   });
 });
+
+describe("createRuntime Windows host policy", () => {
+  it("documents that forceSimulated on createWindowsHost keeps CI off the real adapter", () => {
+    const hardware = createSimulatedHardware(defaultConfig());
+    const forced = createWindowsHost(hardware, { platform: "win32", forceSimulated: true, runner: noopRunner });
+    const real = createWindowsHost(hardware, { platform: "win32", forceSimulated: false, runner: noopRunner, launcher: () => ({ ok: true, pid: 1, error: null }), nativeNotifications: false });
+    assert.equal(forced.simulated, true);
+    assert.equal(real.simulated, false);
+  });
+});
