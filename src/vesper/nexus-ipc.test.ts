@@ -9,6 +9,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { chmod, mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import { parseConfig, defaultConfig } from "./config.ts";
 import { classifyOptimizerCapability } from "./specialists/optimizer.ts";
 import {
@@ -23,6 +24,25 @@ import {
 } from "./specialists/nexus-ipc.ts";
 
 const TOKEN = "test-token-that-is-long-enough-1234567890";
+
+/**
+ * Mock transport endpoint for the current host.
+ * Windows cannot listen on a filesystem `*.sock` path (CI fails with EACCES);
+ * use a local named pipe instead — the same shape NEXUS speaks in production.
+ */
+function mockIpcEndpoint(home: string): string {
+  if (process.platform === "win32") {
+    return `\\\\.\\pipe\\vesper-nexus-ipc-${randomBytes(4).toString("hex")}`;
+  }
+  return join(home, "runtime", "vesper.sock");
+}
+
+function missingIpcEndpoint(home: string): string {
+  if (process.platform === "win32") {
+    return `\\\\.\\pipe\\vesper-nexus-missing-${randomBytes(4).toString("hex")}`;
+  }
+  return join(home, "runtime", "no-such.sock");
+}
 
 type Handler = (params: Record<string, unknown> | undefined) => {
   ok: boolean;
@@ -45,7 +65,10 @@ class MockNexusServer {
       this.server!.once("error", reject);
       this.server!.listen({ path: endpoint }, () => resolve());
     });
-    await chmod(endpoint, 0o600).catch(() => undefined);
+    // Named pipes have no filesystem inode to chmod; unix sockets get 0600.
+    if (!endpoint.toLowerCase().startsWith("\\\\.\\pipe\\")) {
+      await chmod(endpoint, 0o600).catch(() => undefined);
+    }
   }
 
   async stop(): Promise<void> {
@@ -238,7 +261,7 @@ describe("NEXUS IPC adapter against a mock socket server", () => {
     home = await mkdtemp(join(tmpdir(), "vesper-nexus-ipc-"));
     await mkdir(join(home, "runtime"), { recursive: true });
     await writeFile(join(home, "runtime", "vesper-token"), `${TOKEN}\n`, { mode: 0o600 });
-    const endpoint = join(home, "runtime", "vesper.sock");
+    const endpoint = mockIpcEndpoint(home);
     server = new MockNexusServer();
     server.handlers = {
       getStatus: () => ({
@@ -394,7 +417,7 @@ describe("NEXUS IPC adapter against a mock socket server", () => {
 
   it("degrades honestly on timeout / missing socket", async () => {
     const missing = createNexusIpcOptimizerAdapter({
-      endpoint: join(home, "runtime", "no-such.sock"),
+      endpoint: missingIpcEndpoint(home),
       tokenPath: join(home, "runtime", "vesper-token"),
       timeoutMs: 200,
     });
@@ -415,13 +438,17 @@ describe("NEXUS IPC adapter against a mock socket server", () => {
     // whose handler we replace to... actually test the client's parse path with a
     // tiny throwaway server.
     const junkHome = await mkdtemp(join(tmpdir(), "vesper-nexus-junk-"));
-    const junkSock = join(junkHome, "j.sock");
+    await mkdir(join(junkHome, "runtime"), { recursive: true });
+    const junkSock = mockIpcEndpoint(junkHome);
     const junk = createServer((socket) => {
       socket.on("data", () => {
         socket.write("{not-json\n");
       });
     });
-    await new Promise<void>((resolve) => junk.listen({ path: junkSock }, () => resolve()));
+    await new Promise<void>((resolve, reject) => {
+      junk.once("error", reject);
+      junk.listen({ path: junkSock }, () => resolve());
+    });
     const junkClient = createNexusIpcClient({
       endpoint: junkSock,
       token: TOKEN,
@@ -468,7 +495,7 @@ describe("NEXUS mocked fidelity must not claim live hardware change", () => {
         result: { profile: { id: "balanced" }, appliedAtMs: null },
       }),
     };
-    await server.start(join(home, "runtime", "vesper.sock"));
+    await server.start(mockIpcEndpoint(home));
   });
 
   after(async () => {

@@ -15,7 +15,7 @@
 
 import { createConnection, type Socket } from "node:net";
 import { readFile } from "node:fs/promises";
-import { isAbsolute, join, resolve, dirname } from "node:path";
+import { isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
 
 import { sanitiseInline } from "../untrusted.ts";
@@ -35,7 +35,11 @@ export const NEXUS_CONTRACT_VERSION = "1.0.0";
 export const NEXUS_TOKEN_FILENAME = "vesper-token";
 export const NEXUS_SOCK_FILENAME = "vesper.sock";
 
-/** Join path segments for a target platform without using the host OS rules. */
+/**
+ * Join path segments for a target platform without using the host OS rules.
+ * Critical on Windows CI: `path.join` / `path.resolve` would turn a POSIX home
+ * like `/tmp/nexus` into `D:\tmp\nexus` when the *platform argument* is linux.
+ */
 function joinForPlatform(platform: NodeJS.Platform, ...parts: string[]): string {
   if (platform === "win32") {
     const cleaned = parts.map((p, i) =>
@@ -43,7 +47,43 @@ function joinForPlatform(platform: NodeJS.Platform, ...parts: string[]): string 
     );
     return cleaned.join("\\");
   }
-  return join(...parts);
+  const cleaned = parts.map((p, i) =>
+    i === 0 ? p.replace(/\/+$/g, "") : p.replace(/^\/+|\/+$/g, ""),
+  );
+  return cleaned.filter((p) => p.length > 0).join("/");
+}
+
+/** Normalize an absolute path for a target platform (no host `path.resolve`). */
+function resolveForPlatform(platform: NodeJS.Platform, raw: string): string {
+  if (platform === "win32") {
+    return raw.replace(/[/\\]+$/g, "") || raw;
+  }
+  const trimmed = raw.trim();
+  const parts: string[] = [];
+  for (const seg of trimmed.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(seg);
+  }
+  return `/${parts.join("/")}`;
+}
+
+function dirnameForPlatform(platform: NodeJS.Platform, p: string): string {
+  if (platform === "win32") {
+    const normalized = p.replace(/[/\\]+$/g, "");
+    const idx = Math.max(normalized.lastIndexOf("\\"), normalized.lastIndexOf("/"));
+    if (idx < 0) return normalized;
+    if (idx === 2 && /^[A-Za-z]:/.test(normalized)) return normalized.slice(0, 3);
+    return normalized.slice(0, idx) || normalized;
+  }
+  const trimmed = p.replace(/\/+$/g, "") || "/";
+  if (trimmed === "/") return "/";
+  const idx = trimmed.lastIndexOf("/");
+  if (idx <= 0) return "/";
+  return trimmed.slice(0, idx);
 }
 
 function resolveHome(home: string, platform: NodeJS.Platform): string {
@@ -51,7 +91,7 @@ function resolveHome(home: string, platform: NodeJS.Platform): string {
     // Do not run POSIX path.resolve on a Windows path — it would mangle the drive letter.
     return home.replace(/[/\\]+$/g, "") || home;
   }
-  return resolve(home);
+  return resolveForPlatform("linux", home);
 }
 
 
@@ -397,26 +437,27 @@ export function resolveNexusIpcEndpoint(input: {
     };
   }
 
-  // POSIX
+  // POSIX — always use POSIX separators, even when the host OS is Windows
+  // (cross-platform config authorship + Windows CI unit tests).
   if (socketPath) {
-    const endpoint = resolve(socketPath);
+    const endpoint = resolveForPlatform("linux", socketPath);
     const tokenPath =
       tokenOverride ??
       (home
-        ? join(resolve(home), "runtime", NEXUS_TOKEN_FILENAME)
-        : join(dirname(endpoint), NEXUS_TOKEN_FILENAME));
+        ? joinForPlatform("linux", resolveForPlatform("linux", home), "runtime", NEXUS_TOKEN_FILENAME)
+        : joinForPlatform("linux", dirnameForPlatform("linux", endpoint), NEXUS_TOKEN_FILENAME));
     return {
       ok: true,
       value: { endpoint, tokenPath, transport: "unix-socket" },
     };
   }
   if (home) {
-    const root = resolve(home);
+    const root = resolveForPlatform("linux", home);
     return {
       ok: true,
       value: {
-        endpoint: join(root, "runtime", NEXUS_SOCK_FILENAME),
-        tokenPath: tokenOverride ?? join(root, "runtime", NEXUS_TOKEN_FILENAME),
+        endpoint: joinForPlatform("linux", root, "runtime", NEXUS_SOCK_FILENAME),
+        tokenPath: tokenOverride ?? joinForPlatform("linux", root, "runtime", NEXUS_TOKEN_FILENAME),
         transport: "unix-socket",
       },
     };
