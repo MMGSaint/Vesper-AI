@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { ModelRole, PermissionLevel } from "./types.ts";
 import { checkCloudEndpoint, checkLocalEndpoint } from "./net.ts";
+import { isSafeLocalPath, isSafePipeName } from "./specialists/nexus-ipc.ts";
 
 const permissionLevel = z.enum(["read", "safe", "confirm", "never"]);
 const modelRole = z.enum(["fast", "everyday", "reasoning", "coding", "large"]);
@@ -202,24 +203,91 @@ export const vesperConfigSchema = z.object({
   optimizer: z
     .object({
       mode: z.enum(["mock", "live", "off"]).default("mock"),
+      /**
+       * How Vesper reaches the specialist.
+       * - `http`: legacy placeholder HTTP adapter (local/LAN endpoint only).
+       * - `ipc`: real NEXUS contract (named pipe / unix socket). Prefer this.
+       * - null: auto — IPC when socketPath/pipeName/home is set, else HTTP when endpoint is set.
+       */
+      transport: z.enum(["http", "ipc"]).nullable().default(null),
+      /** HTTP only. Ignored for IPC. */
       endpoint: z.string().nullable().default(null),
+      /** POSIX unix domain socket path for NEXUS (absolute). */
+      socketPath: z.string().nullable().default(null),
+      /** Windows local named pipe, e.g. \\.\pipe\nexus-<discriminator>. */
+      pipeName: z.string().nullable().default(null),
+      /** NEXUS home directory; derives socket/pipe and token path. */
+      home: z.string().nullable().default(null),
+      /** Override for `<NEXUS home>/runtime/vesper-token`. Absolute path. */
+      tokenPath: z.string().nullable().default(null),
       timeoutMs: z.number().default(2500),
       retries: z.number().default(1),
-      /** Explicit opt-in for an optimizer that is not on this machine or this LAN. */
+      /** Explicit opt-in for an HTTP optimizer that is not on this machine or this LAN. */
       allowRemoteEndpoint: z.boolean().default(false),
     })
     .superRefine((optimizer, ctx) => {
-      // Validated whenever an endpoint is set, not only in live mode: a stored endpoint
-      // becomes live the moment someone flips `mode`, and it should never have been
-      // accepted in the first place.
-      if (optimizer.endpoint === null) return;
-      const check = checkLocalEndpoint(optimizer.endpoint, {
-        allowRemote: optimizer.allowRemoteEndpoint,
-        label: "optimizer.endpoint",
-      });
-      if (!check.ok) ctx.addIssue({ code: "custom", path: ["endpoint"], message: check.reason });
+      // HTTP endpoint: validated whenever set, not only in live mode.
+      if (optimizer.endpoint !== null) {
+        const check = checkLocalEndpoint(optimizer.endpoint, {
+          allowRemote: optimizer.allowRemoteEndpoint,
+          label: "optimizer.endpoint",
+        });
+        if (!check.ok) ctx.addIssue({ code: "custom", path: ["endpoint"], message: check.reason });
+      }
+
+      const wantsIpc =
+        optimizer.transport === "ipc" ||
+        (optimizer.transport === null &&
+          Boolean(optimizer.socketPath || optimizer.pipeName || optimizer.home));
+
+      if (optimizer.transport === "ipc") {
+        const hasTarget = Boolean(optimizer.socketPath || optimizer.pipeName || optimizer.home);
+        if (!hasTarget) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["transport"],
+            message: "transport 'ipc' requires socketPath, pipeName, or home.",
+          });
+        }
+      }
+
+      if (!wantsIpc) return;
+
+      for (const [field, value] of [
+        ["socketPath", optimizer.socketPath],
+        ["home", optimizer.home],
+        ["tokenPath", optimizer.tokenPath],
+      ] as const) {
+        if (value === null) continue;
+        if (!isSafeLocalPath(value)) {
+          ctx.addIssue({
+            code: "custom",
+            path: [field],
+            message: `${field} must be an absolute local filesystem path (not a URL, host:port, or remote UNC).`,
+          });
+        }
+      }
+
+      if (optimizer.pipeName !== null && !isSafePipeName(optimizer.pipeName)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["pipeName"],
+          message: "pipeName must be a local Windows pipe of the form \\\\.\\pipe\\nexus-…",
+        });
+      }
     })
-    .default({ mode: "mock", endpoint: null, timeoutMs: 2500, retries: 1, allowRemoteEndpoint: false }),
+    .default({
+      mode: "mock",
+      transport: null,
+      endpoint: null,
+      socketPath: null,
+      pipeName: null,
+      home: null,
+      tokenPath: null,
+      timeoutMs: 2500,
+      retries: 1,
+      allowRemoteEndpoint: false,
+    }),
   voice: z
     .object({
       enabled: z.boolean().default(false),

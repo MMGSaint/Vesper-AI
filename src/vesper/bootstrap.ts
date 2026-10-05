@@ -198,17 +198,24 @@ export async function runFirstBootAutomation(
   // printed "Optimizer adapter is mock" and classified itself
   // implemented_hardware_dependent — the report contradicting itself on one line. The
   // runtime requires both before it builds a live adapter, so the report should too.
-  const optimizerLive = config.optimizer.mode === "live" && Boolean(config.optimizer.endpoint);
+  const optimizerIpc =
+    config.optimizer.mode === "live" &&
+    (config.optimizer.transport === "ipc" ||
+      Boolean(config.optimizer.socketPath || config.optimizer.pipeName || config.optimizer.home));
+  const optimizerHttp = config.optimizer.mode === "live" && Boolean(config.optimizer.endpoint) && !optimizerIpc;
+  const optimizerLive = optimizerIpc || optimizerHttp;
   steps.push(
     step(
       "optimizer",
       "Detect optimizer",
       true,
-      optimizerLive
-        ? `Live optimizer endpoint configured: ${config.optimizer.endpoint}`
-        : config.optimizer.mode === "live"
-          ? "Optimizer mode is 'live' but no endpoint is configured, so the adapter is still a mock."
-          : "Optimizer adapter is mock. The specialist API is not connected.",
+      optimizerIpc
+        ? `Live NEXUS IPC configured (${config.optimizer.socketPath || config.optimizer.pipeName || config.optimizer.home}).`
+        : optimizerHttp
+          ? `Live optimizer HTTP endpoint configured: ${config.optimizer.endpoint}`
+          : config.optimizer.mode === "live"
+            ? "Optimizer mode is 'live' but no IPC path or HTTP endpoint is configured, so the adapter is still a mock."
+            : "Optimizer adapter is mock. NEXUS IPC is not connected.",
       optimizerLive ? "implemented_hardware_dependent" : "mocked_simulated",
     ),
   );
