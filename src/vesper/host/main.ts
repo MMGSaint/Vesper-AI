@@ -355,6 +355,7 @@ async function main() {
               id: pending.id,
               tool: pending.toolName,
               reason: pending.reason,
+              preview: pending.preview ?? null,
             })),
           },
           null,
