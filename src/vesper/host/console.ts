@@ -129,7 +129,7 @@ async function resolveConfirmations(
       }
     }
     if (pending.args && Object.keys(pending.args).length) {
-      io.writeLine("  arguments: [held privately until approval]");
+      io.writeLine(`  arguments: ${JSON.stringify(pending.args)}`);
     }
     const answer = await io.readLine("approve? [y/N] ");
     const approve = answer !== null && /^(y|yes)$/i.test(answer.trim());
