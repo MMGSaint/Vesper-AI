@@ -34,7 +34,7 @@ export interface DiscoverySubjects {
   hostPosture: HostPosture;
   /** Whether a sync transport is actually attached. Today nothing attaches one. */
   syncAttached?: boolean;
-  /** The Windows host, when one is attached. Nothing attaches it yet. */
+  /** The Windows host, when one is attached (runtime passes this for a non-simulated host). */
   windowsHost?: { available(): boolean };
 }
 

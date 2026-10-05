@@ -80,6 +80,14 @@ describe("capability discovery asks rather than assumes", () => {
     assert.equal(capabilityState(m, "windows_control"), "NOT_CONFIGURED", "no windows host");
   });
 
+  it("reports windows_control AVAILABLE only when a real host is attached and available", async () => {
+    const available = await manifest({ windowsHost: { available: () => true } });
+    assert.equal(capabilityState(available, "windows_control"), "AVAILABLE");
+
+    const unavailable = await manifest({ windowsHost: { available: () => false } });
+    assert.equal(capabilityState(unavailable, "windows_control"), "UNAVAILABLE");
+  });
+
   it("refuses to execute other devices' tasks while on a foreign host", async () => {
     // The portable case: the machine underneath is not the user's, so this Vesper may
     // ask for work to be done elsewhere but must not become the worker.

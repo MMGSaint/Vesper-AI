@@ -39,7 +39,7 @@ import {
   type OptimizerAdapter,
 } from "./specialists/optimizer.ts";
 import { inspectWorkload } from "./specialists/context.ts";
-import { createSimulatedWindowsHost } from "./windows/host.ts";
+import { createWindowsHost, type WindowsHost } from "./windows/host.ts";
 import { createBackgroundRuntime, createTrayMenu, type BackgroundRuntime } from "./windows/runtime.ts";
 import { createDisabledVoice, type VoiceModule } from "./voice/types.ts";
 import { createVoiceModule } from "./voice/providers.ts";
@@ -87,6 +87,15 @@ export interface RuntimeOptions {
   providers?: Parameters<typeof createModelRouter>[0]["providers"];
   skipDiscovery?: boolean;
   /**
+   * Keep the Windows host simulated even on win32.
+   *
+   * Default: simulated whenever `dirs` is absent (tests / in-memory embeds), real when
+   * `dirs` is provided (production host). Explicit true/false always wins. This stops
+   * CI on windows-latest from shelling out to tasklist/launch during unit tests while
+   * still letting the installed host attach the real adapter.
+   */
+  forceSimulatedWindows?: boolean;
+  /**
    * Where Vesper's own files live.
    *
    * `data` is where the device keypair goes; absent (as in tests) the identity is kept
@@ -125,6 +134,7 @@ export class VesperRuntime {
   readonly correctionProducer: OptimizerCorrectionProducer;
   readonly notifications: NotificationHub;
   readonly hardware: SimulatedHardware;
+  readonly windows: WindowsHost;
   readonly optimizer: OptimizerAdapter;
   readonly obs: ObsClient;
   readonly deviceIdentity: DeviceIdentity;
@@ -168,6 +178,7 @@ export class VesperRuntime {
       correctionProducer: OptimizerCorrectionProducer;
       notifications: NotificationHub;
       hardware: SimulatedHardware;
+      windows: WindowsHost;
       optimizer: OptimizerAdapter;
       obs: ObsClient;
       deviceIdentity: DeviceIdentity;
@@ -204,6 +215,7 @@ export class VesperRuntime {
     this.correctionProducer = parts.correctionProducer;
     this.notifications = parts.notifications;
     this.hardware = parts.hardware;
+    this.windows = parts.windows;
     this.optimizer = parts.optimizer;
     this.obs = parts.obs;
     this.deviceIdentity = parts.deviceIdentity;
@@ -358,6 +370,11 @@ export class VesperRuntime {
           obs: this.obs,
           tools: this.tools,
           hostPosture: this.hostPosture,
+          // Only attach when the host is real. A simulated adapter on Linux is not a
+          // Windows control plane — reporting UNAVAILABLE would imply one is plugged in.
+          windowsHost: this.windows.simulated
+            ? undefined
+            : { available: () => this.windows.platform === "win32" },
         }),
       });
       await this.devices.setCapabilities(this.deviceIdentity.deviceId, manifest);
@@ -549,10 +566,10 @@ export class VesperRuntime {
       permissions: { neverAllowAutonomous: this.config.permissions.neverAllowAutonomous },
       optimizer,
       windows: {
-        platform: process.platform,
-        simulated: true,
-        trayAvailable: this.config.windows.enableTray,
-        notificationsAvailable: this.config.notifications.enabled,
+        platform: this.windows.platform,
+        simulated: this.windows.simulated,
+        trayAvailable: this.windows.trayAvailable,
+        notificationsAvailable: this.windows.notificationsAvailable,
         startOnLogin: this.background.startOnLogin(),
       },
       voice: this.voice.status(),
@@ -966,8 +983,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
         })
       : createMockOptimizer(hardware);
   if (config.optimizer.mode === "off") optimizer.setAvailable?.(false);
-  const windows = createSimulatedWindowsHost(hardware, {
+  const forceSimulatedWindows =
+    options.forceSimulatedWindows ?? options.dirs == null;
+  const windows = createWindowsHost(hardware, {
     nativeNotifications: config.windows.nativeNotifications,
+    forceSimulated: forceSimulatedWindows,
   });
   const voice = config.voice.enabled
     ? await createVoiceModule({
@@ -1346,6 +1366,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     correctionProducer,
     notifications,
     hardware,
+    windows,
     optimizer,
     obs,
     deviceIdentity,
