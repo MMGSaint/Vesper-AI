@@ -144,6 +144,21 @@ export interface ToolExecutionResult {
   changed?: boolean;
 }
 
+export type Reversibility = "reversible" | "not_reversible" | "unknown";
+
+export interface ActionPreview {
+  toolName: string;
+  summary: string;
+  affected: string[];
+  sideEffects: string[];
+  reversibility: Reversibility;
+  rollbackHint?: string;
+  reason: string;
+  executed: false;
+  wouldHappen?: string;
+  dryRunAttempted: boolean;
+}
+
 export interface PermissionDecision {
   allowed: boolean;
   level: PermissionLevel;
@@ -166,6 +181,8 @@ export interface PendingConfirmation {
    * because authority must be re-read live at approval time rather than replayed.
    */
   requestedBy?: { kind: "local" | "remote"; deviceId?: string };
+  /** Deterministic description shown before the user approves the action. */
+  preview?: ActionPreview;
 }
 
 export interface MemoryEntry {
@@ -463,6 +480,8 @@ export interface ToolCallRecord {
    * the call that produced it.
    */
   confirmationId?: string;
+  /** Same preview that was shown when a confirmation was queued. */
+  preview?: ActionPreview;
 }
 
 export interface AgentTurn {
