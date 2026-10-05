@@ -11,6 +11,7 @@
  */
 
 import type { AgentTurn, MemoryCategory, MemoryEntry, PendingConfirmation } from "../types.ts";
+import { formatPreview } from "../preview.ts";
 import { MEMORY_CATEGORIES as CATEGORY_LIST } from "../types.ts";
 import { VESPER_NAME, VESPER_VERSION } from "../version.ts";
 
@@ -122,8 +123,13 @@ async function resolveConfirmations(
     io.writeLine("");
     io.writeLine(`Vesper wants to run: ${pending.toolName}`);
     io.writeLine(`  reason: ${pending.reason}`);
+    if (pending.preview) {
+      for (const line of formatPreview(pending.preview).split("\n")) {
+        io.writeLine(`  ${line}`);
+      }
+    }
     if (pending.args && Object.keys(pending.args).length) {
-      io.writeLine(`  arguments: ${JSON.stringify(pending.args)}`);
+      io.writeLine("  arguments: [held privately until approval]");
     }
     const answer = await io.readLine("approve? [y/N] ");
     const approve = answer !== null && /^(y|yes)$/i.test(answer.trim());
