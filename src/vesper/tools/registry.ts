@@ -14,6 +14,7 @@ import type { AutonomyGovernor } from "../autonomy.ts";
 import { decideRemoteToolRequest, type RequestOrigin } from "./remote.ts";
 import { capScopesForTrust } from "../client/protocol.ts";
 import type { TrustState } from "../distributed/identity.ts";
+import { previewAction } from "../preview.ts";
 
 export interface RegisteredTool {
   spec: ToolSpec;
@@ -343,6 +344,12 @@ export class ToolRegistry {
           result: { ok: false, summary: reason, epistemic: "could_not_access" },
         };
       }
+      const preview = previewAction({
+        toolName: input.name,
+        args,
+        decision,
+        dryRunAttempted: input.dryRun === true,
+      });
       const pending: PendingConfirmation = {
         id: createId("confirm"),
         toolName: input.name,
@@ -350,6 +357,7 @@ export class ToolRegistry {
         reason: decision.reason,
         createdAt: nowIso(),
         workspaceId: input.workspaceId,
+        preview,
         // Unreachable for a scheduled origin — the branch above refuses those before
         // anything is queued — but narrowed rather than cast, so that a future change
         // which lets one through fails to compile instead of persisting a kind the
@@ -368,6 +376,7 @@ export class ToolRegistry {
         at: nowIso(),
         decision,
         confirmationId: pending.id,
+        preview,
       };
     }
 
