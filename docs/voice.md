@@ -37,8 +37,8 @@ it arrives verbatim, never shell-expanded.
 text. Push-to-talk is a boolean preference (`voice.pushToTalk`); binding an actual
 Windows hotkey is HARDWARE DEPENDENT and not applied here.
 
-Wake-phrase activation is implemented as an opt-in local loop. It is STT-backed rather than a dedicated low-power DSP detector; a dedicated openWakeWord/ONNX backend can replace that detector later without changing the audio or agent boundary.
+Wake-phrase activation is implemented as an opt-in local loop. The default `stt` backend uses the existing local STT path. An optional `openwakeword` backend uses a separately installed openWakeWord + ONNX Runtime + PyAudio worker for streaming 16 kHz mono detection, with an explicit local model path and no automatic model downloads. This keeps the detector off the cloud and outside the Vesper process.
 
 Spoken confirmations are supported: when a voice turn queues a confirm-tier action, the next wake-phrase command `yes/approve/do it` or `no/cancel` is routed through the same confirmation path as the text interface.
 
-Classification: **IMPLEMENTED + TESTED** for buffer conversion, provider discovery, physical-audio orchestration, session capture/playback, wake-phrase orchestration, and spoken confirmation routing. **IMPLEMENTED + HARDWARE DEPENDENT** for real microphone/speaker operation on the target Windows machine.
+Classification: **IMPLEMENTED + TESTED** for buffer conversion, provider discovery, physical-audio orchestration, session capture/playback, wake-phrase orchestration, openWakeWord worker protocol, and spoken confirmation routing. **IMPLEMENTED + HARDWARE DEPENDENT** for real microphone/speaker and openWakeWord Python environment operation on the target Windows machine.
