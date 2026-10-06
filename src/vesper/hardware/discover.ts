@@ -76,7 +76,7 @@ export async function discoverCapabilityProfile(config: VesperConfig): Promise<C
         : "mocked_simulated",
     voice: config.voice.enabled ? "implemented_hardware_dependent" : "documented_not_implemented",
     notes: [
-      "No physical validation of the Ryzen 9 9950X / RX 7900 XT machine was performed.",
+      "No physical validation of the Ryzen 9 9950X3D / RX 7900 XT machine was performed.",
       "Default model picks are conservative candidates, not benchmark winners.",
       "First-boot on the target PC should probe Ollama, llama.cpp Vulkan, and ROCm, then configure roles from discovered models.",
     ],
