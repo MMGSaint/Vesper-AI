@@ -158,8 +158,17 @@ export function registerBuiltinTools(input: {
         return { ok: false, epistemic: "could_not_access", summary: "PID must be positive and volume must be between 0 and 1." };
       }
       try {
+        const sessions = await listAudioSessions();
+        const observed = sessions.find((session) => session.pid === pid);
+        if (!observed) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: `Refused to change PID ${pid}: it is not a currently observed Windows audio session.`,
+          };
+        }
         const result = await setAudioVolume(pid, volume);
-        const processName = typeof result.processName === "string" ? result.processName : "application";
+        const processName = typeof result.processName === "string" ? result.processName : observed.processName || "application";
         return { ok: true, epistemic: "changed", summary: "Set " + processName + " to " + Math.round(volume * 100) + "% and verified the Windows session volume.", data: result as JsonObject };
       } catch (error) {
         return { ok: false, epistemic: "could_not_access", summary: "Audio volume change failed: " + (error instanceof Error ? error.message : String(error)) };
@@ -177,8 +186,17 @@ export function registerBuiltinTools(input: {
       const muted = args.muted === true;
       if (!Number.isInteger(pid) || pid <= 0) return { ok: false, epistemic: "could_not_access", summary: "PID must be a positive integer." };
       try {
+        const sessions = await listAudioSessions();
+        const observed = sessions.find((session) => session.pid === pid);
+        if (!observed) {
+          return {
+            ok: false,
+            epistemic: "could_not_access",
+            summary: `Refused to change PID ${pid}: it is not a currently observed Windows audio session.`,
+          };
+        }
         const result = await setAudioMute(pid, muted);
-        const processName = typeof result.processName === "string" ? result.processName : "application";
+        const processName = typeof result.processName === "string" ? result.processName : observed.processName || "application";
         return { ok: true, epistemic: "changed", summary: (muted ? "Muted " : "Unmuted ") + processName + " and verified the Windows session state.", data: result as JsonObject };
       } catch (error) {
         return { ok: false, epistemic: "could_not_access", summary: "Audio mute change failed: " + (error instanceof Error ? error.message : String(error)) };
