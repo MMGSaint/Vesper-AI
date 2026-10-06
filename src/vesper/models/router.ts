@@ -224,7 +224,7 @@ export function createModelRouter(input: {
   function modelFor(provider: AnyProvider, role: ModelRole): string {
     const configured = input.config.models.roles[role];
     if (configured && configured.provider === provider.id) return configured.model;
-    if (provider.id === "xai-optional") return "grok-4.5";
+    if (provider.id === "xai-optional") return "grok-4.7";
     if (provider.id === "echo") return "echo";
     return provider.defaultModel ?? configured?.model ?? "default";
   }
