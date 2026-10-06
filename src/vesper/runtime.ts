@@ -1218,7 +1218,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   const models = createModelRouter({
     config,
     providers: options.providers,
-    xaiKey: options.xaiKey,
+    xaiKey: options.xaiKey ?? process.env.XAI_API_KEY,
     gpuContentionGuard: async () => {
       try {
         return (await optimizer.getPerformanceState()) === "gpu";
