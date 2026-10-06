@@ -23,6 +23,11 @@ export interface OptimizerAdapter {
     accepted: boolean;
     summary: string;
   }>;
+  requestExperiment?(input: { applicationId: string; repetitions?: number; maxCandidates?: number; practicalThresholdPercent?: number }): Promise<{
+    accepted: boolean;
+    summary: string;
+    data?: JsonObject;
+  }>;
   requestRollback(): Promise<{ accepted: boolean; summary: string }>;
   getLastAction(): Promise<string | null>;
   getOptimizationResult(): Promise<string | null>;
@@ -143,6 +148,33 @@ export function createMockOptimizer(hardware: SimulatedHardware, log?: Logger): 
         summary: `I requested a mock optimization to profile '${next}'. The real optimizer was not contacted.`,
       };
     },
+    async requestExperiment() {
+      return {
+        accepted: false,
+        summary: "The mock optimizer does not execute real tuner experiments.",
+      };
+    },
+    async requestExperiment(input) {
+      log?.info("optimizer", "Optimizer experiment requested", {
+        action: "request_experiment",
+        mode: "live",
+        transport: "http",
+        applicationId: input.applicationId,
+      });
+      const result = await call("/experiment", { method: "POST", body: JSON.stringify(input) });
+      if (!result.ok) return { accepted: false, summary: `I could not access the optimizer: ${result.error}` };
+      const payload = asObject(result.data);
+      const accepted = payload?.accepted === true;
+      const summary = safeTextOr(payload?.summary, "The optimizer did not return an experiment result.");
+      return {
+        accepted,
+        summary,
+        ...(payload?.data && typeof payload.data === "object" && !Array.isArray(payload.data)
+          ? { data: payload.data as JsonObject }
+          : {}),
+      };
+    },
+
     async requestRollback() {
       log?.info("optimizer", "Optimizer state change requested", {
         action: "request_rollback",
@@ -270,6 +302,12 @@ function createRefusedOptimizer(reason: string, log?: Logger): OptimizerAdapter 
         profile: input.profile ?? null,
         reason: input.reason ?? null,
       });
+    },
+    async requestExperiment() {
+      return {
+        accepted: false,
+        summary: "The mock optimizer does not execute real tuner experiments.",
+      };
     },
     async requestRollback() {
       return refuse("request_rollback");
