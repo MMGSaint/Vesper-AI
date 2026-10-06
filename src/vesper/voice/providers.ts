@@ -1,6 +1,6 @@
 import type { SpeechToText, TextToSpeech, VoiceModule } from "./types.ts";
 import { createDisabledVoice } from "./types.ts";
-import { commandExists, type WhichFn } from "../models/backends.ts";
+import { resolveCommandPath, type WhichFn } from "../models/backends.ts";
 import type { spawn as nodeSpawn } from "node:child_process";
 import { createPiperTts, createWhisperStt } from "./local-providers.ts";
 
@@ -71,30 +71,27 @@ export async function createVoiceModule(input: {
   spawnImpl?: typeof nodeSpawn;
 }): Promise<VoiceModule> {
   if (!input.enabled) return createDisabledVoice();
-  const which = input.which ?? ((name: string) => commandExists(name, input.platform));
+  // Tests may inject a boolean discovery callback; production resolves each
+  // backend to an absolute executable path so launch cannot fall through to PATH.
+  const resolve = async (name: string): Promise<string | null> => {
+    if (input.which) return (await input.which(name)) ? name : null;
+    return resolveCommandPath(name, input.platform);
+  };
 
-  // Resolve the actual binary name, since the whisper CLI ships under several.
+  // Resolve the actual binary path, since the whisper CLI ships under several names.
   const sttBinary =
     input.stt === "faster-whisper"
-      ? ((await which("whisper-ctranslate2"))
-          ? "whisper-ctranslate2"
-          : (await which("faster-whisper"))
-            ? "faster-whisper"
-            : (await which("whisper"))
-              ? "whisper"
-              : null)
-      : (await which(input.stt))
-        ? input.stt
-        : null;
+      ? (await resolve("whisper-ctranslate2")) ??
+        (await resolve("faster-whisper")) ??
+        (await resolve("whisper"))
+      : await resolve(input.stt);
 
   const ttsBinary =
     input.tts === "piper"
-      ? ((await which("piper")) ? "piper" : null)
+      ? await resolve("piper")
       : input.tts === "kokoro"
-        ? ((await which("kokoro")) ? "kokoro" : (await which("kokoro-tts")) ? "kokoro-tts" : null)
-        : (await which(input.tts))
-          ? input.tts
-          : null;
+        ? (await resolve("kokoro")) ?? (await resolve("kokoro-tts"))
+        : await resolve(input.tts);
 
   const stt = sttBinary
     ? createWhisperStt({
