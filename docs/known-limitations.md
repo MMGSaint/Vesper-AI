@@ -15,19 +15,23 @@ all of this work. Nothing below has been observed on it.
   fake runner, never run.
 - The tray has never displayed an icon. The mechanism is chosen and the protocol is
   implemented; `Shell_NotifyIcon` needs Windows.
-- Voice converts audio buffers to text and text to audio buffers, tested against a fake
-  binary. Vesper opens no microphone and no speaker.
+- Voice now has a Windows FFmpeg/DirectShow microphone boundary and ffplay playback path;
+  one-shot voice and STT-backed wake activation are implemented. Real microphone/speaker
+  behaviour is still unvalidated on the target PC. Optional openWakeWord additionally
+  requires a local Python environment with openWakeWord, ONNX Runtime, PyAudio, and a
+  user-supplied local wake model.
 - The installer, uninstaller, and reset scripts have not been run on Windows.
 
 ## Not implemented
 
-- **MCP configuration surface.** `integrations/mcp.ts` implements a real stdio JSON-RPC
-  MCP client with permission-gated tool bridging. The library is tested, but production
-  runtime does not yet expose a config surface to attach servers (`mcp_status` reports
-  `configurable: false`). No external MCP process is spawned until that surface exists.
+- **MCP production configuration surface.** `integrations/mcp.ts` implements a real stdio
+  JSON-RPC MCP client with namespacing and permission-gated tool bridging. Production still
+  requires an explicit server-configuration path before external MCP processes are spawned.
 - **Companion transport.** `vesper.client` v1 is in-process only. There is no pairing,
   no listener, and no LAN TLS.
-- **Wake word.** Deliberately out of scope; push-to-talk is the activation model.
+- **Dedicated low-power wake detection.** Optional openWakeWord support is implemented as
+  an external worker, but it is not enabled by default and requires a compatible local
+  model/Python environment. The default wake backend remains STT-backed.
 
 ## Partly done
 
