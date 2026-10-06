@@ -802,7 +802,7 @@ export function registerBuiltinTools(input: {
         });
         return {
           ok: result.accepted,
-          epistemic: result.accepted ? "changed" : "could_not_access",
+          epistemic: result.kept ? "changed" : result.accepted ? "checked" : "could_not_access",
           summary: result.summary,
           ...(result.data === undefined ? {} : { data: result.data }),
         };
