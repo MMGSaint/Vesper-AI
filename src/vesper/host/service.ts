@@ -20,6 +20,7 @@ import { runDoctor, formatDoctor, type DoctorReport } from "../doctor.ts";
 import type { VesperDirs } from "../types.ts";
 import { VESPER_VERSION } from "../version.ts";
 import { createClientGateway, type VesperClientGateway } from "../client/gateway.ts";
+import { LocalCompanionTransport } from "../client/local-transport.ts";
 import { createLifecycleController, type LifecycleController } from "../windows/lifecycle.ts";
 import { reconcileStartupRegistration, snapshotStartupRegistration } from "../windows/startup-manage.ts";
 import { createHostNotificationAdapter, type HostNotificationAdapter } from "../windows/notifications.ts";
@@ -58,6 +59,7 @@ export interface ProductionHost {
   lock: InstanceLock | null;
   lifecycle: LifecycleController;
   notifications: HostNotificationAdapter;
+  companion: LocalCompanionTransport;
   /** Set when the previous run ended without going through shutdown. */
   crashNote: CrashNote | null;
   /** What the health file said about the previous run, before this one overwrote it. */
@@ -183,6 +185,26 @@ export async function createProductionHost(options?: {
   });
 
   const gateway = createClientGateway(runtime);
+  const companion = new LocalCompanionTransport(gateway, {
+    enabled: runtime.config.companion.enabled,
+    dataDir: dirs.data,
+    socketPath: runtime.config.companion.socketPath,
+    tokenPath: runtime.config.companion.tokenPath,
+    maxConnections: runtime.config.companion.maxConnections,
+    maxRequestsPerMinute: runtime.config.companion.maxRequestsPerMinute,
+    idleTimeoutMs: runtime.config.companion.idleTimeoutMs,
+  });
+  const companionStatus = await companion.start().catch((error) => ({
+    enabled: runtime.config.companion.enabled,
+    running: false,
+    endpoint: null,
+    tokenPath: runtime.config.companion.tokenPath ?? null,
+    detail: error instanceof Error ? error.message : String(error),
+  }));
+  if (runtime.config.companion.enabled && !companionStatus.running) {
+    log.warn("client", "Local companion transport failed to start", { detail: companionStatus.detail });
+  }
+
   let heartbeatAt = new Date().toISOString();
 
   const healthPayload = (started: boolean, reason?: string) => ({
@@ -200,7 +222,9 @@ export async function createProductionHost(options?: {
     client: {
       protocol: gateway.hello().protocol,
       version: gateway.hello().version,
-      transport: "in-process",
+      transport: companionStatus.running ? "local-ipc" : "in-process",
+      endpoint: companionStatus.endpoint,
+      tokenPath: companionStatus.tokenPath,
       remoteOs: "UNAVAILABLE",
     },
   });
@@ -226,6 +250,7 @@ export async function createProductionHost(options?: {
     lock,
     lifecycle,
     notifications,
+    companion,
     crashNote,
     previousHealth,
     async writeHealth() {
@@ -347,6 +372,7 @@ export async function createProductionHost(options?: {
     },
   };
 
+  lifecycle.addHook({ name: "companion", run: () => companion.stop() });
   lifecycle.addHook({ name: "runtime", run: () => runtime.stop() });
   lifecycle.addHook({ name: "last-error", run: () => host.writeLastError() });
   lifecycle.addHook({ name: "heartbeat", run: () => clearInterval(beat) });

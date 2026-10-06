@@ -4,8 +4,8 @@ Vesper is one assistant, not three installations that happen to share a name. Th
 document describes how a desktop, a laptop, and a phone become that — and, just as
 importantly, which parts are built and which are not.
 
-Nothing here is a plan. Every mechanism described is implemented and tested unless the
-section says otherwise, and the sections that say otherwise say it plainly.
+Nothing here is a plan. Every mechanism described is implemented unless the section says otherwise;
+validation on the target machine and cross-device deployment are called out explicitly.
 
 ## Identity: a device is a key, not a name
 
@@ -168,14 +168,14 @@ class, not by protocol.
 
 Stated plainly rather than described in the present tense:
 
-- **No transport.** The gateway is in-process. There is no pairing flow, no listener, no
-  LAN TLS. Opening an inbound network listener on a personal machine is an
-  outward-facing security decision that belongs to the machine's owner, not to an agent
-  working unattended.
-- **Sync engine is not attached.** `SyncEngine`, conflict resolution, and sync filtering
-  are implemented and tested, but nothing calls them, because calling them requires the
-  transport above. Capability discovery reports `sync` as `NOT_CONFIGURED` for exactly
-  this reason, on every device, today.
+- **Local transport is built.** The gateway can now be served over a local Unix-domain socket
+  or Windows named pipe with bounded NDJSON, per-connection rate limits, a same-machine
+  session token, and no TCP/UDP listener. It never creates cross-device trust by itself.
+- **Cross-device transport/pairing is not built.** Mobile/laptop networking, pairing,
+  LAN TLS, and session-grant exchange remain a separate owner-controlled deployment feature.
+- **Sync engine is not attached to cross-device transport.** `SyncEngine`, conflict resolution,
+  and sync filtering are implemented and tested, but they still do not cross machine boundaries.
+  Local companion IPC is intentionally not treated as a multi-device sync channel.
 - **Session grants are not issued.** The signed, replay-guarded grant model for portable
   sessions exists and is tested; the companion path currently uses device-bound client
   sessions instead.

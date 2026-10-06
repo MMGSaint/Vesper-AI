@@ -411,6 +411,28 @@ export const vesperConfigSchema = z.object({
       timeoutMs: 10_000,
       servers: [],
     }),
+  companion: z
+    .object({
+      /** Same-machine companion IPC only. It never opens TCP/UDP. */
+      enabled: z.boolean().default(false),
+      socketPath: z.string().max(2048).optional().refine(
+        (value) => value === undefined || !/[\0\r\n]/.test(value),
+        "companion.socketPath contains unsupported control characters.",
+      ),
+      tokenPath: z.string().max(2048).optional().refine(
+        (value) => value === undefined || !/[\0\r\n]/.test(value),
+        "companion.tokenPath contains unsupported control characters.",
+      ),
+      maxConnections: z.number().int().min(1).max(16).default(4),
+      maxRequestsPerMinute: z.number().int().min(10).max(600).default(120),
+      idleTimeoutMs: z.number().int().min(10_000).max(600_000).default(120_000),
+    })
+    .default({
+      enabled: false,
+      maxConnections: 4,
+      maxRequestsPerMinute: 120,
+      idleTimeoutMs: 120_000,
+    }),
   agent: z
     .object({
       maxToolIterations: z.number().default(8),
