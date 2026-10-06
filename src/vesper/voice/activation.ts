@@ -94,6 +94,8 @@ export class VoiceActivationController {
   private sequence = 0;
   private pendingConfirmationId: string | null = null;
   private pendingConfirmationExpiresAt = 0;
+  private wakeWaiter: (() => void) | null = null;
+  private wakeFailure: ((error: Error) => void) | null = null;
 
   constructor(options: VoiceActivationOptions) {
     this.voice = options.voice;
@@ -126,6 +128,10 @@ export class VoiceActivationController {
 
   async stop(): Promise<void> {
     this.running = false;
+    this.wakeWaiter?.();
+    this.wakeWaiter = null;
+    this.wakeFailure?.(new Error("Voice activation stopped."));
+    this.wakeFailure = null;
     if (this.voice.wakeDetector) await this.voice.wakeDetector.stop().catch(() => undefined);
     if (this.loopPromise) {
       await this.loopPromise.catch(() => undefined);
@@ -142,22 +148,24 @@ export class VoiceActivationController {
       return;
     }
 
-    let wakeResolver: (() => void) | null = null;
     const waitForWake = () =>
-      new Promise<void>((resolve) => {
-        wakeResolver = resolve;
+      new Promise<void>((resolve, reject) => {
+        this.wakeWaiter = resolve;
+        this.wakeFailure = reject;
       });
 
     const started = detector.start(
       (detail) => {
         this.onEvent?.("wake", detail);
-        wakeResolver?.();
-        wakeResolver = null;
+        this.wakeWaiter?.();
+        this.wakeWaiter = null;
+        this.wakeFailure = null;
       },
       (detail) => {
         this.onEvent?.("error", detail);
-        wakeResolver?.();
-        wakeResolver = null;
+        this.wakeFailure?.(new Error(detail));
+        this.wakeFailure = null;
+        this.wakeWaiter = null;
       },
     );
 
@@ -174,7 +182,16 @@ export class VoiceActivationController {
           continue;
         }
 
-        await waitForWake();
+        try {
+          await waitForWake();
+        } catch (error) {
+          if (!this.running) break;
+          this.onEvent?.("error", error instanceof Error ? error.message : String(error));
+          await detector.stop().catch(() => undefined);
+          if (this.running) await this.run();
+          return;
+        }
+
         if (!this.running) break;
 
         const commandAudio = await audio.captureWav(this.commandSeconds);
@@ -218,6 +235,8 @@ export class VoiceActivationController {
         await sleep(this.cooldownMs);
       }
     } finally {
+      this.wakeWaiter = null;
+      this.wakeFailure = null;
       await detector.stop().catch(() => undefined);
     }
   }
