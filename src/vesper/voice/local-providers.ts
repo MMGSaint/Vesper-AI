@@ -81,6 +81,7 @@ export function createWhisperStt(
           ],
           timeoutMs: options.timeoutMs ?? 120_000,
           spawnImpl: options.spawnImpl,
+          signal,
         });
 
         if (!result.ok) {
@@ -130,7 +131,7 @@ export function createWhisperStt(
 export function createPiperTts(options: LocalBackendOptions & { speaker?: number }): TextToSpeech {
   return {
     id: options.binary,
-    async speak(text: string) {
+    async speak(text: string, signal?: AbortSignal) {
       const trimmed = text.trim();
       if (!trimmed) {
         return { available: false, detail: "No text was supplied to speak." };
