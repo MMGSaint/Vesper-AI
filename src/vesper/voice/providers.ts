@@ -103,8 +103,8 @@ export async function createVoiceModule(input: {
   const stt = sttBinary
     ? createWhisperStt({
         binary: sttBinary.path,
-        expectedSha256: sttBinary.sha256 || undefined,
-        requireAbsolutePath: !input.which,
+        ...(sttBinary.sha256 ? { expectedSha256: sttBinary.sha256 } : {}),
+        ...(input.which ? {} : { requireAbsolutePath: true }),
         model: input.sttModel ?? "base",
         language: input.sttLanguage,
         extraArgs: input.sttArgs,
@@ -118,8 +118,8 @@ export async function createVoiceModule(input: {
   const tts = ttsBinary
     ? createPiperTts({
         binary: ttsBinary.path,
-        expectedSha256: ttsBinary.sha256 || undefined,
-        requireAbsolutePath: !input.which,
+        ...(ttsBinary.sha256 ? { expectedSha256: ttsBinary.sha256 } : {}),
+        ...(input.which ? {} : { requireAbsolutePath: true }),
         model: input.ttsModel ?? "en_US-lessac-medium",
         extraArgs: input.ttsArgs,
         spawnImpl: input.spawnImpl,
