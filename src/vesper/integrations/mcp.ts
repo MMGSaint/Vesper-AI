@@ -59,6 +59,8 @@ export const MCP_PROTOCOL_VERSION = "2025-06-18";
 export const MAX_MCP_LINE_BYTES = 64 * 1024;
 export const MAX_MCP_TOOLS = 128;
 export const MAX_MCP_OUTPUT_BYTES = 256 * 1024;
+export const MAX_MCP_TOOL_PROPERTIES = 128;
+export const MAX_MCP_DESCRIPTION_CHARS = 2_000;
 
 /** Vesper's own tools always win a name collision. */
 export function namespacedToolName(serverId: string, toolName: string): string {
@@ -310,8 +312,10 @@ export function toToolSpec(
     properties?: Record<string, { type?: unknown; description?: unknown; enum?: unknown }>;
     required?: unknown;
   };
-  const properties: ToolSpec["parameters"]["properties"] = {};
+  const properties: ToolSpec["parameters"]["properties"] = Object.create(null) as ToolSpec["parameters"]["properties"];
+  let propertyCount = 0;
   for (const [key, value] of Object.entries(schema.properties ?? {})) {
+    if (propertyCount >= MAX_MCP_TOOL_PROPERTIES) break;
     // An MCP server is untrusted input, and `properties["__proto__"] = {...}` sets the
     // prototype of the map rather than adding a key — which made every undeclared
     // argument resolve as declared.
@@ -328,12 +332,17 @@ export function toToolSpec(
     }
     properties[key] = {
       type,
-      ...(typeof value.description === "string" ? { description: value.description } : {}),
-      ...(Array.isArray(value.enum) ? { enum: value.enum.map((item) => String(item)) } : {}),
+      ...(typeof value.description === "string"
+        ? { description: value.description.slice(0, MAX_MCP_DESCRIPTION_CHARS) }
+        : {}),
+      ...(Array.isArray(value.enum)
+        ? { enum: value.enum.slice(0, 64).map((item) => String(item).slice(0, 512)) }
+        : {}),
     };
+    propertyCount += 1;
   }
   const required = Array.isArray(schema.required)
-    ? schema.required.filter((item): item is string => typeof item === "string" && item in properties)
+    ? schema.required.filter((item): item is string => typeof item === "string" && Object.hasOwn(properties, item))
     : [];
 
   return {
