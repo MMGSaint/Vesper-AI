@@ -336,9 +336,9 @@ export class ToolRegistry {
           result: { ok: false, summary: reason, epistemic: "could_not_access" },
         };
       }
-      // Consume the capability before executing. This makes a confirmation a one-shot
-      // authorization token and closes replay races between separate callers.
-      this.confirmations.delete(confirmationId);
+      // The token is only *validated* here. Do not consume it until every downstream
+      // authorization check has passed; otherwise an unauthorized approval attempt could
+      // burn the owner's pending confirmation as a denial-of-service.
     }
 
     if (decision.requiresConfirmation && !input.confirmed) {
@@ -440,6 +440,13 @@ export class ToolRegistry {
           epistemic: "could_not_access",
         },
       };
+    }
+
+    if (decision.requiresConfirmation && input.confirmationId) {
+      // Consume immediately before the first await that can execute a side effect.
+      // JavaScript evaluates this synchronously, so concurrent callers cannot both
+      // observe and consume the same confirmation token.
+      this.confirmations.delete(input.confirmationId);
     }
 
     try {
