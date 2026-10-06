@@ -408,6 +408,7 @@ export class Agent {
         args: confirmation.args,
         workspaceId: confirmation.workspaceId,
         confirmed: true,
+        confirmationId: options.confirmId,
       });
       toolCalls.push(record);
       // Authorized and attempted, so it is spent — whether the tool then succeeded or
