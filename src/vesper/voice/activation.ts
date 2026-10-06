@@ -13,6 +13,11 @@
 
 import type { SpeechToText, VoiceModule } from "./types.ts";
 
+export interface VoiceCommandResult {
+  reply: string;
+  pendingConfirmationId?: string;
+}
+
 export interface VoiceActivationOptions {
   voice: VoiceModule;
   wakePhrase: string;
@@ -21,7 +26,11 @@ export interface VoiceActivationOptions {
   cooldownMs?: number;
   enabled?: boolean;
   shouldListen?: () => boolean;
-  onCommand: (text: string) => Promise<string>;
+  onCommand: (text: string) => Promise<VoiceCommandResult | string>;
+  onConfirm?: (
+    confirmationId: string,
+    approve: boolean,
+  ) => Promise<VoiceCommandResult | string>;
   onReply?: (text: string) => Promise<void>;
   onEvent?: (kind: "started" | "stopped" | "wake" | "error", detail: string) => void;
 }
@@ -83,6 +92,7 @@ export class VoiceActivationController {
   private running = false;
   private loopPromise: Promise<void> | null = null;
   private sequence = 0;
+  private pendingConfirmationId: string | null = null;
 
   constructor(options: VoiceActivationOptions) {
     this.voice = options.voice;
@@ -177,7 +187,21 @@ export class VoiceActivationController {
           continue;
         }
 
-        const reply = await this.onCommand(command);
+        let result: VoiceCommandResult | string;
+        const affirmative = /^(yes|yeah|yep|sure|approve|approved|do it|go ahead|confirm)$/i.test(command.trim());
+        const negative = /^(no|nope|cancel|deny|decline|don't|do not)$/i.test(command.trim());
+
+        if (this.pendingConfirmationId && (affirmative || negative) && this.onConfirm) {
+          result = await this.onConfirm(this.pendingConfirmationId, affirmative);
+          this.pendingConfirmationId =
+            typeof result === "string" ? null : (result.pendingConfirmationId ?? null);
+        } else {
+          result = await this.onCommand(command);
+          this.pendingConfirmationId =
+            typeof result === "string" ? null : (result.pendingConfirmationId ?? null);
+        }
+
+        const reply = typeof result === "string" ? result : result.reply;
         if (reply.trim() && this.onReply) {
           await this.onReply(reply);
         }
