@@ -50,6 +50,47 @@ export function pickInstalledModel(
   return chat[0].name;
 }
 
+export async function resolveCommandPath(
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<string | null> {
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) return null;
+  const cmd =
+    platform === "win32" && process.platform === "win32"
+      ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\where.exe`
+      : platform === "win32"
+        ? "where"
+        : "which";
+
+  return new Promise((resolve) => {
+    let output = "";
+    let child;
+    try {
+      child = spawn(cmd, [name], { shell: false, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    } catch {
+      resolve(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve(null);
+    }, 800);
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (output.length < 8192) output += chunk.toString("utf8");
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return resolve(null);
+      const first = output.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+      resolve(first ?? null);
+    });
+  });
+}
+
 export async function commandExists(
   name: string,
   platform: NodeJS.Platform = process.platform,
