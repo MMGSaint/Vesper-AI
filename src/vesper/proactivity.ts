@@ -11,6 +11,7 @@ export interface ProactiveObservation {
   readonly gpuVramUsedGB: number | null;
   readonly gpuVramTotalGB: number | null;
   readonly performanceState: string | null;
+  readonly telemetryFidelity: NonNullable<Awaited<ReturnType<OptimizerAdapter["getTelemetry"]>>["fidelity"]>;
 }
 
 export interface ProactiveIssue {
@@ -70,7 +71,7 @@ export class ProactivityEngine {
   }
 
   start(): void {
-    if (this.running) return;
+    if (!this.options.enabled || this.running) return;
     this.running = true;
     void this.tick();
   }
