@@ -269,7 +269,7 @@ export class VesperRuntime {
     await this.seedMemories();
     this.started = true;
     await this.background.start();
-    void this.mcp.start().then((status) => {
+    if (this.hostPosture === "owned") void this.mcp.start().then((status) => {
       this.log.info("integrations", "MCP bridge startup finished", {
         enabled: status.enabled,
         running: status.running,
@@ -280,12 +280,12 @@ export class VesperRuntime {
     // Voice activation is opt-in. When enabled, the capture loop is local-only until
     // a wake phrase is actually detected; the router then follows the normal model/cloud
     // policy for the resulting user command.
-    if (this.config.voice.enabled && this.config.voice.wakePhrase.enabled) {
+    if (this.hostPosture === "owned" && this.config.voice.enabled && this.config.voice.wakePhrase.enabled) {
       this.voiceActivation?.start();
     }
     // Sentinel is opt-in only through the existing daemon lifecycle; it never starts a microphone or capture session.
     this.proactivity.start();
-    if (this.config.agent.idleEventDriven) {
+    if (this.hostPosture === "owned" && this.config.agent.idleEventDriven) {
       this.scheduler.start();
     }
     this.events.emit({
@@ -954,7 +954,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     io: identityIo,
   });
   const deviceIdentity = loadedIdentity.identity;
-  const hostPosture: HostPosture = options.hostPosture ?? "owned";
+  const hostPosture: HostPosture = options.hostPosture ?? (process.env.VESPER_PORTABLE === "1" ? "foreign" : "owned");
   const devices = new DeviceRegistry({
     storage,
     revocations: options.revocationStorage,
@@ -1207,8 +1207,12 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   });
   const gate = createPermissionGate(config.permissions, log);
   const confirmations = new Map<string, PendingConfirmation>();
-  const tools = new ToolRegistry(gate, log, confirmations, async (id) =>
-    (await devices.get(id))?.trust ?? "unknown",
+  const tools = new ToolRegistry(
+    gate,
+    log,
+    confirmations,
+    async (id) => (await devices.get(id))?.trust ?? "unknown",
+    hostPosture,
   );
   const autonomy = new AutonomyGovernor({
     policy: defaultAutonomyPolicy(),

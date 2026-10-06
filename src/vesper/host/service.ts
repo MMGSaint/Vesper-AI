@@ -186,7 +186,7 @@ export async function createProductionHost(options?: {
 
   const gateway = createClientGateway(runtime);
   const companion = new LocalCompanionTransport(gateway, {
-    enabled: runtime.config.companion.enabled,
+    enabled: runtime.config.companion.enabled && runtime.hostPosture === "owned",
     dataDir: dirs.data,
     socketPath: runtime.config.companion.socketPath,
     tokenPath: runtime.config.companion.tokenPath,

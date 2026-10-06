@@ -2,10 +2,9 @@
 
 Vesper carried on removable media and run on a computer that is not the user's.
 
-This document is the trust model and the threat model. It is deliberately ahead of the
-deployment work: the interfaces, identity, capability model, auth model and session
-model exist and are tested; packaging and installation do not, and are not attempted
-here.
+This document is the trust model and the threat model. The portable launcher and the
+foreign-host execution ceiling are now implemented. Cross-device pairing/transport and
+Windows isolation remain separate deployment work.
 
 ## The two trust classes, stated first
 
@@ -131,10 +130,21 @@ execution on that host.
 
 ## Not built
 
-- Packaging for removable media, and the launcher that would start it.
-- Windows isolation (AppContainer, Windows Sandbox, MSIX) — researched as an option, not
-  implemented, and not claimed.
-- Any deployment or installation flow.
+- Windows isolation (AppContainer, Windows Sandbox, MSIX) remains unimplemented; the
+  portable launcher instead provides a process-level foreign-host posture.
+- Cross-device pairing/transport and a mobile client remain unimplemented.
 
 Per the add-on brief, the interfaces, trust model, identity, capability model, auth
 model, portable session model, tests, and this document come first; deployment follows.
+
+## Portable launcher
+
+Use `packaging/windows/portable.ps1` or the double-click `packaging/windows/portable.cmd`.
+The launcher sets `VESPER_PORTABLE=1` and stores Vesper data under the removable
+volume's `data\\` directory. The runtime derives `foreign` host posture from that marker.
+
+Foreign posture is enforced at runtime: filesystem/process/app/optimizer/audio/OBS host
+control, private memory/history, trust administration, workspace mutation, scheduled-task
+execution, startup registration, companion IPC, and continuous wake activation are refused.
+The normal local conversation/knowledge/task-creation path can still run from the portable
+volume.

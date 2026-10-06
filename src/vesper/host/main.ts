@@ -186,6 +186,10 @@ async function main() {
     command.kind === "enable-startup" ||
     command.kind === "disable-startup"
   ) {
+    if (process.env.VESPER_PORTABLE === "1") {
+      console.error("Portable Vesper never registers Windows startup or persistence on the host.");
+      process.exit(2);
+    }
     const exit = await handleStartupCommand(command.kind, dirs);
     await flushStdio();
     process.exit(exit);
@@ -385,9 +389,12 @@ async function main() {
       JSON.stringify(
         {
           ...host.gateway.hello(),
-          transport: "in-process",
+          transport: host.companion.status().running ? "local-ipc" : "in-process",
+          endpoint: host.companion.status().endpoint,
           forbidden: host.gateway.forbiddenPowers(),
-          note: "No network listener. Tokens are issued by the host, not by this command.",
+          note: host.companion.status().running
+            ? "Local named-pipe/Unix-socket companion transport is enabled; no TCP/UDP listener exists."
+            : "No network listener. Local companion transport is disabled.",
         },
         null,
         2,
