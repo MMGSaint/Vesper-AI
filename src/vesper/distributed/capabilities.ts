@@ -27,6 +27,8 @@ export const CAPABILITIES = [
   "embeddings",
   "voice_stt",
   "voice_tts",
+  "voice_audio",
+  "voice_wake",
   "notifications",
   "sync",
   "presence",
@@ -105,7 +107,7 @@ export function isGranted(trust: TrustState, capability: Capability): boolean {
  * Capabilities that must never be reachable from any remote device, at any trust class.
  * These mirror `FORBIDDEN_REMOTE_POWERS`: OS authority stays on the host that owns it.
  */
-export const NEVER_REMOTE: readonly Capability[] = ["filesystem", "windows_control"];
+export const NEVER_REMOTE: readonly Capability[] = ["filesystem", "windows_control", "voice_audio", "voice_wake"];
 
 export interface RemoteRequestDecision {
   allowed: boolean;
