@@ -122,6 +122,7 @@ function specificPreview(
         sideEffects: [
           "the configured adapter decides what work occurs; mock adapters do not change live hardware",
           "a live NEXUS adapter may change reversible system settings within its own safety policy",
+          "NEXUS does not modify AMD Adrenalin per-game profiles or driver-level tuning; those settings remain outside Vesper/NEXUS control",
         ],
         reversibility: "unknown",
         rollbackHint: "optimizer rollback belongs to NEXUS, not Vesper's filesystem checkpoint",
