@@ -304,13 +304,34 @@ export const vesperConfigSchema = z.object({
       wakePhrase: z.object({
         /** Off by default: enabling continuously samples the selected microphone. */
         enabled: z.boolean().default(false),
+        backend: z.enum(["stt", "openwakeword"]).default("stt"),
         phrase: z.string().min(1).max(64).default("hey vesper"),
+        /** Required when backend=openwakeword. Vesper never downloads a model automatically. */
+        modelPath: z.string().max(1024).optional(),
+        threshold: z.number().min(0.05).max(0.99).default(0.5),
         detectionSeconds: z.number().min(1).max(6).default(2),
         commandSeconds: z.number().min(1).max(30).default(8),
         cooldownMs: z.number().min(250).max(60_000).default(1500),
+      }).superRefine((wake, ctx) => {
+        if (wake.backend === "openwakeword" && !wake.modelPath) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["modelPath"],
+            message: "wakePhrase.modelPath is required when wakePhrase.backend is openwakeword.",
+          });
+        }
+        if (wake.modelPath && /[\0\r\n]/.test(wake.modelPath)) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["modelPath"],
+            message: "wakePhrase.modelPath contains unsupported control characters.",
+          });
+        }
       }).default({
         enabled: false,
+        backend: "stt",
         phrase: "hey vesper",
+        threshold: 0.5,
         detectionSeconds: 2,
         commandSeconds: 8,
         cooldownMs: 1500,
@@ -359,7 +380,7 @@ export const vesperConfigSchema = z.object({
     .default({ enableTray: true, startOnLogin: false, nativeNotifications: true }),
   mcp: z
     .object({
-      /** Off by default. Enabling starts only the explicitly configured local MCP processes. */
+      /** Off by default. Enabling starts only explicitly configured MCP processes. */
       enabled: z.boolean().default(false),
       timeoutMs: z.number().int().min(250).max(60_000).default(10_000),
       servers: z.array(
