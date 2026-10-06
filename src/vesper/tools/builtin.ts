@@ -35,6 +35,7 @@ import { collectDecisions, formatDecisions } from "../decisions.ts";
 import { mcpBridgeStatus } from "../integrations/mcp.ts";
 import { detectApprovedApps } from "../windows/apps.ts";
 import { classifyDeviceIntent, resolveTarget } from "../distributed/intent.ts";
+import { listAudioSessions, getAudioSession, setAudioVolume, setAudioMute } from "../host/audio-helper.ts";
 
 function str(args: JsonObject, key: string): string {
   const value = args[key];
@@ -117,6 +118,73 @@ export function registerBuiltinTools(input: {
     benchmark,
     getDiagnostics,
   } = input;
+
+  registry.register(
+    spec("audio_list_sessions", "List active per-application Windows audio sessions and their current volume.", "read", {}),
+    async () => {
+      try {
+        const sessions = await listAudioSessions();
+        return { ok: true, epistemic: "checked", summary: sessions.length + " active application audio sessions.", data: sessions as unknown as JsonObject };
+      } catch (error) {
+        return { ok: false, epistemic: "could_not_access", summary: "Audio session inspection is unavailable: " + (error instanceof Error ? error.message : String(error)) };
+      }
+    },
+  );
+
+  registry.register(
+    spec("audio_get_session", "Read one application's Windows audio session by PID.", "read",
+      { pid: { type: "number", description: "Windows process ID" } }, ["pid"]),
+    async (args) => {
+      const pid = Number(args.pid);
+      if (!Number.isInteger(pid) || pid <= 0) return { ok: false, epistemic: "could_not_access", summary: "PID must be a positive integer." };
+      try {
+        const session = await getAudioSession(pid);
+        return { ok: true, epistemic: "checked", summary: session.processName + " is at " + Math.round(session.volume * 100) + "% volume.", data: session as unknown as JsonObject };
+      } catch (error) {
+        return { ok: false, epistemic: "could_not_access", summary: "Audio session lookup failed: " + (error instanceof Error ? error.message : String(error)) };
+      }
+    },
+  );
+
+  registry.register(
+    spec("audio_set_volume", "Set one application's Windows mixer volume without changing the system master volume.", "safe", {
+      pid: { type: "number", description: "Windows process ID; use an observed audio session PID" },
+      volume: { type: "number", description: "Target volume from 0.0 to 1.0" },
+    }, ["pid", "volume"]),
+    async (args) => {
+      const pid = Number(args.pid);
+      const volume = Number(args.volume);
+      if (!Number.isInteger(pid) || pid <= 0 || !Number.isFinite(volume) || volume < 0 || volume > 1) {
+        return { ok: false, epistemic: "could_not_access", summary: "PID must be positive and volume must be between 0 and 1." };
+      }
+      try {
+        const result = await setAudioVolume(pid, volume);
+        const processName = typeof result.processName === "string" ? result.processName : "application";
+        return { ok: true, epistemic: "changed", summary: "Set " + processName + " to " + Math.round(volume * 100) + "% and verified the Windows session volume.", data: result as JsonObject };
+      } catch (error) {
+        return { ok: false, epistemic: "could_not_access", summary: "Audio volume change failed: " + (error instanceof Error ? error.message : String(error)) };
+      }
+    },
+  );
+
+  registry.register(
+    spec("audio_set_mute", "Mute or unmute one application's Windows mixer session without changing other applications.", "safe", {
+      pid: { type: "number", description: "Windows process ID; use an observed audio session PID" },
+      muted: { type: "boolean", description: "Whether the application should be muted" },
+    }, ["pid", "muted"]),
+    async (args) => {
+      const pid = Number(args.pid);
+      const muted = args.muted === true;
+      if (!Number.isInteger(pid) || pid <= 0) return { ok: false, epistemic: "could_not_access", summary: "PID must be a positive integer." };
+      try {
+        const result = await setAudioMute(pid, muted);
+        const processName = typeof result.processName === "string" ? result.processName : "application";
+        return { ok: true, epistemic: "changed", summary: (muted ? "Muted " : "Unmuted ") + processName + " and verified the Windows session state.", data: result as JsonObject };
+      } catch (error) {
+        return { ok: false, epistemic: "could_not_access", summary: "Audio mute change failed: " + (error instanceof Error ? error.message : String(error)) };
+      }
+    },
+  );
 
   registry.register(
     spec("system_info", "Read the current hardware snapshot.", "read", {}),
