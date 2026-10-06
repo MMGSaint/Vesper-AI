@@ -84,6 +84,13 @@ export function registerBuiltinTools(input: {
   models?: ModelRouter;
   scheduler?: IdleScheduler;
   benchmark?: BenchmarkHarness;
+  mcpStatus?: () => {
+    enabled: boolean;
+    running: string[];
+    configured: string[];
+    tools: string[];
+    failures: string[];
+  };
   getDiagnostics?: () => Promise<DiagnosticReport>;
   checkpointStore?: CheckpointStore;
   /** Optional like checkpointStore: a runtime without one keeps the previous behaviour. */
@@ -116,6 +123,7 @@ export function registerBuiltinTools(input: {
     models,
     scheduler,
     benchmark,
+    mcpStatus,
     getDiagnostics,
   } = input;
 
@@ -1088,13 +1096,31 @@ export function registerBuiltinTools(input: {
   registry.register(
     spec("mcp_status", "Read optional MCP bridge status. MCP is never required at runtime.", "read", {}),
     async () => {
-      // No config surface exists to attach a server, so this is not a user setting.
-      const status = mcpBridgeStatus({ enabled: false, configurable: false });
+      const live = mcpStatus?.() ?? {
+        enabled: false,
+        running: [],
+        configured: [],
+        tools: [],
+        failures: [],
+      };
+      const summary = mcpBridgeStatus({
+        enabled: live.enabled,
+        servers: live.running,
+        configurable: true,
+      });
       return {
         ok: true,
         epistemic: "checked",
-        summary: status.detail,
-        data: status as unknown as JsonObject,
+        summary:
+          summary.detail +
+          (live.failures.length ? " Failures: " + live.failures.join("; ") : ""),
+        data: {
+          ...summary,
+          configured: live.configured,
+          running: live.running,
+          tools: live.tools,
+          failures: live.failures,
+        } as unknown as JsonObject,
       };
     },
   );
