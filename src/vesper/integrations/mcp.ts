@@ -71,13 +71,22 @@ function defaultTransport(server: McpServerConfig): McpTransport {
   let buffer = "";
   let lineHandler: (line: string) => void = () => {};
 
+  const MAX_LINE_CHARS = 256 * 1024;
   child.stdout?.setEncoding("utf8");
   child.stdout?.on("data", (chunk: string) => {
     buffer += chunk;
+    if (buffer.length > MAX_LINE_CHARS * 2 && buffer.indexOf("\n") < 0) {
+      buffer = "";
+      return;
+    }
     let newline = buffer.indexOf("\n");
     while (newline >= 0) {
       const line = buffer.slice(0, newline).trim();
       buffer = buffer.slice(newline + 1);
+      if (line.length > MAX_LINE_CHARS) {
+        newline = buffer.indexOf("\n");
+        continue;
+      }
       if (line) lineHandler(line);
       newline = buffer.indexOf("\n");
     }
@@ -252,7 +261,8 @@ export function createMcpClient(options: {
           })
           .filter(Boolean)
           .join("\n")
-          .trim();
+          .trim()
+          .slice(0, 256 * 1024);
         // `isError` is the server reporting a tool-level failure, not a transport fault.
         const ok = result.isError !== true;
         return { ok, text: text || (ok ? "The tool returned no text." : "The tool reported an error.") };
