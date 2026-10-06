@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import path from "node:path";
+import { runProcess } from "../voice/process.ts";
 
 export interface AudioSession {
   readonly pid: number;
@@ -15,35 +16,44 @@ interface HelperResponse {
   readonly error?: string;
 }
 
-function helperPath(): string {
-  const value = process.env.VESPER_AUDIO_HELPER;
-  if (!value) throw new Error("VESPER_AUDIO_HELPER is not configured.");
-  return value;
+function helperConfig(): { path: string; sha256: string } {
+  const helper = process.env.VESPER_AUDIO_HELPER?.trim();
+  const sha256 = process.env.VESPER_AUDIO_HELPER_SHA256?.trim();
+  if (!helper) throw new Error("VESPER_AUDIO_HELPER is not configured.");
+  if (!path.isAbsolute(helper)) throw new Error("VESPER_AUDIO_HELPER must be an absolute executable path.");
+  if (!sha256 || !/^[a-fA-F0-9]{64}$/.test(sha256)) {
+    throw new Error("VESPER_AUDIO_HELPER_SHA256 must be a SHA-256 trust pin.");
+  }
+  return { path: helper, sha256 };
 }
 
 async function callHelper(request: Record<string, unknown>): Promise<unknown> {
-  const child = spawn(helperPath(), [], { shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
-  const stdout: Buffer[] = [];
-  const stderr: Buffer[] = [];
-  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-  child.stdin.write(JSON.stringify(request) + "\n");
-  child.stdin.end();
-
-  const response = await new Promise<string>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code) => {
-      if (code !== 0 && stdout.length === 0) {
-        reject(new Error(Buffer.concat(stderr).toString("utf8") || "audio helper exited with code " + code));
-        return;
-      }
-      resolve(Buffer.concat(stdout).toString("utf8").trim().split(/\r?\n/)[0] ?? "");
-    });
+  const helper = helperConfig();
+  const result = await runProcess({
+    command: helper.path,
+    args: [],
+    stdin: JSON.stringify(request) + "\n",
+    timeoutMs: 5_000,
+    maxOutputBytes: 1024 * 1024,
+    requireAbsolutePath: true,
+    expectedSha256: helper.sha256,
   });
 
+  if (!result.ok) {
+    throw new Error(
+      result.error ??
+        result.stderr.slice(0, 400) ??
+        "Audio helper failed.",
+    );
+  }
+
+  const response = result.stdout.toString("utf8").trim().split(/\r?\n/)[0] ?? "";
   let parsed: HelperResponse;
-  try { parsed = JSON.parse(response) as HelperResponse; }
-  catch { throw new Error("Audio helper returned invalid JSON."); }
+  try {
+    parsed = JSON.parse(response) as HelperResponse;
+  } catch {
+    throw new Error("Audio helper returned invalid JSON.");
+  }
   if (!parsed.ok) throw new Error(parsed.error ?? "Audio helper refused the request.");
   return parsed.result;
 }
