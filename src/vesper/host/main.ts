@@ -505,3 +505,32 @@ async function runBackground(host: ProductionHost, shutdown: (code?: number, rea
 /**
  * Run main() only when this module IS the program, not when it is imported.
  *
+ * The previous check compared `process.argv[1]` against a POSIX-shaped suffix:
+ * `entry.endsWith("host/main.ts")`. On Windows argv[1] is
+ * `D:\a\Vesper-AI\src\vesper\host\main.ts` — backslashes — so the suffix never
+ * matched, `main()` never ran, and the process exited 0 having printed nothing.
+ * Every child-process test in ask.test.ts saw `exit=0 stdout="" stderr=""` and the
+ * windows-latest CI job failed on every commit of this branch for a month, while
+ * ubuntu-latest stayed green because the forward-slash form matched there.
+ *
+ * That is also the real user-facing bug: `vesper --ask "..."` on Windows — the one
+ * OS Vesper targets — did nothing at all and reported success.
+ *
+ * Compare resolved paths instead of string suffixes. `fileURLToPath` and `resolve`
+ * both yield the platform's native separators, so the two sides are directly
+ * comparable on Windows and POSIX alike. The basename check keeps the packaged
+ * `vesper-host.mjs` entry point working.
+ */
+const entryArg = process.argv[1];
+if (entryArg) {
+  const thisFile = fileURLToPath(import.meta.url);
+  const invoked = resolve(entryArg);
+  // Windows filesystems are case-insensitive, so a launcher that spells the path
+  // with different casing is still this file.
+  const sameFile =
+    invoked === thisFile ||
+    (process.platform === "win32" && invoked.toLowerCase() === thisFile.toLowerCase());
+  if (sameFile || basename(invoked) === "vesper-host.mjs") {
+    void main();
+  }
+}
