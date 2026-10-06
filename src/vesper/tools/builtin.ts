@@ -765,6 +765,58 @@ export function registerBuiltinTools(input: {
   );
 
   registry.register(
+    spec(
+      "optimizer_run_experiment",
+      "Run a bounded, user-confirmed per-game NEXUS tuner experiment using the private X3D EPP/boost search space. Every candidate is measured and rolled back before the next; only a credible final winner is kept.",
+      "confirm",
+      {
+        applicationId: { type: "string", description: "Known application id such as squad, cyberpunk-2077, helldivers-2, or vrchat" },
+        repetitions: { type: "number", description: "Repeated trials per candidate (2..4)" },
+        maxCandidates: { type: "number", description: "Maximum candidate combinations to test (2..8)" },
+        practicalThresholdPercent: { type: "number", description: "Minimum practical frame-performance improvement percent (0.1..10)" },
+      },
+      ["applicationId"],
+    ),
+    async (args) => {
+      const applicationId = str(args, "applicationId").trim().toLowerCase();
+      const repetitions = typeof args.repetitions === "number" ? Math.max(2, Math.min(4, Math.floor(args.repetitions))) : undefined;
+      const maxCandidates = typeof args.maxCandidates === "number" ? Math.max(2, Math.min(8, Math.floor(args.maxCandidates))) : undefined;
+      const practicalThresholdPercent =
+        typeof args.practicalThresholdPercent === "number"
+          ? Math.max(0.1, Math.min(10, args.practicalThresholdPercent))
+          : undefined;
+
+      if (!/^[a-z0-9._-]{1,63}$/.test(applicationId)) {
+        return { ok: false, epistemic: "could_not_access", summary: "applicationId must use letters, numbers, dots, underscores, or hyphens." };
+      }
+      if (!optimizer.requestExperiment) {
+        return { ok: false, epistemic: "could_not_access", summary: "This optimizer does not expose the bounded experiment service." };
+      }
+
+      try {
+        const result = await optimizer.requestExperiment({
+          applicationId,
+          ...(repetitions === undefined ? {} : { repetitions }),
+          ...(maxCandidates === undefined ? {} : { maxCandidates }),
+          ...(practicalThresholdPercent === undefined ? {} : { practicalThresholdPercent }),
+        });
+        return {
+          ok: result.accepted,
+          epistemic: result.accepted ? "changed" : "could_not_access",
+          summary: result.summary,
+          ...(result.data === undefined ? {} : { data: result.data }),
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          epistemic: "could_not_access",
+          summary: "NEXUS tuner experiment failed: " + (error instanceof Error ? error.message : String(error)),
+        };
+      }
+    },
+  );
+
+  registry.register(
     spec("optimizer_status", "Query the PC optimizer adapter.", "read", {}),
     async () => {
       const status = await optimizer.getStatus();
