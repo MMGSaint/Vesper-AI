@@ -727,7 +727,7 @@ export function registerBuiltinTools(input: {
   registry.register(
     spec(
       "optimizer_request",
-      "Request an optimization or rollback through the adapter.",
+      "Request an optimization or rollback through the NEXUS adapter. NEXUS only controls settings exposed by its safety kernel; AMD Adrenalin per-game profiles and driver-level tuning are outside this tool.",
       "confirm",
       {
         action: { type: "string", enum: ["optimize", "rollback"] },

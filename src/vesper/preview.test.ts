@@ -25,7 +25,7 @@ describe("action previews", () => {
     assert.equal(preview.executed, false);
     assert.equal(preview.reversibility, "reversible");
     assert.equal(preview.affected[0], "notes/example.txt");
-    assert.match(preview.sideEffects[0] ?? "", /character\\(s\\) of content/);
+    assert.match(preview.sideEffects[0] ?? "", /character\(s\) of content/);
     assert.doesNotMatch(formatPreview(preview), /super-secret/);
   });
 
@@ -57,6 +57,17 @@ describe("action previews", () => {
       : undefined;
     assert.equal(pending?.preview?.toolName, "app_close");
     assert.match(formatPreview(pending!.preview!), /Close a running approved application/);
+  });
+
+  it("keeps AMD Adrenalin driver settings outside the optimizer boundary", () => {
+    const optimizerDecision = { ...decision, toolName: "optimizer_request" };
+    const preview = previewAction({
+      toolName: "optimizer_request",
+      args: { action: "optimize", profile: "gaming" },
+      decision: optimizerDecision,
+    });
+    assert.match(formatPreview(preview), /does not modify AMD Adrenalin/);
+    assert.match(formatPreview(preview), /driver-level tuning/);
   });
 
   it("never turns a preview into an authorization", async () => {
