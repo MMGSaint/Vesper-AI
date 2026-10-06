@@ -190,7 +190,7 @@ export class ProactivityEngine {
 
     if (!liveTelemetry) {
       for (const id of ['gpu-hot', 'vram-pressure', 'cpu-pressure', 'gpu-bound']) {
-        this.clear(id, false);
+        clear(id, false);
       }
     }
 
