@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import readline from "node:readline";
 
+import { commandExists, type WhichFn } from "../models/backends.ts";
+
 
 export interface WakeWordDetectorStatus {
   available: boolean;
@@ -36,6 +38,16 @@ export interface OpenWakeWordOptions {
   deviceName?: string;
   pythonCommand?: string | null;
   spawnImpl?: typeof nodeSpawn;
+}
+
+export async function findPythonCommand(
+  which: WhichFn = (name) => commandExists(name, process.platform),
+  candidates: readonly string[] = ["python", "py"],
+): Promise<string | null> {
+  for (const candidate of candidates) {
+    if (await which(candidate).catch(() => false)) return candidate;
+  }
+  return null;
 }
 
 interface WorkerMessage {
