@@ -1,3 +1,5 @@
+import type { VoiceAudioIo } from "./audio.ts";
+
 export interface SpeechToText {
   id: string;
   transcribe(audio: Uint8Array): Promise<{ text: string; available: boolean; detail: string }>;
@@ -5,16 +7,29 @@ export interface SpeechToText {
 
 export interface TextToSpeech {
   id: string;
-  speak(text: string): Promise<{ audio?: Uint8Array; available: boolean; detail: string }>;
+  speak(text: string, signal?: AbortSignal): Promise<{ audio?: Uint8Array; available: boolean; detail: string }>;
 }
 
 export interface VoiceModule {
   enabled: boolean;
   stt: SpeechToText;
   tts: TextToSpeech;
+  audio: VoiceAudioIo | null;
   pushToTalkBound: boolean;
+  captureSeconds: number;
+  speakResponses: boolean;
   available(): boolean;
-  status(): { enabled: boolean; stt: string; tts: string; available: boolean; pushToTalk: boolean; detail: string };
+  audioAvailable(): boolean;
+  status(): {
+    enabled: boolean;
+    stt: string;
+    tts: string;
+    available: boolean;
+    audioAvailable: boolean;
+    pushToTalk: boolean;
+    speakResponses: boolean;
+    detail: string;
+  };
 }
 
 export function createDisabledVoice(): VoiceModule {
@@ -36,15 +51,21 @@ export function createDisabledVoice(): VoiceModule {
   return {
     enabled: false,
     pushToTalkBound: false,
+    captureSeconds: 6,
+    speakResponses: true,
     stt,
     tts,
+    audio: null,
     available: () => false,
+    audioAvailable: () => false,
     status: () => ({
       enabled: false,
       stt: "none",
       tts: "none",
       available: false,
+      audioAvailable: false,
       pushToTalk: false,
+      speakResponses: true,
       detail: "Voice is optional and currently disabled.",
     }),
   };
