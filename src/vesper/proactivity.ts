@@ -20,7 +20,8 @@ export interface ProactiveIssue {
   readonly title: string;
   readonly body: string;
   readonly cooldownKey: string;
-  readonly autoAction: 'none' | 'safe';
+  /** Sentinel is observation-only. A future action must be designed and gated separately. */
+  readonly autoAction: 'none';
 }
 
 export interface ProactivityOptions {
@@ -33,6 +34,8 @@ export interface ProactivityOptions {
   readonly maxAlertsPerWindow: number;
   /** Rolling rate-limit window for visible Sentinel alerts. */
   readonly rateLimitWindowMs: number;
+  /** Explicit opt-in required before Sentinel may create its background loop. */
+  readonly enabled: boolean;
   readonly now?: () => number;
 }
 
@@ -42,6 +45,7 @@ const DEFAULTS: ProactivityOptions = {
   cooldownMs: 120_000,
   maxAlertsPerWindow: 6,
   rateLimitWindowMs: 3_600_000,
+  enabled: false,
 };
 
 export class ProactivityEngine {
@@ -95,6 +99,7 @@ export class ProactivityEngine {
       gpuVramUsedGB: finiteOrNull(hardware.gpu?.vramUsedGB ?? null),
       gpuVramTotalGB: finiteOrNull(hardware.gpu?.vramGB ?? null),
       performanceState: telemetry.bound ?? null,
+      telemetryFidelity: telemetry.fidelity,
     };
 
     const issues = this.evaluate(observation);
@@ -126,6 +131,7 @@ export class ProactivityEngine {
   evaluate(observation: ProactiveObservation): ProactiveIssue[] {
     const issues: ProactiveIssue[] = [];
     const now = observation.capturedAtMs;
+    const liveTelemetry = observation.optimizerAvailable && observation.telemetryFidelity === 'live';
     this.alertHistory = this.alertHistory.filter(
       (at) => now - at < this.options.rateLimitWindowMs,
     );
@@ -182,7 +188,13 @@ export class ProactivityEngine {
       );
     }
 
-    const gpuHot = observation.gpuTemperatureC !== null && observation.gpuTemperatureC >= 88;
+    if (!liveTelemetry) {
+      for (const id of ['gpu-hot', 'vram-pressure', 'cpu-pressure', 'gpu-bound']) {
+        this.clear(id, false);
+      }
+    }
+
+    const gpuHot = liveTelemetry && observation.gpuTemperatureC !== null && observation.gpuTemperatureC >= 88;
     clear('gpu-hot', gpuHot);
     if (gpuHot) {
       add(
@@ -194,6 +206,7 @@ export class ProactivityEngine {
     }
 
     const vramPressure =
+      liveTelemetry &&
       observation.gpuVramUsedGB !== null &&
       observation.gpuVramTotalGB !== null &&
       observation.gpuVramTotalGB > 0 &&
@@ -210,7 +223,7 @@ export class ProactivityEngine {
 
     const cpu = observation.cpuUtilizationPct ?? 0;
     const gpu = observation.gpuUtilizationPct ?? 0;
-    const cpuPressure = cpu >= 95 && gpu < 80;
+    const cpuPressure = liveTelemetry && cpu >= 95 && gpu < 80;
     clear('cpu-pressure', cpuPressure);
     if (cpuPressure) {
       add(
@@ -221,7 +234,7 @@ export class ProactivityEngine {
       );
     }
 
-    const gpuBound = gpu >= 98 && observation.performanceState === 'gpu';
+    const gpuBound = liveTelemetry && gpu >= 98 && observation.performanceState === 'gpu';
     clear('gpu-bound', gpuBound);
     if (gpuBound) {
       add(
