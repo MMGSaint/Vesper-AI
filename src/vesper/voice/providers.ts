@@ -68,6 +68,10 @@ export async function createVoiceModule(input: {
   sttLanguage?: string;
   sttArgs?: string[];
   ttsArgs?: string[];
+  audioBackend?: "ffmpeg" | "none";
+  audioInputDevice?: string;
+  captureSeconds?: number;
+  speakResponses?: boolean;
   spawnImpl?: typeof nodeSpawn;
 }): Promise<VoiceModule> {
   if (!input.enabled) return createDisabledVoice();
@@ -121,25 +125,51 @@ export async function createVoiceModule(input: {
         `${input.tts} is not installed on this host. Voice remains optional.`,
       );
 
-  // "Available" means Vesper can convert between text and audio buffers. It never
-  // means an audio device was opened: capture and playback stay hardware-dependent.
   const available = Boolean(sttBinary || ttsBinary);
+  const audio =
+    input.audioBackend === "none"
+      ? null
+      : createFfmpegAudioIo({
+          platform: input.platform,
+          selectedDevice: input.audioInputDevice,
+          spawnImpl: input.spawnImpl,
+        });
+
+  let audioStatus = audio
+    ? await audio.listInputDevices().catch(() => ({
+        available: false,
+        devices: [],
+        detail: "Audio device discovery failed.",
+      }))
+    : { available: false, devices: [], detail: "Physical audio is disabled." };
+
   const detail = available
-    ? `Local voice backends found (stt: ${sttBinary ?? "none"}, tts: ${ttsBinary ?? "none"}). Vesper can convert audio buffers to and from text. Microphone capture and speaker playback are not performed here and still require validation on the target PC.`
-    : "No local STT/TTS binary was found. Voice stays disabled for runtime audio.";
+    ? "Local voice conversion backends found (stt: " +
+      (sttBinary ?? "none") +
+      ", tts: " +
+      (ttsBinary ?? "none") +
+      "). Physical audio is " +
+      (audioStatus.available ? "ready for target-PC validation." : "not ready yet.") 
+    : "No local STT/TTS binary was found. Voice stays on text until one is installed.";
 
   return {
     enabled: input.enabled,
     pushToTalkBound: Boolean(input.pushToTalk),
+    captureSeconds: Math.max(1, Math.min(30, Math.round(input.captureSeconds ?? 6))),
+    speakResponses: input.speakResponses !== false,
     stt,
     tts,
+    audio,
     available: () => available,
+    audioAvailable: () => Boolean(audio?.status().available || audioStatus.available),
     status: () => ({
       enabled: input.enabled,
       stt: stt.id,
       tts: tts.id,
       available,
+      audioAvailable: Boolean(audio?.status().available || audioStatus.available),
       pushToTalk: Boolean(input.pushToTalk),
+      speakResponses: input.speakResponses !== false,
       detail,
     }),
   };
