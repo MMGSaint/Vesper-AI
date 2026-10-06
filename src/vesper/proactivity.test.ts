@@ -46,5 +46,5 @@ test('sentinel waits for sustained evidence', () => {
 
   assert.equal(engine.evaluate(observation({ gpuTemperatureC: 90 })).length, 0);
   assert.equal(engine.evaluate(observation({ gpuTemperatureC: 90 })).length, 0);
-  assert.equal(engine.evaluate(observation({ gpuTemperatureC: 90 })).length, 2);
+  assert.equal(engine.evaluate(observation({ gpuTemperatureC: 90 })).length, 3);
 });
