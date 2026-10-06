@@ -21,7 +21,7 @@ A TypeScript assistant runtime with:
 - a NEXUS PC-optimizer adapter using a local named-pipe / Unix-socket NDJSON boundary; mocked optimizer behavior remains explicitly simulated in tests
 - Windows host/tray architecture and packaging scripts
 - gaming / VRChat / OBS context with observed vs inferred conclusions
-- local voice input/output via FFmpeg + DirectShow, local STT/TTS, one-shot voice turns, and opt-in "Hey Vesper" wake-phrase activation
+- local voice input/output via FFmpeg + DirectShow, local STT/TTS, one-shot voice turns, opt-in "Hey Vesper" wake-phrase activation, and optional openWakeWord low-power detection
 - a simulated host for the target machine (Ryzen 9 9950X3D, RX 7900 XT 20 GB, 96 GB RAM)
 - a versioned companion contract (`vesper.client` v1) with scoped sessions and honest capability states
 

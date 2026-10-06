@@ -25,6 +25,7 @@ const outDir = resolve(root, outFlag >= 0 ? (process.argv[outFlag + 1] ?? "dist"
 /** Everything the runtime needs on the target machine, and nothing else. */
 const INCLUDE = [
   "src/vesper/**/*.ts",
+  "src/vesper/voice/*.py",
   "packaging/windows/*",
   "knowledge/**/*.md",
   "package.json",

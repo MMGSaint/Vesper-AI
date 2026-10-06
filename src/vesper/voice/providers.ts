@@ -4,6 +4,7 @@ import { commandExists, type WhichFn } from "../models/backends.ts";
 import type { spawn as nodeSpawn } from "node:child_process";
 import { createPiperTts, createWhisperStt } from "./local-providers.ts";
 import { createFfmpegAudioIo, type VoiceAudioIo } from "./audio.ts";
+import { createOpenWakeWordDetector, findPythonCommand } from "./openwakeword.ts";
 
 export function createUnavailableStt(id: string, detail: string): SpeechToText {
   return {
@@ -76,6 +77,7 @@ export function createSimulatedVoice(): VoiceModule {
     stt,
     tts,
     audio,
+    wakeDetector: null,
     available: () => true,
     audioAvailable: () => true,
     status: () => ({
@@ -107,6 +109,10 @@ export async function createVoiceModule(input: {
   audioInputDevice?: string;
   captureSeconds?: number;
   speakResponses?: boolean;
+  wakeBackend?: "stt" | "openwakeword";
+  wakeModelPath?: string;
+  wakeThreshold?: number;
+  wakePythonCommand?: string | null;
   spawnImpl?: typeof nodeSpawn;
 }): Promise<VoiceModule> {
   if (!input.enabled) return createDisabledVoice();
@@ -160,6 +166,23 @@ export async function createVoiceModule(input: {
         `${input.tts} is not installed on this host. Voice remains optional.`,
       );
 
+  const wakeBackend = input.wakeBackend ?? "stt";
+  const wakePythonCommand =
+    wakeBackend === "openwakeword"
+      ? (input.wakePythonCommand ?? await findPythonCommand(which, ["python", "py"]))
+      : null;
+  const wakeDetector =
+    wakeBackend === "openwakeword"
+      ? createOpenWakeWordDetector({
+          platform: input.platform,
+          modelPath: input.wakeModelPath,
+          threshold: input.wakeThreshold,
+          deviceName: input.audioInputDevice,
+          pythonCommand: wakePythonCommand,
+          spawnImpl: input.spawnImpl,
+        })
+      : null;
+
   const available = Boolean(sttBinary || ttsBinary);
   const ffmpegAvailable =
     input.audioBackend !== "none"
@@ -207,6 +230,7 @@ export async function createVoiceModule(input: {
     pushToTalkBound: Boolean(input.pushToTalk),
     captureSeconds: Math.max(1, Math.min(30, Math.round(input.captureSeconds ?? 6))),
     speakResponses: input.speakResponses !== false,
+    wakeDetector,
     stt,
     tts,
     audio,
@@ -220,7 +244,11 @@ export async function createVoiceModule(input: {
       audioAvailable: Boolean(audio?.status().available || audioStatus.available),
       pushToTalk: Boolean(input.pushToTalk),
       speakResponses: input.speakResponses !== false,
-      detail,
+      detail:
+        detail +
+        (wakeDetector
+          ? " Wake backend: " + wakeDetector.status().backend + ". " + wakeDetector.status().detail
+          : ""),
     }),
   };
 }

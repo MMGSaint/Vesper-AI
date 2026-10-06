@@ -59,6 +59,7 @@ import { conservativeModelPlan, runFirstBootAutomation } from "./bootstrap.ts";
 import { buildDiagnostics } from "./diagnostics.ts";
 import { createId } from "./id.ts";
 import { createObsClient, type ObsClient } from "./specialists/obs.ts";
+import { McpManager } from "./integrations/manager.ts";
 import { VESPER_VERSION } from "./version.ts";
 import { loadDeviceIdentity, type DeviceIdentity, type HostPosture } from "./distributed/identity.ts";
 import { DeviceRegistry } from "./distributed/registry.ts";
@@ -160,6 +161,7 @@ export class VesperRuntime {
   readonly voice: VoiceModule;
   readonly voiceSession: VoiceSession;
   readonly voiceActivation: VoiceActivationController | null;
+  readonly mcp: McpManager;
   readonly scheduler: IdleScheduler;
   readonly benchmark: BenchmarkHarness;
   capability: CapabilityProfile | null = null;
@@ -204,6 +206,7 @@ export class VesperRuntime {
       voice: VoiceModule;
       voiceSession: VoiceSession;
       voiceActivation: VoiceActivationController | null;
+      mcp: McpManager;
       scheduler: IdleScheduler;
       benchmark: BenchmarkHarness;
     },
@@ -242,6 +245,7 @@ export class VesperRuntime {
     this.voice = parts.voice;
     this.voiceSession = parts.voiceSession;
     this.voiceActivation = parts.voiceActivation;
+    this.mcp = parts.mcp;
     this.scheduler = parts.scheduler;
     this.benchmark = parts.benchmark;
     this.proactivity = new ProactivityEngine(this.optimizer, this.events, this.notifications, {
@@ -265,6 +269,14 @@ export class VesperRuntime {
     await this.seedMemories();
     this.started = true;
     await this.background.start();
+    void this.mcp.start().then((status) => {
+      this.log.info("integrations", "MCP bridge startup finished", {
+        enabled: status.enabled,
+        running: status.running,
+        tools: status.tools.length,
+        failures: status.failures,
+      });
+    });
     // Voice activation is opt-in. When enabled, the capture loop is local-only until
     // a wake phrase is actually detected; the router then follows the normal model/cloud
     // policy for the resulting user command.
@@ -458,6 +470,7 @@ export class VesperRuntime {
     this.started = false;
     this.memory.clearSession();
     await this.voiceActivation?.stop();
+    this.mcp.stop();
     this.proactivity.stop();
     this.scheduler.stop();
     // Stop the TASK scheduler too. Until an executor could do real work this was
@@ -1127,6 +1140,9 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
         audioInputDevice: config.voice.audioInputDevice,
         captureSeconds: config.voice.captureSeconds,
         speakResponses: config.voice.speakResponses,
+        wakeBackend: config.voice.wakePhrase.backend,
+        wakeModelPath: config.voice.wakePhrase.modelPath,
+        wakeThreshold: config.voice.wakePhrase.threshold,
         platform: process.platform,
       })
     : createDisabledVoice();
@@ -1418,6 +1434,16 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     },
   });
 
+  const mcpManager = new McpManager(
+    {
+      enabled: config.mcp.enabled,
+      servers: config.mcp.servers,
+      timeoutMs: config.mcp.timeoutMs,
+      permission: "confirm",
+    },
+    tools,
+  );
+
   registerBuiltinTools({
     checkpointStore: checkpoints,
     corrections,
@@ -1444,6 +1470,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     benchmark,
     journal,
     governor: autonomy,
+    mcpStatus: () => mcpManager.status(),
     getDiagnostics: async () => {
       if (!runtimeRef.current) throw new Error("Runtime not ready");
       return runtimeRef.current.diagnostics();
@@ -1583,6 +1610,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     voice,
     voiceSession,
     voiceActivation,
+    mcp: mcpManager,
     scheduler,
     benchmark,
   });
@@ -1599,10 +1627,10 @@ function emptyProfile(config: VesperConfig): CapabilityProfile {
     preferredBackend: null,
     models: [],
     telemetry: "mocked_simulated",
-    audio: "documented_not_implemented",
+    audio: "implemented_hardware_dependent",
     windowsIntegration: "mocked_simulated",
     optimizer: "mocked_simulated",
-    voice: "documented_not_implemented",
+    voice: "implemented_hardware_dependent",
     notes: [],
   };
 }

@@ -65,8 +65,9 @@ Implemented and tested but **not wired**, stated plainly rather than counted as 
   across devices, again for want of a transport.
 
 Not built: cross-device network transport/pairing, a mobile client application, portable
-packaging, Windows isolation, and a dedicated low-power wake-word DSP backend. The voice
-runtime now has an opt-in STT-backed wake phrase and local physical audio boundary.
+packaging, and Windows isolation. The voice runtime now has both the default STT-backed wake
+phrase and an optional openWakeWord backend with a local model. Production MCP server
+configuration is now implemented and opt-in.
 
 ## The earlier retraction, kept for the record
 
@@ -193,11 +194,11 @@ Stated plainly rather than classified as complete:
   that belongs to the owner, not to an agent working unattended. The scoped protocol and
   the in-process gateway are ready for it.
 
-Completed since that list was first written: the **MCP client** (real stdio JSON-RPC,
-namespaced and permission-gated), **OBS WebSocket** (observed recording and streaming
-state, feeding the event log), the local **voice audio/STT/TTS path**, opt-in **wake phrase**,
-spoken confirmation continuation, durable **correction learning**, and optional **xAI cloud
-fallback**.
+Completed since that list was first written: the **MCP client and production server
+configuration surface** (real stdio JSON-RPC, namespaced and permission-gated), **OBS
+WebSocket** (observed recording and streaming state, feeding the event log), the local
+**voice audio/STT/TTS path**, opt-in **STT/openWakeWord wake activation**, spoken confirmation
+continuation, durable **correction learning**, and optional **xAI cloud fallback**.
 
 ## Completed in the current implementation pass
 

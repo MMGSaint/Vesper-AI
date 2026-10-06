@@ -94,6 +94,8 @@ export class VoiceActivationController {
   private sequence = 0;
   private pendingConfirmationId: string | null = null;
   private pendingConfirmationExpiresAt = 0;
+  private wakeWaiter: (() => void) | null = null;
+  private wakeFailure: ((error: Error) => void) | null = null;
 
   constructor(options: VoiceActivationOptions) {
     this.voice = options.voice;
@@ -117,17 +119,126 @@ export class VoiceActivationController {
     if (!this.wakePhrase) return false;
     this.running = true;
     this.onEvent?.("started", "Wake-phrase activation started.");
-    this.loopPromise = this.run();
+    this.loopPromise =
+      this.voice.wakeDetector?.available()
+        ? this.runWithWakeDetector()
+        : this.run();
     return true;
   }
 
   async stop(): Promise<void> {
     this.running = false;
+    this.wakeWaiter?.();
+    this.wakeWaiter = null;
+    this.wakeFailure?.(new Error("Voice activation stopped."));
+    this.wakeFailure = null;
+    if (this.voice.wakeDetector) await this.voice.wakeDetector.stop().catch(() => undefined);
     if (this.loopPromise) {
       await this.loopPromise.catch(() => undefined);
       this.loopPromise = null;
     }
     this.onEvent?.("stopped", "Wake-phrase activation stopped.");
+  }
+
+  private async runWithWakeDetector(): Promise<void> {
+    const detector = this.voice.wakeDetector;
+    const audio = this.voice.audio;
+    if (!detector || !audio) {
+      await this.run();
+      return;
+    }
+
+    const waitForWake = () =>
+      new Promise<void>((resolve, reject) => {
+        this.wakeWaiter = resolve;
+        this.wakeFailure = reject;
+      });
+
+    const started = detector.start(
+      (detail) => {
+        this.onEvent?.("wake", detail);
+        this.wakeWaiter?.();
+        this.wakeWaiter = null;
+        this.wakeFailure = null;
+      },
+      (detail) => {
+        this.onEvent?.("error", detail);
+        this.wakeFailure?.(new Error(detail));
+        this.wakeFailure = null;
+        this.wakeWaiter = null;
+      },
+    );
+
+    if (!started) {
+      this.onEvent?.("error", detector.status().detail);
+      await this.run();
+      return;
+    }
+
+    try {
+      while (this.running) {
+        if (!this.shouldListen()) {
+          await sleep(Math.max(1000, this.cooldownMs));
+          continue;
+        }
+
+        try {
+          await waitForWake();
+        } catch (error) {
+          if (!this.running) break;
+          this.onEvent?.("error", error instanceof Error ? error.message : String(error));
+          await detector.stop().catch(() => undefined);
+          if (this.running) await this.run();
+          return;
+        }
+
+        if (!this.running) break;
+
+        const commandAudio = await audio.captureWav(this.commandSeconds);
+        if (!commandAudio.available || !commandAudio.audio) {
+          this.onEvent?.("error", commandAudio.detail);
+          await sleep(this.cooldownMs);
+          continue;
+        }
+
+        const commandTranscript = await this.voice.stt.transcribe(commandAudio.audio);
+        if (!commandTranscript.available || !commandTranscript.text.trim()) {
+          this.onEvent?.("error", commandTranscript.detail);
+          await sleep(this.cooldownMs);
+          continue;
+        }
+
+        const command = commandTranscript.text.trim();
+        let result: VoiceCommandResult | string;
+        const affirmative = /^(yes|yeah|yep|sure|approve|approved|do it|go ahead|confirm)$/i.test(command);
+        const negative = /^(no|nope|cancel|deny|decline|don't|do not)$/i.test(command);
+
+        if (
+          this.pendingConfirmationId &&
+          Date.now() <= this.pendingConfirmationExpiresAt &&
+          (affirmative || negative) &&
+          this.onConfirm
+        ) {
+          result = await this.onConfirm(this.pendingConfirmationId, affirmative);
+          this.pendingConfirmationId =
+            typeof result === "string" ? null : (result.pendingConfirmationId ?? null);
+          if (!this.pendingConfirmationId) this.pendingConfirmationExpiresAt = 0;
+        } else {
+          result = await this.onCommand(command);
+          this.pendingConfirmationId =
+            typeof result === "string" ? null : (result.pendingConfirmationId ?? null);
+          this.pendingConfirmationExpiresAt = this.pendingConfirmationId ? Date.now() + 30_000 : 0;
+        }
+
+        const reply = typeof result === "string" ? result : result.reply;
+        if (reply.trim() && this.onReply) await this.onReply(reply);
+        await sleep(this.cooldownMs);
+      }
+    } finally {
+      this.wakeWaiter = null;
+      this.wakeFailure = null;
+      await detector.stop().catch(() => undefined);
+    }
   }
 
   private async run(): Promise<void> {
