@@ -1,6 +1,6 @@
 import type { SpeechToText, TextToSpeech, VoiceModule } from "./types.ts";
 import { createDisabledVoice } from "./types.ts";
-import { resolveCommandPath, type WhichFn } from "../models/backends.ts";
+import type { WhichFn } from "../models/backends.ts";
 import type { spawn as nodeSpawn } from "node:child_process";
 import { createPiperTts, createWhisperStt } from "./local-providers.ts";
 
@@ -104,6 +104,7 @@ export async function createVoiceModule(input: {
     ? createWhisperStt({
         binary: sttBinary.path,
         expectedSha256: sttBinary.sha256 || undefined,
+        requireAbsolutePath: !input.which,
         model: input.sttModel ?? "base",
         language: input.sttLanguage,
         extraArgs: input.sttArgs,
@@ -118,6 +119,7 @@ export async function createVoiceModule(input: {
     ? createPiperTts({
         binary: ttsBinary.path,
         expectedSha256: ttsBinary.sha256 || undefined,
+        requireAbsolutePath: !input.which,
         model: input.ttsModel ?? "en_US-lessac-medium",
         extraArgs: input.ttsArgs,
         spawnImpl: input.spawnImpl,
