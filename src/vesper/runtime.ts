@@ -1627,10 +1627,10 @@ function emptyProfile(config: VesperConfig): CapabilityProfile {
     preferredBackend: null,
     models: [],
     telemetry: "mocked_simulated",
-    audio: "documented_not_implemented",
+    audio: "implemented_hardware_dependent",
     windowsIntegration: "mocked_simulated",
     optimizer: "mocked_simulated",
-    voice: "documented_not_implemented",
+    voice: "implemented_hardware_dependent",
     notes: [],
   };
 }
