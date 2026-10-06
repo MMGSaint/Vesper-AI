@@ -183,6 +183,23 @@ test("ollama provider", async (t) => {
     assert.equal(new URL(calls[0].url).pathname, "/api/chat");
   });
 
+  await t.test("forces new inference CPU-side when NEXUS reports GPU contention", async () => {
+    const { fetchImpl, calls } = fakeOllama({
+      "/api/chat": () =>
+        ndjson([{ message: { role: "assistant", content: "ok" }, done: true, done_reason: "stop" }]),
+    });
+    const provider = createOllamaProvider({
+      baseUrl: BASE,
+      defaultModel: "x",
+      fetchImpl,
+      avoidGpuWhen: async () => true,
+    });
+    const result = await provider.complete(baseRequest(), "qwen2.5:14b");
+    assert.equal(result.text, "ok");
+    const body = JSON.parse(String(calls[0]?.init?.body ?? "{}")) as { options?: { num_gpu?: number } };
+    assert.equal(body.options?.num_gpu, 0);
+  });
+
   await t.test("complete parses native tool calls with object arguments", async () => {
     const { fetchImpl } = fakeOllama({
       "/api/chat": () =>
