@@ -150,6 +150,8 @@ export class ToolRegistry {
     args: JsonObject;
     workspaceId: string;
     confirmed?: boolean;
+    /** Exact queued confirmation consumed to authorize a confirm-tier execution. */
+    confirmationId?: string;
     dryRun?: boolean;
     /** Who is driving this call. Absent means the person at this machine. */
     origin?: RequestOrigin;
@@ -304,6 +306,41 @@ export class ToolRegistry {
       };
     }
 
+    if (decision.requiresConfirmation && input.confirmed === true) {
+      const confirmationId = input.confirmationId;
+      const pending = confirmationId ? this.confirmations.get(confirmationId) : undefined;
+      const createdAt = pending ? Date.parse(pending.createdAt) : Number.NaN;
+      const stale = !Number.isFinite(createdAt) || Date.now() - createdAt > CONFIRMATION_TTL_MS;
+      const exactMatch =
+        Boolean(pending) &&
+        pending?.toolName === registered.spec.name &&
+        pending?.workspaceId === input.workspaceId &&
+        JSON.stringify(pending.args) === JSON.stringify(args);
+      if (!confirmationId || !exactMatch || stale) {
+        const reason =
+          !confirmationId
+            ? `'${input.name}' requires a real pending confirmation; a bare confirmed=true is never accepted.`
+            : stale
+              ? `Confirmation '${confirmationId}' is stale or malformed and cannot authorize '${input.name}'.`
+              : `Confirmation '${confirmationId}' does not match the exact tool, workspace, and arguments being requested.`;
+        this.log.warn("permission", "Rejected forged or mismatched confirmation", {
+          tool: input.name,
+          confirmationId: confirmationId ?? "missing",
+        });
+        return {
+          id: createId("tool"),
+          toolName: input.name,
+          args: input.args,
+          at: nowIso(),
+          decision,
+          result: { ok: false, summary: reason, epistemic: "could_not_access" },
+        };
+      }
+      // Consume the capability before executing. This makes a confirmation a one-shot
+      // authorization token and closes replay races between separate callers.
+      this.confirmations.delete(confirmationId);
+    }
+
     if (decision.requiresConfirmation && !input.confirmed) {
       this.sweepExpiredConfirmations();
       if (this.confirmations.size >= MAX_PENDING_CONFIRMATIONS) {
@@ -388,7 +425,7 @@ export class ToolRegistry {
     // is safe" and the handler ran anyway. The gate's verdict is authoritative; the only
     // thing confirmation settles is the confirmation.
     const authorized =
-      decision.allowed || (decision.requiresConfirmation && input.confirmed === true);
+      decision.allowed || (decision.requiresConfirmation && input.confirmed === true && Boolean(input.confirmationId));
     if (!authorized) {
       this.log.warn("permission", decision.reason, { tool: input.name });
       return {
