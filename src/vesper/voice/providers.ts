@@ -65,37 +65,45 @@ export async function createVoiceModule(input: {
   platform?: NodeJS.Platform;
   sttModel?: string;
   ttsModel?: string;
+  sttPath?: string;
+  sttSha256?: string;
+  ttsPath?: string;
+  ttsSha256?: string;
   sttLanguage?: string;
   sttArgs?: string[];
   ttsArgs?: string[];
   spawnImpl?: typeof nodeSpawn;
 }): Promise<VoiceModule> {
   if (!input.enabled) return createDisabledVoice();
-  // Tests may inject a boolean discovery callback; production resolves each
-  // backend to an absolute executable path so launch cannot fall through to PATH.
-  const resolve = async (name: string): Promise<string | null> => {
-    if (input.which) return (await input.which(name)) ? name : null;
-    return resolveCommandPath(name, input.platform);
+  // Test doubles may inject discovery. Production never accepts an arbitrary PATH
+  // result; it requires an explicit configured path and SHA-256 pin for each executable.
+  const resolve = async (
+    name: string,
+    configuredPath?: string,
+    configuredSha256?: string,
+  ): Promise<{ path: string; sha256: string } | null> => {
+    if (input.which) return (await input.which(name)) ? { path: name, sha256: "" } : null;
+    if (!configuredPath || !configuredSha256 || !/^[A-Za-z]:[\\/]/.test(configuredPath)) return null;
+    return { path: configuredPath, sha256: configuredSha256 };
   };
 
   // Resolve the actual binary path, since the whisper CLI ships under several names.
-  const sttBinary =
-    input.stt === "faster-whisper"
-      ? (await resolve("whisper-ctranslate2")) ??
-        (await resolve("faster-whisper")) ??
-        (await resolve("whisper"))
-      : await resolve(input.stt);
+  const sttBinary = await resolve(
+    input.stt === "faster-whisper" ? "whisper-ctranslate2" : input.stt,
+    input.sttPath,
+    input.sttSha256,
+  );
 
-  const ttsBinary =
-    input.tts === "piper"
-      ? await resolve("piper")
-      : input.tts === "kokoro"
-        ? (await resolve("kokoro")) ?? (await resolve("kokoro-tts"))
-        : await resolve(input.tts);
+  const ttsBinary = await resolve(
+    input.tts === "kokoro" ? "kokoro" : input.tts,
+    input.ttsPath,
+    input.ttsSha256,
+  );
 
   const stt = sttBinary
     ? createWhisperStt({
-        binary: sttBinary,
+        binary: sttBinary.path,
+        expectedSha256: sttBinary.sha256 || undefined,
         model: input.sttModel ?? "base",
         language: input.sttLanguage,
         extraArgs: input.sttArgs,
@@ -103,26 +111,27 @@ export async function createVoiceModule(input: {
       })
     : createUnavailableStt(
         input.stt,
-        `${input.stt} is not installed on this host. Voice remains optional.`,
+        `${input.stt} has no explicitly pinned executable configured on this host. Voice remains optional.`,
       );
 
   const tts = ttsBinary
     ? createPiperTts({
-        binary: ttsBinary,
+        binary: ttsBinary.path,
+        expectedSha256: ttsBinary.sha256 || undefined,
         model: input.ttsModel ?? "en_US-lessac-medium",
         extraArgs: input.ttsArgs,
         spawnImpl: input.spawnImpl,
       })
     : createUnavailableTts(
         input.tts,
-        `${input.tts} is not installed on this host. Voice remains optional.`,
+        `${input.tts} has no explicitly pinned executable configured on this host. Voice remains optional.`,
       );
 
   // "Available" means Vesper can convert between text and audio buffers. It never
   // means an audio device was opened: capture and playback stay hardware-dependent.
   const available = Boolean(sttBinary || ttsBinary);
   const detail = available
-    ? `Local voice backends found (stt: ${sttBinary ?? "none"}, tts: ${ttsBinary ?? "none"}). Vesper can convert audio buffers to and from text. Microphone capture and speaker playback are not performed here and still require validation on the target PC.`
+    ? `Local voice backends found (stt: ${sttBinary?.path ?? "none"}, tts: ${ttsBinary?.path ?? "none"}). Vesper can convert audio buffers to and from text. Microphone capture and speaker playback are not performed here and still require validation on the target PC.`
     : "No local STT/TTS binary was found. Voice stays disabled for runtime audio.";
 
   return {
