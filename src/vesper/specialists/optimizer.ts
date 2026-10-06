@@ -80,6 +80,7 @@ export function createMockOptimizer(hardware: SimulatedHardware, log?: Logger): 
         hardware: hardwareSnap,
         bound: boundFromSnapshot(hardwareSnap),
         notes: hardwareSnap.notes,
+        fidelity: "mocked",
       };
     },
     async getCurrentProfile() {
@@ -254,7 +255,7 @@ function createRefusedOptimizer(reason: string, log?: Logger): OptimizerAdapter 
       return unavailableStatus(reason);
     },
     async getTelemetry() {
-      return { available: false, hardware: emptyHardware(), bound: "unknown", notes: [reason] };
+      return { available: false, hardware: emptyHardware(), bound: "unknown", notes: [reason], fidelity: "unavailable" };
     },
     async getCurrentProfile() {
       return null;
@@ -405,7 +406,7 @@ export function createHttpOptimizerAdapter(
         { ok: false as const, error: "Optimizer telemetry failed." },
       );
       if (!result.ok) {
-        return { available: false, hardware: emptyHardware(), bound: "unknown", notes: [result.error] };
+        return { available: false, hardware: emptyHardware(), bound: "unknown", notes: [result.error], fidelity: "unavailable" };
       }
       const parsed = parseTelemetry(result.data);
       if (!parsed) {
@@ -616,6 +617,7 @@ function parseTelemetry(value: unknown): OptimizerTelemetry | null {
     available: obj.available,
     hardware: emptyHardware(),
     bound,
+    fidelity: "unverified",
     notes: Array.isArray(obj.notes)
       ? obj.notes
           .filter((item): item is string => typeof item === "string")
