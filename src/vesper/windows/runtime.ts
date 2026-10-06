@@ -2,7 +2,7 @@ import type { EventBus } from "../events.ts";
 import type { Logger } from "../logging.ts";
 import type { BackgroundHealth, BackgroundState, TrayMenuItem } from "../types.ts";
 import { nowIso } from "../id.ts";
-import { applyStartupRegistration, readStartupRegistration } from "./startup.ts";
+import { applyStartupRegistration } from "./startup.ts";
 
 export interface BackgroundRuntime {
   state(): BackgroundState;
@@ -148,15 +148,15 @@ export async function invokeTrayAction(
     case "resume":
       await runtime.resume();
       return { ok: true, summary: "Background activity resumed.", action: "resume" };
-    case "startup":
-      runtime.setStartOnLogin(!runtime.startOnLogin());
+    case "startup": {
+      const next = !runtime.startOnLogin();
+      const result = await runtime.setStartOnLogin(next);
       return {
-        ok: true,
-        summary: runtime.startOnLogin()
-          ? "Start on login enabled. Windows registry write is hardware-dependent and was not applied here."
-          : "Start on login disabled. Windows registry write is hardware-dependent and was not applied here.",
+        ok: result.ok,
+        summary: result.summary,
         action: "startup",
       };
+    }
     case "exit":
       await runtime.stop();
       return { ok: true, summary: "Vesper background runtime stopped.", action: "exit" };
