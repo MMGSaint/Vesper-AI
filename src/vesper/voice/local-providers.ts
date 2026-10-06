@@ -86,7 +86,7 @@ export function createWhisperStt(
           timeoutMs: options.timeoutMs ?? 120_000,
           spawnImpl: options.spawnImpl,
           requireAbsolutePath: options.requireAbsolutePath ?? true,
-          expectedSha256: options.expectedSha256,
+          ...(options.expectedSha256 === undefined ? {} : { expectedSha256: options.expectedSha256 }),
         });
 
         if (!result.ok) {
