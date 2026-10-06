@@ -2,6 +2,7 @@ import type { EventBus } from "../events.ts";
 import type { Logger } from "../logging.ts";
 import type { BackgroundHealth, BackgroundState, TrayMenuItem } from "../types.ts";
 import { nowIso } from "../id.ts";
+import { applyStartupRegistration, readStartupRegistration } from "./startup.ts";
 
 export interface BackgroundRuntime {
   state(): BackgroundState;
@@ -10,7 +11,7 @@ export interface BackgroundRuntime {
   pause(): Promise<void>;
   resume(): Promise<void>;
   stop(): Promise<void>;
-  setStartOnLogin(value: boolean): void;
+  setStartOnLogin(value: boolean): Promise<{ ok: boolean; summary: string }>;
   startOnLogin(): boolean;
 }
 
@@ -18,6 +19,7 @@ export function createBackgroundRuntime(input: {
   events: EventBus;
   log: Logger;
   startOnLogin?: boolean;
+  startupTarget?: string;
 }): BackgroundRuntime {
   let state: BackgroundState = "stopped";
   let startedAt: string | null = null;
@@ -77,9 +79,35 @@ export function createBackgroundRuntime(input: {
         severity: "info",
       });
     },
-    setStartOnLogin(value: boolean) {
-      startOnLogin = value;
-      input.log.info("windows", "Start-on-login preference updated", { startOnLogin: value });
+    async setStartOnLogin(value: boolean) {
+      if (!input.startupTarget) {
+        startOnLogin = value;
+        input.log.info("windows", "Start-on-login preference updated", { startOnLogin: value, applied: false });
+        return {
+          ok: true,
+          summary: value
+            ? "Start on login is enabled as a preference, but no startup target is attached to this runtime."
+            : "Start on login preference disabled; no OS startup entry was changed.",
+        };
+      }
+      const applied = await applyStartupRegistration({
+        enabled: value,
+        target: input.startupTarget,
+      });
+      if (applied.applied) {
+        startOnLogin = value;
+        input.events.emit({
+          type: "lifecycle.startup_registration",
+          title: value ? "Vesper will start on login" : "Vesper will no longer start on login",
+          severity: "info",
+        });
+      }
+      input.log.info("windows", "Start-on-login registration attempt", {
+        requested: value,
+        applied: applied.applied,
+        detail: applied.detail,
+      });
+      return { ok: applied.applied, summary: applied.detail };
     },
   };
 }
