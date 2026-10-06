@@ -3,6 +3,7 @@ import { createDisabledVoice } from "./types.ts";
 import { commandExists, type WhichFn } from "../models/backends.ts";
 import type { spawn as nodeSpawn } from "node:child_process";
 import { createPiperTts, createWhisperStt } from "./local-providers.ts";
+import { createFfmpegAudioIo, type VoiceAudioIo } from "./audio.ts";
 
 export function createUnavailableStt(id: string, detail: string): SpeechToText {
   return {
@@ -66,16 +67,22 @@ export function createSimulatedVoice(): VoiceModule {
   return {
     enabled: true,
     pushToTalkBound: true,
+    captureSeconds: 6,
+    speakResponses: true,
     stt,
     tts,
+    audio,
     available: () => true,
+    audioAvailable: () => true,
     status: () => ({
       enabled: true,
       stt: stt.id,
       tts: tts.id,
       available: true,
+      audioAvailable: true,
       pushToTalk: true,
-      detail: "Simulated voice module. Physical audio was not validated.",
+      speakResponses: true,
+      detail: "Simulated voice module. No physical audio device was used.",
     }),
   };
 }
