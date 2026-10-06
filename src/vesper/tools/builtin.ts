@@ -297,7 +297,7 @@ export function registerBuiltinTools(input: {
     spec(
       "app_launch",
       "Launch an approved application.",
-      "safe",
+      "confirm",
       { name: { type: "string", description: "Application name or alias" } },
       ["name"],
     ),
