@@ -36,11 +36,19 @@ describe("windows background runtime", () => {
   });
 
   it("applies the startup toggle through the injected Windows runner", async () => {
-    let calls: string[] = [];
     const runtime = createBackgroundRuntime({
       events: new EventBus(log),
       log,
       startupTarget: "C:\\Users\\Test\\AppData\\Local\\Vesper\\bin\\vesper-host.cmd",
+      startupRunner: async () => ({
+        ok: true,
+        code: 0,
+        stdout: Buffer.alloc(0),
+        stderr: "",
+        timedOut: false,
+        aborted: false,
+        error: null,
+      }),
     });
     const before = runtime.startOnLogin();
     assert.equal(before, false);
@@ -49,7 +57,6 @@ describe("windows background runtime", () => {
     const updated = await runtime.setStartOnLogin(true);
     assert.equal(updated.ok, true);
     assert.equal(runtime.startOnLogin(), true);
-    void calls;
   });
 
   it("does not claim Windows startup was applied on Linux", () => {
