@@ -64,6 +64,50 @@ describe("voice activation", () => {
     assert.equal(textAfterWakePhrase("Hey, Vesper, optimize this", "hey vesper"), "optimize this");
   });
 
+  it("uses a streaming wake detector without running STT for the wake phrase", async () => {
+    let woke = false;
+    let stopped = false;
+    const voice = fakeVoice(["ignored"]);
+    voice.wakeDetector = {
+      id: "fake-openwakeword",
+      available: () => true,
+      start: (onWake) => {
+        setTimeout(() => onWake("wake"), 30);
+        return true;
+      },
+      stop: async () => {
+        stopped = true;
+      },
+      status: () => ({
+        available: true,
+        running: !stopped,
+        backend: "openwakeword",
+        modelPath: "wake.onnx",
+        detail: "fake",
+      }),
+    };
+    const commands: string[] = [];
+    const controller = createVoiceActivationController({
+      voice,
+      wakePhrase: "hey vesper",
+      commandSeconds: 1,
+      cooldownMs: 250,
+      onCommand: async (text) => {
+        woke = true;
+        commands.push(text);
+        return "ok";
+      },
+      onReply: async () => {},
+    });
+
+    controller.start();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await controller.stop();
+    assert.equal(woke, true);
+    assert.deepEqual(commands, ["ignored"]);
+    assert.equal(stopped, true);
+  });
+
   it("routes yes/no to a pending confirmation", async () => {
     const confirmations: Array<{ id: string; approve: boolean }> = [];
     const controller = createVoiceActivationController({
