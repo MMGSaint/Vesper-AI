@@ -65,7 +65,7 @@ Implemented and tested but **not wired**, stated plainly rather than counted as 
   across devices, again for want of a transport.
 
 Not built: cross-device network transport/pairing, a mobile client application, portable
-packaging, and Windows isolation. The voice runtime now has both the default STT-backed wake
+packaging, and Windows isolation. Local same-machine companion IPC is now implemented. The voice runtime now has both the default STT-backed wake
 phrase and an optional openWakeWord backend with a local model. Production MCP server
 configuration is now implemented and opt-in.
 
