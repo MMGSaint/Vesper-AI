@@ -1131,10 +1131,15 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
       })
     : createDisabledVoice();
   const voiceSession = createVoiceSession(voice);
+  const startupTarget =
+    process.platform === "win32" && options.dirs?.root
+      ? join(options.dirs.root, "bin", "vesper-host.cmd")
+      : undefined;
   const background = createBackgroundRuntime({
     events,
     log,
     startOnLogin: config.windows.startOnLogin,
+    startupTarget,
   });
   const taskExecutors = new TaskExecutorRegistry();
   registerBuiltinExecutors(taskExecutors);
