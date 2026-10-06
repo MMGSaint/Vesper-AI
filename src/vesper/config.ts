@@ -486,6 +486,7 @@ const SECURITY_SECTIONS = [
   "knowledgeSources",
   "models",
   "optimizer",
+  "voice",
   "proactivity",
   "dataDir",
 ];
