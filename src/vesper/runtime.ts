@@ -1164,6 +1164,13 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     config,
     providers: options.providers,
     xaiKey: options.xaiKey,
+    gpuContentionGuard: async () => {
+      try {
+        return (await optimizer.getPerformanceState()) === "gpu";
+      } catch {
+        return false;
+      }
+    },
   });
   // Now that providers exist, point knowledge embeddings at the configured backend.
   embeddingBackend.current =

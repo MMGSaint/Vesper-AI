@@ -1018,6 +1018,26 @@ export function createNexusIpcOptimizerAdapter(
       return lastResult;
     },
 
+    async getPerformanceEvidence(windowMs = 30_000, applicationId?: string) {
+      const bounded = Math.max(1_000, Math.min(120_000, Math.round(windowMs)));
+      const params: Record<string, unknown> = { windowMs: bounded };
+      if (applicationId) params.applicationId = safeText(applicationId, 128);
+      const result = await invoke("getPerformanceEvidence", params);
+      return result.ok ? result.result : null;
+    },
+
+    async getDecisionEvidence(outcomeId: string) {
+      const clean = safeText(outcomeId, 64);
+      if (!clean) return null;
+      const result = await invoke("getDecisionEvidence", { outcomeId: clean });
+      return result.ok ? result.result : null;
+    },
+
+    async getTopology() {
+      const result = await invoke("getTopology");
+      return result.ok ? result.result : null;
+    },
+
     async getHealth(): Promise<OptimizerHealth> {
       const started = Date.now();
       const status = await this.getStatus();

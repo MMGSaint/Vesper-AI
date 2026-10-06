@@ -26,6 +26,9 @@ export interface OptimizerAdapter {
   requestRollback(): Promise<{ accepted: boolean; summary: string }>;
   getLastAction(): Promise<string | null>;
   getOptimizationResult(): Promise<string | null>;
+  getPerformanceEvidence?(windowMs?: number, applicationId?: string): Promise<unknown | null>;
+  getDecisionEvidence?(outcomeId: string): Promise<unknown | null>;
+  getTopology?(): Promise<unknown | null>;
   getHealth(): Promise<OptimizerHealth>;
   setAvailable?(value: boolean): void;
 }
@@ -173,6 +176,15 @@ export function createMockOptimizer(hardware: SimulatedHardware, log?: Logger): 
     async getOptimizationResult() {
       return lastResult;
     },
+    async getPerformanceEvidence() {
+      return null;
+    },
+    async getDecisionEvidence() {
+      return null;
+    },
+    async getTopology() {
+      return null;
+    },
     async getHealth() {
       return {
         reachable: available,
@@ -266,6 +278,15 @@ function createRefusedOptimizer(reason: string, log?: Logger): OptimizerAdapter 
       return null;
     },
     async getOptimizationResult() {
+      return null;
+    },
+    async getPerformanceEvidence() {
+      return null;
+    },
+    async getDecisionEvidence() {
+      return null;
+    },
+    async getTopology() {
       return null;
     },
     async getHealth() {
