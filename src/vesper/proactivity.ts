@@ -24,8 +24,14 @@ export interface ProactiveIssue {
 
 export interface ProactivityOptions {
   readonly intervalMs: number;
+  /** Consecutive observations that must agree before an issue can arm. */
   readonly minSamplesForAlert: number;
+  /** Minimum time before the same issue may re-arm after recovery. */
   readonly cooldownMs: number;
+  /** Hard cap on visible Sentinel alerts in a rolling window. */
+  readonly maxAlertsPerWindow: number;
+  /** Rolling rate-limit window for visible Sentinel alerts. */
+  readonly rateLimitWindowMs: number;
   readonly now?: () => number;
 }
 
@@ -33,6 +39,8 @@ const DEFAULTS: ProactivityOptions = {
   intervalMs: 30_000,
   minSamplesForAlert: 3,
   cooldownMs: 120_000,
+  maxAlertsPerWindow: 6,
+  rateLimitWindowMs: 3_600_000,
 };
 
 export class ProactivityEngine {
@@ -43,7 +51,10 @@ export class ProactivityEngine {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private consecutive = new Map<string, number>();
-  private lastFingerprint = new Map<string, string>();
+  /** An armed issue stays quiet until the evidence clears and it re-arms. */
+  private armed = new Set<string>();
+  private lastAlertAt = new Map<string, number>();
+  private alertHistory: number[] = [];
   private previous: ProactiveObservation | null = null;
 
   constructor(
@@ -113,6 +124,11 @@ export class ProactivityEngine {
 
   evaluate(observation: ProactiveObservation): ProactiveIssue[] {
     const issues: ProactiveIssue[] = [];
+    const now = observation.capturedAtMs;
+    this.alertHistory = this.alertHistory.filter(
+      (at) => now - at < this.options.rateLimitWindowMs,
+    );
+
     const add = (
       id: string,
       severity: ProactiveIssue['severity'],
@@ -123,9 +139,21 @@ export class ProactivityEngine {
       const n = (this.consecutive.get(id) ?? 0) + 1;
       this.consecutive.set(id, n);
       if (n < this.options.minSamplesForAlert) return;
-      const fingerprint = JSON.stringify({ id, severity, body });
-      if (this.lastFingerprint.get(id) === fingerprint) return;
-      this.lastFingerprint.set(id, fingerprint);
+
+      // One alert per continuous episode. A changing temperature/body must not
+      // defeat suppression while the underlying condition is still active.
+      if (this.armed.has(id)) return;
+
+      const last = this.lastAlertAt.get(id) ?? 0;
+      if (last > 0 && now - last < this.options.cooldownMs) return;
+
+      // Global Sentinel rate limit. NotificationHub has its own cooldown, but
+      // Sentinel needs an explicit policy before it emits anything at all.
+      if (this.alertHistory.length >= this.options.maxAlertsPerWindow) return;
+
+      this.armed.add(id);
+      this.lastAlertAt.set(id, now);
+      this.alertHistory.push(now);
       issues.push({
         id,
         severity,
@@ -136,7 +164,15 @@ export class ProactivityEngine {
       });
     };
 
-    if (!observation.optimizerAvailable) {
+    const clear = (id: string, active: boolean): void => {
+      if (active) return;
+      this.consecutive.delete(id);
+      this.armed.delete(id);
+    };
+
+    const optimizerUnavailable = !observation.optimizerAvailable;
+    clear('optimizer-unavailable', optimizerUnavailable);
+    if (optimizerUnavailable) {
       add(
         'optimizer-unavailable',
         'warning',
@@ -145,10 +181,9 @@ export class ProactivityEngine {
       );
     }
 
-    if (
-      observation.gpuTemperatureC !== null &&
-      observation.gpuTemperatureC >= 88
-    ) {
+    const gpuHot = observation.gpuTemperatureC !== null && observation.gpuTemperatureC >= 88;
+    clear('gpu-hot', gpuHot);
+    if (gpuHot) {
       add(
         'gpu-hot',
         'warning',
@@ -157,12 +192,13 @@ export class ProactivityEngine {
       );
     }
 
-    if (
+    const vramPressure =
       observation.gpuVramUsedGB !== null &&
       observation.gpuVramTotalGB !== null &&
       observation.gpuVramTotalGB > 0 &&
-      observation.gpuVramUsedGB / observation.gpuVramTotalGB >= 0.92
-    ) {
+      observation.gpuVramUsedGB / observation.gpuVramTotalGB >= 0.92;
+    clear('vram-pressure', vramPressure);
+    if (vramPressure) {
       add(
         'vram-pressure',
         'warning',
@@ -173,7 +209,9 @@ export class ProactivityEngine {
 
     const cpu = observation.cpuUtilizationPct ?? 0;
     const gpu = observation.gpuUtilizationPct ?? 0;
-    if (cpu >= 95 && gpu < 80) {
+    const cpuPressure = cpu >= 95 && gpu < 80;
+    clear('cpu-pressure', cpuPressure);
+    if (cpuPressure) {
       add(
         'cpu-pressure',
         'info',
@@ -182,7 +220,9 @@ export class ProactivityEngine {
       );
     }
 
-    if (gpu >= 98 && observation.performanceState === 'gpu') {
+    const gpuBound = gpu >= 98 && observation.performanceState === 'gpu';
+    clear('gpu-bound', gpuBound);
+    if (gpuBound) {
       add(
         'gpu-bound',
         'info',

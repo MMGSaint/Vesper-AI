@@ -51,3 +51,44 @@ test('sentinel waits for sustained evidence', () => {
   assert.ok(issues.some((issue) => issue.id === 'gpu-hot'));
 
 });
+
+
+test('sentinel rearms only after evidence clears and cooldown permits it', () => {
+  let now = 0;
+  const engine = new ProactivityEngine(
+    { getTelemetry: async () => { throw new Error('unused'); } } as never,
+    { emit: () => ({ id: 'evt' }) } as never,
+    { push: () => ({ id: 'note' }) } as never,
+    { minSamplesForAlert: 2, cooldownMs: 200, maxAlertsPerWindow: 10, now: () => now },
+  );
+
+  assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 90 })).length, 0);
+  now = 1;
+  assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 90 })).length, 1);
+  now = 2;
+  assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 91 })).length, 0);
+
+  now = 3;
+  assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 70 })).length, 0);
+
+  now = 50;
+  assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 90 })).length, 0);
+  now = 150;
+  assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 90 })).length, 0);
+  now = 202;
+  assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 90 })).length, 1);
+});
+
+test('sentinel applies a global alert budget across issue types', () => {
+  let now = 0;
+  const engine = new ProactivityEngine(
+    { getTelemetry: async () => { throw new Error('unused'); } } as never,
+    { emit: () => ({ id: 'evt' }) } as never,
+    { push: () => ({ id: 'note' }) } as never,
+    { minSamplesForAlert: 1, maxAlertsPerWindow: 1, rateLimitWindowMs: 1000, cooldownMs: 0, now: () => now },
+  );
+
+  assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 90 })).length, 1);
+  now = 1;
+  assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 75, gpuUtilizationPct: 99 })).length, 0);
+});
