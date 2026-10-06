@@ -61,7 +61,11 @@ export function createSimulatedVoice(): VoiceModule {
   const tts: TextToSpeech = {
     id: "simulated-tts",
     async speak() {
-      return { available: true, detail: "Simulated TTS. No audio device was used." };
+      return {
+        available: true,
+        audio: new Uint8Array(44),
+        detail: "Simulated TTS. No physical audio device was used.",
+      };
     },
   };
   return {
