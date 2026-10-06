@@ -37,7 +37,8 @@ it arrives verbatim, never shell-expanded.
 text. Push-to-talk is a boolean preference (`voice.pushToTalk`); binding an actual
 Windows hotkey is HARDWARE DEPENDENT and not applied here.
 
-Wake word is deliberately out of scope for the MVP.
+Wake-phrase activation is implemented as an opt-in local loop. It is STT-backed rather than a dedicated low-power DSP detector; a dedicated openWakeWord/ONNX backend can replace that detector later without changing the audio or agent boundary.
 
-Classification: **IMPLEMENTED + TESTED** for buffer conversion, provider discovery, and
-the session state machine. **DOCUMENTED BUT NOT IMPLEMENTED** for physical audio.
+Spoken confirmations are supported: when a voice turn queues a confirm-tier action, the next wake-phrase command `yes/approve/do it` or `no/cancel` is routed through the same confirmation path as the text interface.
+
+Classification: **IMPLEMENTED + TESTED** for buffer conversion, provider discovery, physical-audio orchestration, session capture/playback, wake-phrase orchestration, and spoken confirmation routing. **IMPLEMENTED + HARDWARE DEPENDENT** for real microphone/speaker operation on the target Windows machine.
