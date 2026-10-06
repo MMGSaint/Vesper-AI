@@ -55,7 +55,12 @@ export async function commandExists(
   platform: NodeJS.Platform = process.platform,
 ): Promise<boolean> {
   if (!/^[A-Za-z0-9._-]+$/.test(name)) return false;
-  const cmd = platform === "win32" ? "where" : "which";
+  const cmd =
+    platform === "win32" && process.platform === "win32"
+      ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\where.exe`
+      : platform === "win32"
+        ? "where"
+        : "which";
   return new Promise((resolve) => {
     const child = spawn(cmd, [name], { shell: false, stdio: ["ignore", "ignore", "ignore"] });
     const timer = setTimeout(() => {
