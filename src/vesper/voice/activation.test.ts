@@ -64,6 +64,31 @@ describe("voice activation", () => {
     assert.equal(textAfterWakePhrase("Hey, Vesper, optimize this", "hey vesper"), "optimize this");
   });
 
+  it("routes yes/no to a pending confirmation", async () => {
+    const confirmations: Array<{ id: string; approve: boolean }> = [];
+    const controller = createVoiceActivationController({
+      voice: fakeVoice(["hey vesper optimize this", "yes"]),
+      wakePhrase: "hey vesper",
+      detectionSeconds: 1,
+      commandSeconds: 1,
+      cooldownMs: 250,
+      onCommand: async () => ({
+        reply: "Please confirm.",
+        pendingConfirmationId: "confirm-1",
+      }),
+      onConfirm: async (id, approve) => {
+        confirmations.push({ id, approve });
+        return { reply: approve ? "Approved." : "Cancelled." };
+      },
+    });
+
+    controller.start();
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    await controller.stop();
+
+    assert.deepEqual(confirmations, [{ id: "confirm-1", approve: true }]);
+  });
+
   it("drives one wake -> command -> reply cycle", async () => {
     let commands: string[] = [];
     let replies: string[] = [];
