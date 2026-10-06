@@ -12,7 +12,6 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import readline from "node:readline";
 
-import { commandExists, type WhichFn } from "../models/backends.ts";
 
 export interface WakeWordDetectorStatus {
   available: boolean;
@@ -35,8 +34,7 @@ export interface OpenWakeWordOptions {
   modelPath?: string;
   threshold?: number;
   deviceName?: string;
-  pythonCommands?: readonly string[];
-  which?: WhichFn;
+  pythonCommand?: string | null;
   spawnImpl?: typeof nodeSpawn;
 }
 
@@ -54,16 +52,6 @@ function safeModelPath(value?: string): string | null {
   return path;
 }
 
-export async function findPythonCommand(
-  which: WhichFn = (name) => commandExists(name, process.platform),
-  candidates: readonly string[] = ["python", "py"],
-): Promise<string | null> {
-  for (const candidate of candidates) {
-    if (await which(candidate).catch(() => false)) return candidate;
-  }
-  return null;
-}
-
 export function createOpenWakeWordDetector(
   options: OpenWakeWordOptions,
 ): WakeWordDetector {
@@ -71,34 +59,19 @@ export function createOpenWakeWordDetector(
   const modelPath = safeModelPath(options.modelPath);
   const threshold = Math.max(0.05, Math.min(0.99, options.threshold ?? 0.5));
   const deviceName = options.deviceName?.trim() ?? "";
-  const pythonCommands =
-    options.pythonCommands?.length ? options.pythonCommands : ["python", "py"];
-  const which = options.which ?? ((name) => commandExists(name, platform));
+  const python = options.pythonCommand ?? null;
   const spawnImpl = options.spawnImpl ?? nodeSpawn;
   const workerPath = join(dirname(fileURLToPath(import.meta.url)), "openwakeword_worker.py");
 
-  let python: string | null = null;
   let child: ReturnType<typeof nodeSpawn> | null = null;
-  let available = false;
-  let lastDetail = "openWakeWord is not configured.";
-
-  void (async () => {
-    if (platform !== "win32") {
-      lastDetail = "openWakeWord microphone integration is currently implemented for Windows.";
-      return;
-    }
-    if (!modelPath) {
-      lastDetail = "An explicit local openWakeWord model path is required.";
-      return;
-    }
-    python = await findPythonCommand(which, pythonCommands);
-    if (!python) {
-      lastDetail = "Python was not found. Install Python and the openWakeWord/onnxruntime/PyAudio packages.";
-      return;
-    }
-    available = true;
-    lastDetail = "Python and an explicit local wake model are available; dependency import is checked when started.";
-  })();
+  const available = platform === "win32" && Boolean(modelPath) && Boolean(python);
+  let lastDetail = !modelPath
+    ? "An explicit local openWakeWord model path is required."
+    : !python
+      ? "Python was not found. Install Python and the openWakeWord/onnxruntime/PyAudio packages."
+      : platform !== "win32"
+        ? "openWakeWord microphone integration is currently implemented for Windows."
+        : "Python and an explicit local wake model are available; dependency import is checked when started.";
 
   const status = (): WakeWordDetectorStatus => ({
     available,
