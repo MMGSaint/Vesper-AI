@@ -36,6 +36,30 @@ export interface RegisteredTool {
  */
 export const MAX_PENDING_CONFIRMATIONS = 32;
 
+const FOREIGN_HOST_BLOCKED_TOOLS = new Set([
+  "fs_list",
+  "fs_read",
+  "fs_write",
+  "process_list",
+  "app_detect",
+  "app_launch",
+  "app_close",
+  "audio_list_sessions",
+  "audio_get_session",
+  "audio_set_volume",
+  "audio_set_mute",
+  "optimizer_status",
+  "optimizer_performance_evidence",
+  "optimizer_decision_evidence",
+  "optimizer_topology",
+  "optimizer_report",
+  "optimizer_analyze",
+  "optimizer_request",
+  "benchmark_run",
+  "obs_status",
+  "set_scenario",
+]);
+
 /**
  * How long an unanswered confirmation stays askable.
  *
@@ -73,6 +97,7 @@ export class ToolRegistry {
    * every direct `tools.invoke` — and every future caller — deciding on stale authority.
    */
   private readonly trustOf?: (deviceId: string) => Promise<TrustState>;
+  private readonly hostPosture: "owned" | "foreign";
   private governor: AutonomyGovernor | undefined;
 
   constructor(
@@ -80,11 +105,13 @@ export class ToolRegistry {
     log: Logger,
     confirmations: Map<string, PendingConfirmation> = new Map(),
     trustOf?: (deviceId: string) => Promise<TrustState>,
+    hostPosture: "owned" | "foreign" = "owned",
   ) {
     this.gate = gate;
     this.log = log;
     this.confirmations = confirmations;
     this.trustOf = trustOf;
+    this.hostPosture = hostPosture;
   }
 
   /**
@@ -176,6 +203,26 @@ export class ToolRegistry {
       };
       this.log.warn("tool", record.decision.reason, { tool: input.name });
       return record;
+    }
+
+    if (this.hostPosture === "foreign" && FOREIGN_HOST_BLOCKED_TOOLS.has(registered.spec.name)) {
+      const reason =
+        `'${registered.spec.name}' is disabled on a foreign host. Portable Vesper cannot inspect or control the host machine.`;
+      this.log.warn("permission", reason, { tool: registered.spec.name, hostPosture: this.hostPosture });
+      return {
+        id: createId("tool"),
+        toolName: input.name,
+        args: input.args,
+        at: nowIso(),
+        decision: {
+          allowed: false,
+          level: "never",
+          requiresConfirmation: false,
+          toolName: input.name,
+          reason,
+        },
+        result: { ok: false, summary: reason, epistemic: "could_not_access" },
+      };
     }
 
     // Validate before anything acts on the arguments. The schema is advertised to the
