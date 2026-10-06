@@ -415,6 +415,7 @@ export function createHttpOptimizerAdapter(
           hardware: emptyHardware(),
           bound: "unknown",
           notes: ["Malformed optimizer telemetry."],
+          fidelity: "unavailable",
         };
       }
       return parsed;
