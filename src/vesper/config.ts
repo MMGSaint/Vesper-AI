@@ -304,34 +304,13 @@ export const vesperConfigSchema = z.object({
       wakePhrase: z.object({
         /** Off by default: enabling continuously samples the selected microphone. */
         enabled: z.boolean().default(false),
-        backend: z.enum(["stt", "openwakeword"]).default("stt"),
         phrase: z.string().min(1).max(64).default("hey vesper"),
-        /** Required when backend=openwakeword. Vesper never downloads a model automatically. */
-        modelPath: z.string().max(1024).optional(),
-        threshold: z.number().min(0.05).max(0.99).default(0.5),
         detectionSeconds: z.number().min(1).max(6).default(2),
         commandSeconds: z.number().min(1).max(30).default(8),
         cooldownMs: z.number().min(250).max(60_000).default(1500),
-      }).superRefine((wake, ctx) => {
-        if (wake.backend === "openwakeword" && !wake.modelPath) {
-          ctx.addIssue({
-            code: "custom",
-            path: ["modelPath"],
-            message: "wakePhrase.modelPath is required when wakePhrase.backend is openwakeword.",
-          });
-        }
-        if (wake.modelPath && /[\0\r\n]/.test(wake.modelPath)) {
-          ctx.addIssue({
-            code: "custom",
-            path: ["modelPath"],
-            message: "wakePhrase.modelPath contains unsupported control characters.",
-          });
-        }
       }).default({
         enabled: false,
-        backend: "stt",
         phrase: "hey vesper",
-        threshold: 0.5,
         detectionSeconds: 2,
         commandSeconds: 8,
         cooldownMs: 1500,
@@ -378,6 +357,39 @@ export const vesperConfigSchema = z.object({
       nativeNotifications: z.boolean().default(true),
     })
     .default({ enableTray: true, startOnLogin: false, nativeNotifications: true }),
+  mcp: z
+    .object({
+      /** Off by default. Enabling starts only the explicitly configured local MCP processes. */
+      enabled: z.boolean().default(false),
+      timeoutMs: z.number().int().min(250).max(60_000).default(10_000),
+      servers: z.array(
+        z.object({
+          id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+          command: z.string().min(1).max(1024).refine((value) => !/[\0\r\n]/.test(value), "MCP command contains unsupported control characters."),
+          args: z.array(z.string().max(4096)).max(128).default([]),
+          cwd: z.string().max(2048).optional().refine((value) => value === undefined || !/[\0\r\n]/.test(value), "MCP cwd contains unsupported control characters."),
+          enabled: z.boolean().default(true),
+        }),
+      ).max(32).default([]),
+    })
+    .superRefine((mcp, ctx) => {
+      const seen = new Set<string>();
+      for (const server of mcp.servers) {
+        if (seen.has(server.id)) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["servers"],
+            message: "MCP server ids must be unique: " + server.id,
+          });
+        }
+        seen.add(server.id);
+      }
+    })
+    .default({
+      enabled: false,
+      timeoutMs: 10_000,
+      servers: [],
+    }),
   agent: z
     .object({
       maxToolIterations: z.number().default(8),
