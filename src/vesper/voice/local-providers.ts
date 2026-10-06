@@ -159,7 +159,7 @@ export function createPiperTts(options: LocalBackendOptions & { speaker?: number
           timeoutMs: options.timeoutMs ?? 60_000,
           spawnImpl: options.spawnImpl,
           requireAbsolutePath: options.requireAbsolutePath ?? true,
-          expectedSha256: options.expectedSha256,
+          ...(options.expectedSha256 === undefined ? {} : { expectedSha256: options.expectedSha256 }),
         });
 
         if (!result.ok) {
