@@ -25,11 +25,14 @@ export interface LocalCompanionTransportStatus {
 }
 
 interface RequestEnvelope {
+  v?: unknown;
   id?: unknown;
   method?: unknown;
   token?: unknown;
   params?: unknown;
 }
+
+const CLIENT_PROTOCOL_VERSION = 2;
 
 const MAX_LINE_BYTES = 64 * 1024;
 
@@ -212,6 +215,7 @@ export class LocalCompanionTransport {
       cleaned = true;
       if (this.activeConnections > 0) this.activeConnections -= 1;
       this.connectionWindows.delete(socket);
+      this.requestChains.delete(socket);
       this.sockets.delete(socket);
     };
     socket.once("close", cleanup);
@@ -241,7 +245,11 @@ export class LocalCompanionTransport {
           return;
         }
 
-        void this.handleLine(socket, line.toString("utf8"));
+        const prior = this.requestChains.get(socket) ?? Promise.resolve();
+        const next = prior
+          .then(() => this.handleLine(socket, line.toString("utf8")))
+          .catch(() => undefined);
+        this.requestChains.set(socket, next);
         newline = buffer.indexOf(0x0a);
       }
     });
@@ -279,6 +287,14 @@ export class LocalCompanionTransport {
     }
 
     const id = request.id ?? null;
+    if (request.v !== CLIENT_PROTOCOL_VERSION) {
+      socket.write(response(id, {
+        ok: false,
+        code: "INVALID",
+        detail: "Unsupported companion protocol version. Expected " + CLIENT_PROTOCOL_VERSION + ".",
+      }));
+      return;
+    }
     const method = textParam(request.method);
     if (!method) {
       socket.write(response(id, {
