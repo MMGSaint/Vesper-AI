@@ -295,6 +295,11 @@ export const vesperConfigSchema = z.object({
       enabled: z.boolean().default(false),
       stt: z.string().default("faster-whisper"),
       tts: z.string().default("piper"),
+      /** Production voice binaries must be explicitly pinned; bare PATH discovery is disabled. */
+      sttPath: z.string().optional(),
+      sttSha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
+      ttsPath: z.string().optional(),
+      ttsSha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
       pushToTalk: z.boolean().default(false),
       /** Whisper model name or CTranslate2 model directory. */
       sttModel: z.string().default("base"),
@@ -309,6 +314,10 @@ export const vesperConfigSchema = z.object({
       enabled: false,
       stt: "faster-whisper",
       tts: "piper",
+      sttPath: undefined,
+      sttSha256: undefined,
+      ttsPath: undefined,
+      ttsSha256: undefined,
       pushToTalk: false,
       sttModel: "base",
       ttsModel: "en_US-lessac-medium",
