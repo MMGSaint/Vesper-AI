@@ -85,6 +85,8 @@ export function createModelRouter(input: {
 
   let activeId: string | undefined;
   let lastProbeAt = 0;
+  let contentionCheckedAt = 0;
+  let cachedGpuContention = false;
   let probePromise: Promise<void> | null = null;
 
   /**
@@ -149,12 +151,33 @@ export function createModelRouter(input: {
     );
   }
 
+  async function gpuContentionActive(): Promise<boolean> {
+    const guard = input.gpuContentionGuard;
+    if (!guard) return false;
+    if (Date.now() - contentionCheckedAt < 2000) return cachedGpuContention;
+    contentionCheckedAt = Date.now();
+    try {
+      cachedGpuContention = await guard();
+    } catch {
+      cachedGpuContention = false;
+    }
+    return cachedGpuContention;
+  }
+
   async function pick(role: ModelRole): Promise<{ provider: AnyProvider; model: string }> {
     await awaitInFlightProbe();
     if (activeId) {
       const forced = providers.find((provider) => provider.id === activeId);
       if (forced) return { provider: forced, model: resolveModel(forced, role) };
     }
+    const gpuBusy = await gpuContentionActive();
+    if (gpuBusy) {
+      const cpuSafe = providers.find((provider) => provider.id === "ollama" && provider.isAvailable());
+      if (cpuSafe) {
+        return { provider: cpuSafe, model: resolveModel(cpuSafe, role) };
+      }
+    }
+
     const preferred = input.config.models.roles[role];
     if (preferred) {
       const match = providers.find(
