@@ -24,9 +24,10 @@ all of this work. Nothing below has been observed on it.
 
 ## Not implemented
 
-- **MCP production configuration surface.** `integrations/mcp.ts` implements a real stdio
-  JSON-RPC MCP client with namespacing and permission-gated tool bridging. Production still
-  requires an explicit server-configuration path before external MCP processes are spawned.
+- **MCP server trust is configuration-owned.** The production runtime now starts only
+  explicitly configured stdio servers. Their discovered tools are namespaced and default to
+  `confirm`; external server code is still code running with the Vesper user's local
+  privileges, so a configured server must be treated as trusted software.
 - **Companion transport.** `vesper.client` v1 is in-process only. There is no pairing,
   no listener, and no LAN TLS.
 - **Dedicated low-power wake detection.** Optional openWakeWord support is implemented as
