@@ -113,7 +113,10 @@ export function createRealWindowsHost(options?: RealWindowsHostOptions): RealWin
       if (platform !== "win32") {
         return { ok: false, summary: `Launching ${app.name} is Windows-only; not attempted on ${platform}.` };
       }
-      const launched = launcher(app.executable, []);
+      if (!app.launchPath) {
+        return { ok: false, summary: `Launching ${app.name} is disabled until its explicit launchPath is configured.` };
+      }
+      const launched = launcher(app.launchPath, []);
       return launched.ok
         ? { ok: true, summary: `Launched ${app.name} (pid ${launched.pid ?? "unknown"}).` }
         : { ok: false, summary: `Could not launch ${app.name}: ${launched.error ?? "unknown error"}.` };
