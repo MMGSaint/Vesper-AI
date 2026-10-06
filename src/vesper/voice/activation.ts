@@ -11,7 +11,7 @@
  * the audio/session boundary.
  */
 
-import type { SpeechToText, VoiceModule } from "./types.ts";
+import type { VoiceModule } from "./types.ts";
 
 export interface VoiceCommandResult {
   reply: string;
