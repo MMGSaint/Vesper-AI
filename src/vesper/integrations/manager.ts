@@ -14,6 +14,7 @@ export interface McpManagerOptions {
   servers: readonly McpServerConfig[];
   timeoutMs?: number;
   permission?: PermissionLevel;
+  transportFactory?: Parameters<typeof createMcpClient>[0]["transportFactory"];
 }
 
 export interface McpManagerStatus {
@@ -46,6 +47,7 @@ export class McpManager {
       const client = createMcpClient({
         server,
         timeoutMs: this.options.timeoutMs ?? 10_000,
+        ...(this.options.transportFactory ? { transportFactory: this.options.transportFactory } : {}),
       });
       const started = await client.start();
       if (!started.ok) {
