@@ -127,9 +127,13 @@ export async function createVoiceModule(input: {
 
   const available = Boolean(sttBinary || ttsBinary);
   const ffmpegAvailable =
-    input.audioBackend !== "none" && (await which("ffmpeg")).catch(() => false);
+    input.audioBackend !== "none"
+      ? await which("ffmpeg").catch(() => false)
+      : false;
   const ffplayAvailable =
-    input.audioBackend !== "none" && (await which("ffplay")).catch(() => false);
+    input.audioBackend !== "none"
+      ? await which("ffplay").catch(() => false)
+      : false;
   const audio =
     ffmpegAvailable && ffplayAvailable
       ? createFfmpegAudioIo({
