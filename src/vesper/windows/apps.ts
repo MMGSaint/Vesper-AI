@@ -1,4 +1,5 @@
 import type { ApprovedApp, ProcessInfo } from "../types.ts";
+import path from "node:path";
 import { isSafeExecutableName } from "../security.ts";
 
 export interface AppDetection {
@@ -20,14 +21,14 @@ export function detectApprovedApps(
         proc.name.toLowerCase() === `${app.id}.exe` ||
         app.aliases.some((alias) => proc.name.toLowerCase().includes(alias.toLowerCase())),
     );
-    const launchable = isSafeExecutableName(app.executable);
+    const launchable = isSafeExecutableName(app.executable) && Boolean(app.launchPath && path.isAbsolute(app.launchPath));
     return {
       app,
       running: Boolean(process),
       process,
       launchable,
       detail: !launchable
-        ? `Executable '${app.executable}' is not on the allowlist format.`
+        ? `Executable '${app.executable}' is not on the allowlist format or has no absolute launchPath.`
         : process
           ? `${app.name} is running (pid ${process.pid}).`
           : `${app.name} is approved but not running.`,
