@@ -126,14 +126,18 @@ export async function createVoiceModule(input: {
       );
 
   const available = Boolean(sttBinary || ttsBinary);
+  const ffmpegAvailable =
+    input.audioBackend !== "none" && (await which("ffmpeg")).catch(() => false);
+  const ffplayAvailable =
+    input.audioBackend !== "none" && (await which("ffplay")).catch(() => false);
   const audio =
-    input.audioBackend === "none"
-      ? null
-      : createFfmpegAudioIo({
+    ffmpegAvailable && ffplayAvailable
+      ? createFfmpegAudioIo({
           platform: input.platform,
           selectedDevice: input.audioInputDevice,
           spawnImpl: input.spawnImpl,
-        });
+        })
+      : null;
 
   let audioStatus = audio
     ? await audio.listInputDevices().catch(() => ({
@@ -141,7 +145,14 @@ export async function createVoiceModule(input: {
         devices: [],
         detail: "Audio device discovery failed.",
       }))
-    : { available: false, devices: [], detail: "Physical audio is disabled." };
+    : {
+        available: false,
+        devices: [],
+        detail:
+          input.audioBackend === "none"
+            ? "Physical audio is disabled."
+            : "FFmpeg and/or ffplay is not installed on this host.",
+      };
 
   const detail = available
     ? "Local voice conversion backends found (stt: " +
