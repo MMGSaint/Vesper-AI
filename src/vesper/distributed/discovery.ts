@@ -25,7 +25,7 @@ export interface DiscoverySubjects {
   models: {
     status(): { available: { id: string; kind: string; available: boolean }[] };
   };
-  voice: { status(): { available: boolean; stt: string; tts: string } };
+  voice: { status(): { available: boolean; audioAvailable?: boolean; stt: string; tts: string }; };
   optimizer: {
     getStatus(): Promise<{ available: boolean; mode: "mock" | "live" | "unavailable"; detail: string }>;
   };
@@ -110,6 +110,22 @@ export function buildDiscoveryProbes(subjects: DiscoverySubjects): DiscoveryProb
         status.available && Boolean(status.tts),
         `Text-to-speech via ${status.tts}.`,
         "No text-to-speech provider is available.",
+      );
+    }),
+    probe("voice_audio", () => {
+      const status = subjects.voice.status();
+      return state(
+        status.enabled === true && status.audioAvailable === true,
+        "Physical microphone/audio playback boundary is available.",
+        "No physical microphone/speaker audio backend is currently available.",
+      );
+    }),
+    probe("voice_wake", () => {
+      const status = subjects.voice.status();
+      return state(
+        status.enabled === true && status.audioAvailable === true,
+        "Wake-phrase activation is available when explicitly enabled in configuration.",
+        "Wake-phrase activation cannot run without physical audio.",
       );
     }),
     probe("notifications", () => ({
