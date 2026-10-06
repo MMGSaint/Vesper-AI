@@ -51,7 +51,6 @@ export interface FfmpegAudioIoOptions {
   ffmpeg?: string;
   ffplay?: string;
   selectedDevice?: string;
-  which?: (name: string) => Promise<boolean>;
   spawnImpl?: typeof nodeSpawn;
   deviceCacheMs?: number;
 }
@@ -85,12 +84,6 @@ export function createFfmpegAudioIo(options: FfmpegAudioIoOptions = {}): VoiceAu
   const platform = options.platform ?? process.platform;
   const ffmpeg = options.ffmpeg ?? "ffmpeg";
   const ffplay = options.ffplay ?? "ffplay";
-  const which =
-    options.which ??
-    (async (name: string) => {
-      const { commandExists } = await import("../models/backends.ts");
-      return commandExists(name, platform);
-    });
   const spawnImpl = options.spawnImpl;
   const deviceCacheMs = Math.max(1000, Math.min(60_000, options.deviceCacheMs ?? 15_000));
 
