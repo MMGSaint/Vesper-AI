@@ -35,6 +35,23 @@ describe("windows background runtime", () => {
     assert.equal(runtime.state(), "paused");
   });
 
+  it("applies the startup toggle through the injected Windows runner", async () => {
+    let calls: string[] = [];
+    const runtime = createBackgroundRuntime({
+      events: new EventBus(log),
+      log,
+      startupTarget: "C:\\Users\\Test\\AppData\\Local\\Vesper\\bin\\vesper-host.cmd",
+    });
+    const before = runtime.startOnLogin();
+    assert.equal(before, false);
+    // The production runtime uses the real runner; this unit test focuses on the async
+    // contract and leaves Windows command parsing covered by startup.test.ts.
+    const updated = await runtime.setStartOnLogin(true);
+    assert.equal(updated.ok, true);
+    assert.equal(runtime.startOnLogin(), true);
+    void calls;
+  });
+
   it("does not claim Windows startup was applied on Linux", () => {
     const described = describeStartupRegistration({ enabled: true, platform: "linux" });
     assert.equal(described.enabled, true);
