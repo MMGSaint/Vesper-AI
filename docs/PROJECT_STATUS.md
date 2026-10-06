@@ -177,7 +177,7 @@ Nothing below has been observed. See `docs/known-limitations.md`.
 - Actual Ollama / llama.cpp model assignment and benchmarking
 - Installer, uninstaller, and reset executed on Windows
 
-## Blocked — requires an external API
+## Blocked — requires live target validation
 
 - The NEXUS companion contract is no longer a placeholder: Vesper uses the local
   named-pipe / Unix-socket NDJSON boundary. The remaining unknown is real target-PC
