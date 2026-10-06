@@ -76,7 +76,7 @@ export function createModelRouter(input: {
       id: "xai-optional",
       baseUrl: input.config.models.endpoints.xai,
       apiKey: input.xaiKey,
-      defaultModel: "grok-4.5",
+      defaultModel: "grok-4.7",
       kind: "optional-cloud",
     });
     providers.push(xai);
