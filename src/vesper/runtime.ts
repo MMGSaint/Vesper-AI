@@ -241,6 +241,7 @@ export class VesperRuntime {
     this.scheduler = parts.scheduler;
     this.benchmark = parts.benchmark;
     this.proactivity = new ProactivityEngine(this.optimizer, this.events, this.notifications, {
+      enabled: this.config.proactivity.enabled,
       intervalMs: this.config.agent.idleIntervalMs,
       minSamplesForAlert: 3,
       cooldownMs: this.config.notifications.cooldownMs,
@@ -261,7 +262,8 @@ export class VesperRuntime {
     await this.seedMemories();
     this.started = true;
     await this.background.start();
-    // Sentinel is opt-in only through the existing daemon lifecycle; it never starts a microphone or capture session.
+    // Sentinel has its own explicit opt-in gate. It remains observation-only and never starts
+    // microphone/capture sessions or any machine-changing action.
     this.proactivity.start();
     if (this.config.agent.idleEventDriven) {
       this.scheduler.start();
