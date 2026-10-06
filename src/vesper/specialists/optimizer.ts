@@ -28,6 +28,11 @@ export interface OptimizerAdapter {
     summary: string;
     data?: JsonObject;
   }>;
+  requestExperiment?(input: { applicationId: string; repetitions?: number; maxCandidates?: number; practicalThresholdPercent?: number }): Promise<{
+    accepted: boolean;
+    summary: string;
+    data?: JsonObject;
+  }>;
   requestRollback(): Promise<{ accepted: boolean; summary: string }>;
   getLastAction(): Promise<string | null>;
   getOptimizationResult(): Promise<string | null>;
