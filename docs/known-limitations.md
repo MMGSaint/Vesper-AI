@@ -28,8 +28,8 @@ all of this work. Nothing below has been observed on it.
   explicitly configured stdio servers. Their discovered tools are namespaced and default to
   `confirm`; external server code is still code running with the Vesper user's local
   privileges, so a configured server must be treated as trusted software.
-- **Companion transport.** `vesper.client` v1 is in-process only. There is no pairing,
-  no listener, and no LAN TLS.
+- **Cross-device companion transport.** Same-machine local IPC is implemented over a Windows
+  named pipe / POSIX Unix socket. Cross-device pairing, LAN TLS, and mobile transport remain absent.
 - **Dedicated low-power wake detection.** Optional openWakeWord support is implemented as
   an external worker, but it is not enabled by default and requires a compatible local
   model/Python environment. The default wake backend remains STT-backed.
