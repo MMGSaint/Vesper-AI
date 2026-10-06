@@ -1245,6 +1245,24 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   // these because the placeholders are marked `fallback`.
   const probes = new HardwareProbeRegistry();
   registerPlaceholderProbes(probes);
+  if (voice.audio) {
+    probes.register({
+      id: "audio.wasapi",
+      title: "Microphone and speaker audio",
+      platforms: ["win32"],
+      probe: async () => {
+        const discovered = await voice.audio.listInputDevices();
+        return {
+          ok: discovered.available,
+          detail: discovered.detail,
+          data: { devices: discovered.devices, backend: voice.audio.id },
+          classification: discovered.available
+            ? "implemented_hardware_dependent"
+            : "implemented_hardware_dependent",
+        };
+      },
+    });
+  }
   // The producer sits between the optimizer adapter and the store: Vesper records what
   // it expected when it asked, and files the comparison when an observation arrives.
   const correctionProducer = new OptimizerCorrectionProducer({ optimizer, corrections });
