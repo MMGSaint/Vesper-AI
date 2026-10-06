@@ -50,6 +50,7 @@ import { createBackgroundRuntime, createTrayMenu, type BackgroundRuntime } from 
 import { createDisabledVoice, type VoiceModule } from "./voice/types.ts";
 import { createVoiceModule } from "./voice/providers.ts";
 import { createVoiceSession, type VoiceSession } from "./voice/session.ts";
+import { createVoiceActivationController, type VoiceActivationController } from "./voice/activation.ts";
 import { createModelRouter, type ModelRouter } from "./models/router.ts";
 import { createBenchmarkHarness, type BenchmarkHarness } from "./models/benchmark.ts";
 import { createIdleScheduler, type IdleScheduler } from "./scheduler.ts";
@@ -158,6 +159,7 @@ export class VesperRuntime {
   readonly readiness: ReadinessMonitor;
   readonly voice: VoiceModule;
   readonly voiceSession: VoiceSession;
+  readonly voiceActivation: VoiceActivationController | null;
   readonly scheduler: IdleScheduler;
   readonly benchmark: BenchmarkHarness;
   capability: CapabilityProfile | null = null;
@@ -201,6 +203,7 @@ export class VesperRuntime {
       background: BackgroundRuntime;
       voice: VoiceModule;
       voiceSession: VoiceSession;
+      voiceActivation: VoiceActivationController | null;
       scheduler: IdleScheduler;
       benchmark: BenchmarkHarness;
     },
@@ -238,6 +241,7 @@ export class VesperRuntime {
     this.background = parts.background;
     this.voice = parts.voice;
     this.voiceSession = parts.voiceSession;
+    this.voiceActivation = parts.voiceActivation;
     this.scheduler = parts.scheduler;
     this.benchmark = parts.benchmark;
     this.proactivity = new ProactivityEngine(this.optimizer, this.events, this.notifications, {
@@ -261,6 +265,12 @@ export class VesperRuntime {
     await this.seedMemories();
     this.started = true;
     await this.background.start();
+    // Voice activation is opt-in. When enabled, the capture loop is local-only until
+    // a wake phrase is actually detected; the router then follows the normal model/cloud
+    // policy for the resulting user command.
+    if (this.config.voice.enabled && this.config.voice.wakePhrase.enabled) {
+      this.voiceActivation?.start();
+    }
     // Sentinel is opt-in only through the existing daemon lifecycle; it never starts a microphone or capture session.
     this.proactivity.start();
     if (this.config.agent.idleEventDriven) {
@@ -447,6 +457,7 @@ export class VesperRuntime {
     this.readiness.advanceTo("STOPPING");
     this.started = false;
     this.memory.clearSession();
+    await this.voiceActivation?.stop();
     this.proactivity.stop();
     this.scheduler.stop();
     // Stop the TASK scheduler too. Until an executor could do real work this was
@@ -468,6 +479,45 @@ export class VesperRuntime {
 
   async resume() {
     await this.background.resume();
+  }
+
+  async voiceOnce(): Promise<{
+    ok: boolean;
+    transcript: string;
+    reply: string;
+    spoken: boolean;
+    detail: string;
+  }> {
+    if (!this.config.voice.enabled) {
+      return { ok: false, transcript: "", reply: "", spoken: false, detail: "Voice is disabled in configuration." };
+    }
+    if (!this.voice.audio) {
+      return { ok: false, transcript: "", reply: "", spoken: false, detail: "No physical audio backend is configured." };
+    }
+    const captured = await this.voice.audio.captureWav(this.config.voice.captureSeconds);
+    if (!captured.available || !captured.audio) {
+      return { ok: false, transcript: "", reply: "", spoken: false, detail: captured.detail };
+    }
+    const transcribed = await this.voice.stt.transcribe(captured.audio);
+    if (!transcribed.available || !transcribed.text.trim()) {
+      return { ok: false, transcript: "", reply: "", spoken: false, detail: transcribed.detail };
+    }
+
+    const turn = await this.chat(transcribed.text.trim());
+    let spoken = false;
+    let detail = transcribed.detail;
+    if (this.config.voice.speakResponses && turn.reply.trim()) {
+      const output = await this.voiceSession.speak(turn.reply);
+      spoken = output.ok;
+      detail += " " + output.summary;
+    }
+    return {
+      ok: true,
+      transcript: transcribed.text.trim(),
+      reply: turn.reply,
+      spoken,
+      detail,
+    };
   }
 
   async chat(
@@ -1073,6 +1123,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
         sttLanguage: config.voice.sttLanguage,
         sttArgs: config.voice.sttArgs,
         ttsArgs: config.voice.ttsArgs,
+        audioBackend: config.voice.audioBackend,
+        audioInputDevice: config.voice.audioInputDevice,
+        captureSeconds: config.voice.captureSeconds,
+        speakResponses: config.voice.speakResponses,
+        platform: process.platform,
       })
     : createDisabledVoice();
   const voiceSession = createVoiceSession(voice);
@@ -1428,6 +1483,30 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
       { id: "knowledge", description: "knowledge index", optional: true, detail: "not yet indexed" },
     ],
   });
+  const voiceActivation = createVoiceActivationController({
+    voice,
+    wakePhrase: config.voice.wakePhrase.phrase,
+    detectionSeconds: config.voice.wakePhrase.detectionSeconds,
+    commandSeconds: config.voice.wakePhrase.commandSeconds,
+    cooldownMs: config.voice.wakePhrase.cooldownMs,
+    shouldListen: () => runtimeRef.current?.background.state() === "running",
+    onCommand: async (text) => {
+      const active = runtimeRef.current;
+      if (!active) return "Vesper runtime is not ready.";
+      const turn = await active.chat(text);
+      return turn.reply;
+    },
+    onReply: async (reply) => {
+      const active = runtimeRef.current;
+      if (!active || !active.config.voice.speakResponses) return;
+      await active.voiceSession.speak(reply);
+    },
+    onEvent: (kind, detail) => {
+      if (kind === "error") log.warn("voice", detail);
+      else log.info("voice", detail);
+    },
+  });
+
   const runtime = new VesperRuntime(config, {
     log,
     probes,
@@ -1461,6 +1540,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
     background,
     voice,
     voiceSession,
+    voiceActivation,
     scheduler,
     benchmark,
   });
