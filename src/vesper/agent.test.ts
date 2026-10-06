@@ -59,6 +59,54 @@ describe("agent", () => {
     assert.match(denied.reply, /did not run/i);
   });
 
+  it("rejects forged, mismatched, and replayed confirmation tokens at the registry boundary", async () => {
+    const runtime = await testRuntime();
+
+    const bare = await runtime.tools.invoke({
+      name: "app_close",
+      args: { name: "Discord" },
+      workspaceId: "general",
+      confirmed: true,
+    });
+    assert.equal(bare.result?.ok, false);
+    assert.match(bare.result?.summary ?? "", /pending confirmation/i);
+
+    const queued = await runtime.tools.invoke({
+      name: "app_close",
+      args: { name: "Discord" },
+      workspaceId: "general",
+    });
+    assert.ok(queued.confirmationId);
+
+    const mismatched = await runtime.tools.invoke({
+      name: "app_close",
+      args: { name: "Steam" },
+      workspaceId: "general",
+      confirmed: true,
+      confirmationId: queued.confirmationId,
+    });
+    assert.equal(mismatched.result?.ok, false);
+
+    const approved = await runtime.tools.invoke({
+      name: "app_close",
+      args: { name: "Discord" },
+      workspaceId: "general",
+      confirmed: true,
+      confirmationId: queued.confirmationId,
+    });
+    assert.equal(approved.result?.ok, true);
+
+    const replay = await runtime.tools.invoke({
+      name: "app_close",
+      args: { name: "Discord" },
+      workspaceId: "general",
+      confirmed: true,
+      confirmationId: queued.confirmationId,
+    });
+    assert.equal(replay.result?.ok, false);
+  });
+
+
   it("survives an unavailable optimizer", async () => {
     const runtime = await testRuntime();
     runtime.setOptimizerAvailable(false);
