@@ -556,6 +556,55 @@ const emptyHardware = (): HardwareSnapshot => ({
   capturedAt: new Date().toISOString(),
 });
 
+function summaryMetricValue(metrics: readonly unknown[], metric: string): number | null {
+  for (const entry of metrics) {
+    const item = asObject(entry);
+    if (item?.metric !== metric) continue;
+    const value = typeof item.last === "number" ? item.last : typeof item.mean === "number" ? item.mean : null;
+    return value !== null && Number.isFinite(value) ? value : null;
+  }
+  return null;
+}
+
+function hardwareFromTelemetrySummary(summary: JsonObject, fidelity: NexusFidelity): HardwareSnapshot {
+  const metrics = Array.isArray(summary.metrics) ? summary.metrics : [];
+  const cpuUtil = summaryMetricValue(metrics, "cpu.utilization");
+  const cpuTemp = summaryMetricValue(metrics, "cpu.temperature");
+  const gpuUtil = summaryMetricValue(metrics, "gpu.utilization");
+  const gpuTemp = summaryMetricValue(metrics, "gpu.temperature");
+  const gpuVramUsed = summaryMetricValue(metrics, "gpu.vram.used");
+  const gpuVramTotal = summaryMetricValue(metrics, "gpu.vram.total");
+  const gpuClock = summaryMetricValue(metrics, "gpu.clock");
+  const gpuPower = summaryMetricValue(metrics, "gpu.power");
+  const ramUsed = summaryMetricValue(metrics, "memory.used");
+  const ramTotal = summaryMetricValue(metrics, "memory.total");
+  const anyGpu = [gpuUtil, gpuTemp, gpuVramUsed, gpuVramTotal, gpuClock, gpuPower].some((v) => v !== null);
+  const mode: HardwareSnapshot["mode"] = fidelity === "live" ? "live" : fidelity === "unavailable" ? "unavailable" : "simulated";
+  return {
+    mode,
+    os: "Windows",
+    cpu: { name: "NEXUS-observed CPU", cores: 0, threads: 0, utilizationPct: cpuUtil ?? 0, tempC: cpuTemp },
+    gpu: anyGpu ? {
+      name: "NEXUS-observed GPU",
+      vramGB: gpuVramTotal !== null ? Math.max(0, gpuVramTotal / 1024 ** 3) : 0,
+      utilizationPct: gpuUtil ?? 0,
+      tempC: gpuTemp,
+      vramUsedGB: gpuVramUsed !== null ? Math.max(0, gpuVramUsed / 1024 ** 3) : 0,
+      ...(gpuClock === null ? {} : { clocksMhz: gpuClock }),
+      ...(gpuPower === null ? {} : { powerW: gpuPower }),
+    } : null,
+    ram: {
+      totalGB: ramTotal !== null ? Math.max(0, ramTotal / 1024 ** 3) : 0,
+      usedGB: ramUsed !== null ? Math.max(0, ramUsed / 1024 ** 3) : 0,
+    },
+    notes: [
+      `NEXUS telemetry fidelity: ${fidelity}.`,
+      `Samples: ${typeof summary.sampleCount === "number" ? summary.sampleCount : 0}.`,
+    ],
+    capturedAt: new Date().toISOString(),
+  };
+}
+
 const unavailableStatus = (detail: string): OptimizerStatus => ({
   available: false,
   mode: "unavailable",
@@ -580,7 +629,7 @@ function createRefusedNexusOptimizer(reason: string, log?: Logger): OptimizerAda
       return unavailableStatus(reason);
     },
     async getTelemetry() {
-      return { available: false, hardware: emptyHardware(), bound: "unknown", notes: [reason] };
+      return { available: false, hardware: emptyHardware(), bound: "unknown", notes: [reason], fidelity: "unavailable" };
     },
     async getCurrentProfile() {
       return null;
@@ -763,19 +812,26 @@ export function createNexusIpcOptimizerAdapter(
         };
       }
       const summary = asObject(result.result);
-      const metrics = Array.isArray(summary?.metrics) ? summary.metrics : [];
-      let cpu: number | null = null;
-      let gpu: number | null = null;
+      if (!summary) {
+        return {
+          available: false,
+          hardware: emptyHardware(),
+          bound: "unknown",
+          notes: ["Malformed NEXUS telemetry summary."],
+          fidelity: "unavailable",
+        };
+      }
+      const metrics = Array.isArray(summary.metrics) ? summary.metrics : [];
+      const cpu = summaryMetricValue(metrics, "cpu.utilization");
+      const gpu = summaryMetricValue(metrics, "gpu.utilization");
       const notes: string[] = [
         `NEXUS telemetry fidelity: ${result.fidelity}.`,
-        `Samples: ${typeof summary?.sampleCount === "number" ? summary.sampleCount : 0}.`,
+        `Samples: ${typeof summary.sampleCount === "number" ? summary.sampleCount : 0}.`,
       ];
       for (const entry of metrics) {
         const m = asObject(entry);
         if (!m || typeof m.metric !== "string") continue;
         const last = typeof m.last === "number" ? m.last : typeof m.mean === "number" ? m.mean : null;
-        if (m.metric.includes("cpu") && m.metric.includes("util") && last !== null) cpu = last;
-        if (m.metric.includes("gpu") && m.metric.includes("util") && last !== null) gpu = last;
         const label = safeText(m.metric, 80);
         if (label && last !== null) notes.push(`${label}=${last}`);
       }
@@ -788,13 +844,13 @@ export function createNexusIpcOptimizerAdapter(
       else if (gpu !== null && gpu >= 85) bound = "gpu";
 
       return {
-        available: true,
-        hardware: emptyHardware(),
+        available: result.fidelity === "live",
+        hardware: hardwareFromTelemetrySummary(summary, result.fidelity),
         bound,
         notes: notes.map((n) => safeText(n) ?? "").filter((n) => n.length > 0),
+        fidelity: result.fidelity,
       };
     },
-
     async getCurrentProfile() {
       const result = await invoke("getCurrentProfile");
       if (!result.ok) return null;
