@@ -62,9 +62,14 @@ export interface ReindexStats {
   filesRead: number;
   filesReused: number;
   filesDropped: number;
+  /** True when the ingestion budget stopped traversal before the whole approved tree was read. */
+  budgetLimited: boolean;
   /** False when nothing changed and the existing dense vectors were kept. */
   embedded: boolean;
 }
+
+export const DEFAULT_MAX_REINDEX_FILES = 4_096;
+export const DEFAULT_MAX_REINDEX_BYTES = 256 * 1024 * 1024;
 
 interface WalkedFile {
   path: string;
@@ -82,6 +87,8 @@ interface WalkFilter {
   base: string;
   include?: string[];
   exclude?: string[];
+  maxFiles: number;
+  truncated: { value: boolean };
 }
 
 async function walk(
@@ -90,6 +97,10 @@ async function walk(
   approvedRoots: string[],
   filter: WalkFilter,
 ): Promise<void> {
+  if (acc.length >= filter.maxFiles) {
+    filter.truncated.value = true;
+    return;
+  }
   if (containsTraversal(root) || isDangerousRoot(root)) return;
   if (isVesperOwnPath(root)) return;
   const resolvedRoot = resolve(root);
@@ -103,6 +114,10 @@ async function walk(
     return;
   }
   for (const entry of entries) {
+    if (acc.length >= filter.maxFiles) {
+      filter.truncated.value = true;
+      return;
+    }
     const full = join(resolvedRoot, entry.name);
     if (!isPathInside(resolvedRoot, full)) continue;
     // Checked per entry, not only per root: an approved root can legitimately sit above
@@ -151,16 +166,26 @@ export class KnowledgeIndex {
   private documentSignature = "";
   private lastStats: ReindexStats | null = null;
 
+  private readonly maxReindexFiles: number;
+  private readonly maxReindexBytes: number;
+
   constructor(
     sources: KnowledgeSource[],
     seed: KnowledgeDocument[] = [],
-    options?: { approvedRoots?: string[]; embeddings?: EmbeddingProvider },
+    options?: {
+      approvedRoots?: string[];
+      embeddings?: EmbeddingProvider;
+      maxReindexFiles?: number;
+      maxReindexBytes?: number;
+    },
   ) {
     this.sources = sources.map((source) => ({ ...source }));
     this.seed = seed;
     this.documents = [...seed];
     this.approvedRoots = (options?.approvedRoots ?? []).map((root) => resolve(root));
     this.embeddings = options?.embeddings ?? createHashEmbeddings();
+    this.maxReindexFiles = Math.max(1, Math.min(options?.maxReindexFiles ?? DEFAULT_MAX_REINDEX_FILES, 100_000));
+    this.maxReindexBytes = Math.max(1_048_576, Math.min(options?.maxReindexBytes ?? DEFAULT_MAX_REINDEX_BYTES, 2 * 1024 ** 3));
   }
 
   listSources(): KnowledgeSource[] {
@@ -257,15 +282,22 @@ export class KnowledgeIndex {
         // no test could distinguish it from walk already doing the work.
         const realRoot = realPathOrNull(root) ?? resolve(root);
         const files: WalkedFile[] = [];
+        const traversal = { value: false };
         await walk(realRoot, files, this.approvedRoots, {
           base: realRoot,
           include: source.include,
           exclude: source.exclude,
+          maxFiles: this.maxReindexFiles,
+          truncated: traversal,
         });
         // Directory order is not guaranteed stable and document order has to be, because
         // dense vectors are addressed by document index.
         files.sort((a, b) => a.path.localeCompare(b.path));
         for (const file of files) {
+          if (bytesRead + file.size > this.maxReindexBytes) {
+            budgetLimited = true;
+            break;
+          }
           const cacheKey = cacheKeyFor(source.id, realRoot, file.path);
           seen.add(cacheKey);
           const cached = this.fileCache.get(cacheKey);
@@ -276,6 +308,7 @@ export class KnowledgeIndex {
           }
           try {
             const text = await readFile(file.path, "utf8");
+            bytesRead += file.size;
             const rel = relative(realRoot, file.path) || file.path;
             const title = file.path.split(/[\\/]/).at(-1) ?? file.path;
             const built = chunkText(text).map((chunk) => ({
@@ -296,6 +329,8 @@ export class KnowledgeIndex {
       }
     }
     let filesDropped = 0;
+    let budgetLimited = false;
+    let bytesRead = 0;
     for (const key of [...this.fileCache.keys()]) {
       if (!seen.has(key)) {
         this.fileCache.delete(key);
