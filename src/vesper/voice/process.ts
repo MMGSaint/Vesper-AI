@@ -13,6 +13,9 @@
  */
 
 import { spawn as nodeSpawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFile, realpath } from "node:fs/promises";
+import path from "node:path";
 
 export interface ProcessResult {
   ok: boolean;
@@ -34,6 +37,64 @@ export interface RunProcessInput {
   spawnImpl?: typeof nodeSpawn;
   /** Hard cap on captured stdout, so a runaway child cannot exhaust memory. */
   maxOutputBytes?: number;
+  /** Require an absolute executable path; disables PATH lookup for privileged helpers. */
+  requireAbsolutePath?: boolean;
+  /** Optional SHA-256 pin for the executable. */
+  expectedSha256?: string;
+}
+
+
+const WINDOWS_SYSTEM_TOOLS = new Set([
+  "cmd.exe",
+  "powershell.exe",
+  "where.exe",
+  "tasklist.exe",
+  "taskkill.exe",
+  "reg.exe",
+  "schtasks.exe",
+  "sc.exe",
+  "powercfg.exe",
+]);
+
+function resolveKnownWindowsSystemTool(command: string): string | null {
+  if (process.platform !== "win32") return null;
+  if (path.isAbsolute(command)) return command;
+  const basename = command.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  if (!WINDOWS_SYSTEM_TOOLS.has(basename)) return null;
+  const root = process.env.SystemRoot ?? "C:\\Windows";
+  return basename === "powershell.exe"
+    ? path.join(root, "System32", "WindowsPowerShell", "v1.0", basename)
+    : path.join(root, "System32", basename);
+}
+
+async function resolveProcessCommand(input: RunProcessInput): Promise<{ command: string; error: string | null }> {
+  if (input.requireAbsolutePath && !path.isAbsolute(input.command)) {
+    return { command: "", error: "This process must use an absolute executable path." };
+  }
+
+  let command = resolveKnownWindowsSystemTool(input.command) ?? input.command;
+  if (input.expectedSha256 !== undefined) {
+    if (!path.isAbsolute(command)) {
+      return { command: "", error: "An executable checksum requires an absolute path." };
+    }
+    if (!/^[a-fA-F0-9]{64}$/.test(input.expectedSha256)) {
+      return { command: "", error: "The executable checksum must be a SHA-256 hex digest." };
+    }
+    try {
+      const resolved = await realpath(command);
+      const digest = createHash("sha256").update(await readFile(resolved)).digest("hex");
+      if (digest.toLowerCase() !== input.expectedSha256.toLowerCase()) {
+        return { command: "", error: "The configured executable did not match its SHA-256 trust pin." };
+      }
+      command = resolved;
+    } catch (error) {
+      return {
+        command: "",
+        error: error instanceof Error ? `The configured executable could not be verified: ${error.message}` : "The configured executable could not be verified.",
+      };
+    }
+  }
+  return { command, error: null };
 }
 
 const NUL = /\0/;
@@ -59,6 +120,9 @@ export async function runProcess(input: RunProcessInput): Promise<ProcessResult>
     return { ...failure("Cancelled before the process started."), aborted: true };
   }
 
+  const resolved = await resolveProcessCommand(input);
+  if (resolved.error) return failure(resolved.error);
+
   const spawnImpl = input.spawnImpl ?? nodeSpawn;
   const timeoutMs = input.timeoutMs ?? 120_000;
   const maxOutputBytes = input.maxOutputBytes ?? 64 * 1024 * 1024;
@@ -76,7 +140,7 @@ export async function runProcess(input: RunProcessInput): Promise<ProcessResult>
     try {
       // shell:false is the default for spawn with an argv array, and is stated here
       // because it is the property that makes the argument handling safe.
-      child = spawnImpl(input.command, input.args, { shell: false });
+      child = spawnImpl(resolved.command, input.args, { shell: false, windowsHide: true });
     } catch (error) {
       resolve(failure(error instanceof Error ? error.message : String(error)));
       return;
