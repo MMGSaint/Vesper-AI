@@ -58,6 +58,22 @@ const FOREIGN_HOST_BLOCKED_TOOLS = new Set([
   "benchmark_run",
   "obs_status",
   "set_scenario",
+  "memory_search",
+  "memory_remember",
+  "memory_forget",
+  "corrections_list",
+  "task_list",
+  "rollback_apply",
+  "rollback_list",
+  "governor_decisions",
+  "workspace_switch",
+  "runtime_pause",
+  "runtime_resume",
+  "device_trust",
+  "knowledge_register",
+  "knowledge_remove",
+  "knowledge_reindex",
+  "notify",
 ]);
 
 /**
