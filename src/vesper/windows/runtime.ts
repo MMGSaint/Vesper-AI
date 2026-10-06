@@ -2,7 +2,7 @@ import type { EventBus } from "../events.ts";
 import type { Logger } from "../logging.ts";
 import type { BackgroundHealth, BackgroundState, TrayMenuItem } from "../types.ts";
 import { nowIso } from "../id.ts";
-import { applyStartupRegistration } from "./startup.ts";
+import { applyStartupRegistration, type StartupPreference } from "./startup.ts";
 
 export interface BackgroundRuntime {
   state(): BackgroundState;
@@ -20,6 +20,7 @@ export function createBackgroundRuntime(input: {
   log: Logger;
   startOnLogin?: boolean;
   startupTarget?: string;
+  startupRunner?: Parameters<typeof applyStartupRegistration>[0]["runner"];
 }): BackgroundRuntime {
   let state: BackgroundState = "stopped";
   let startedAt: string | null = null;
@@ -90,9 +91,10 @@ export function createBackgroundRuntime(input: {
             : "Start on login preference disabled; no OS startup entry was changed.",
         };
       }
-      const applied = await applyStartupRegistration({
+      const applied: StartupPreference = await applyStartupRegistration({
         enabled: value,
         target: input.startupTarget,
+        runner: input.startupRunner,
       });
       if (applied.applied) {
         startOnLogin = value;
