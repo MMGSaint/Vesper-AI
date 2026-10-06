@@ -16,6 +16,7 @@ import {
   createNexusIpcOptimizerAdapter,
   createNexusIpcClient,
   resolveNexusIpcEndpoint,
+  endpointFromToken,
   isNexusIpcConfigured,
   isSafeLocalPath,
   isSafePipeName,
@@ -195,6 +196,16 @@ describe("NEXUS IPC path resolution", () => {
     if (!resolved.ok) return;
     assert.match(resolved.value.endpoint, /^\\\\\.\\pipe\\nexus-[0-9a-f]{8}$/);
     assert.equal(resolved.value.transport, "named-pipe");
+  });
+
+  it("binds the automatic Windows pipe name to the secret, not machine metadata", () => {
+    const one = endpointFromToken(TOKEN, "win32");
+    const two = endpointFromToken(TOKEN, "win32");
+    const other = endpointFromToken(TOKEN.replace(/0$/, "1"), "win32");
+    assert.equal(one, two);
+    assert.notEqual(one, other);
+    assert.match(one ?? "", /^\\\\\.\\pipe\\nexus-[0-9a-f]{32}$/);
+    assert.doesNotMatch(one ?? "", /test-token|Users|me/i);
   });
 
   it("refuses remote hosts and URLs", () => {

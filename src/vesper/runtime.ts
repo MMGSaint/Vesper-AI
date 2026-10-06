@@ -813,6 +813,8 @@ function createOptimizerFromConfig(
       tokenPath: resolved.value.tokenPath,
       timeoutMs: config.optimizer.timeoutMs,
       log,
+      bindWindowsPipeToToken:
+        resolved.value.transport === "named-pipe" && config.optimizer.pipeName === null,
     });
   }
 

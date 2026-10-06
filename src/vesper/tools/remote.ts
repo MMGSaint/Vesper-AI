@@ -86,6 +86,11 @@ const TRUSTED_ONLY_TOOLS: readonly string[] = [
   "workspace_switch",
   "runtime_pause",
   "runtime_resume",
+  // Audio changes are small and reversible, but they still mutate the host. A restricted
+  // companion is deliberately observation/conversation-only; only a trusted device or
+  // the local operator may exercise them.
+  "audio_set_volume",
+  "audio_set_mute",
   // The task queue is the owner's private work list. Descriptions are free text the
   // owner wrote — "wipe the drive holding the tax records; passphrase is in the safe" is
   // the shape of a real entry — and `task_list` returns every one of them with no scope

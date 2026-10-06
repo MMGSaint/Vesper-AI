@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { KnowledgeIndex } from "./knowledge/rag.ts";
+import { KnowledgeIndex, DEFAULT_MAX_REINDEX_FILES } from "./knowledge/rag.ts";
 import { createUnavailableEmbeddings, cosineSimilarity } from "./knowledge/embeddings.ts";
 import { testRuntime } from "./test-helpers.ts";
 
@@ -147,6 +147,24 @@ describe("knowledge", () => {
       index.search("alpha").map((hit) => hit.path),
       ["published.md"],
     );
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("bounds reindex traversal and reports budget-limited ingestion", async () => {
+    const root = await mkdtemp(join(tmpdir(), "vesper-rag-budget-"));
+    for (let i = 0; i < 6; i += 1) {
+      await writeFile(join(root, `note-${i}.md`), `alpha ${i}`, "utf8");
+    }
+    const index = new KnowledgeIndex(
+      [{ id: "notes", name: "notes", roots: [root], enabled: true }],
+      [],
+      { approvedRoots: [root], maxReindexFiles: 2 },
+    );
+    const count = await index.reindex();
+    assert.equal(count > 0, true);
+    assert.equal(index.lastIndexStats()?.budgetLimited, true);
+    assert.equal(index.lastIndexStats()?.filesSeen <= 2, true);
+    assert.equal(DEFAULT_MAX_REINDEX_FILES >= 2, true);
     await rm(root, { recursive: true, force: true });
   });
 

@@ -173,7 +173,8 @@ export function createNexusIpcClient(options: NexusIpcClientOptions): {
   const connect = options.connectImpl ?? createConnection;
   // Token is held in closure; never placed in log fields by this module.
   const token = options.token;
-  const endpoint = options.endpoint;
+  const configuredEndpoint = options.endpoint;
+  const bindWindowsPipeToToken = options.bindWindowsPipeToToken ?? false;
 
   return {
     async call(method, params): Promise<NexusIpcCallResult> {
@@ -496,6 +497,14 @@ export function isSafePipeName(raw: string): boolean {
 }
 
 /** Same FNV-1a discriminator NEXUS uses so `home` alone addresses the right pipe. */
+/** Derive the same non-predictable Windows pipe name NEXUS uses from the shared secret. */
+export function endpointFromToken(token: string, platform: NodeJS.Platform = process.platform): string | null {
+  if (platform !== "win32") return null;
+  if (token.length < 32) return null;
+  const digest = createHash("sha256").update(token, "utf8").digest("hex").slice(0, 32);
+  return `\\\\.\\pipe\\nexus-${digest}`;
+}
+
 export function endpointDiscriminator(home: string, platform: NodeJS.Platform = process.platform): string {
   let h = 0x811c9dc5;
   const normalized = platform === "win32" ? home.toLowerCase() : home;
@@ -541,9 +550,11 @@ export interface NexusIpcOptimizerOptions {
   /** Preloaded token (tests). When set, the file is not read. */
   readonly token?: string;
   /** Injected client factory for tests. */
-  readonly clientFactory?: (token: string) => {
+  readonly clientFactory?: (token: string, endpoint?: string) => {
     call(method: string, params?: Record<string, unknown>): Promise<NexusIpcCallResult>;
   };
+  /** When true, default Windows home-derived pipe names are replaced by a token-bound pipe. */
+  readonly bindWindowsPipeToToken?: boolean;
 }
 
 const emptyHardware = (): HardwareSnapshot => ({
@@ -728,9 +739,11 @@ export function createNexusIpcOptimizerAdapter(
   }
 
   function clientFor(token: string) {
-    if (options.clientFactory) return options.clientFactory(token);
+    const secureEndpoint = bindWindowsPipeToToken ? endpointFromToken(token) : null;
+    const endpoint = secureEndpoint ?? configuredEndpoint;
+    if (options.clientFactory) return options.clientFactory(token, endpoint);
     return createNexusIpcClient({
-      endpoint: options.endpoint,
+      endpoint,
       token,
       timeoutMs,
     });

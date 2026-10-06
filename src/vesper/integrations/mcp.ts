@@ -56,6 +56,11 @@ export interface McpClient {
 
 /** The protocol revision this client implements. */
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
+export const MAX_MCP_LINE_BYTES = 64 * 1024;
+export const MAX_MCP_TOOLS = 128;
+export const MAX_MCP_OUTPUT_BYTES = 256 * 1024;
+export const MAX_MCP_TOOL_PROPERTIES = 128;
+export const MAX_MCP_DESCRIPTION_CHARS = 2_000;
 
 /** Vesper's own tools always win a name collision. */
 export function namespacedToolName(serverId: string, toolName: string): string {
@@ -63,9 +68,18 @@ export function namespacedToolName(serverId: string, toolName: string): string {
 }
 
 function defaultTransport(server: McpServerConfig): McpTransport {
+  // MCP servers are explicit owner-installed extensions. Keep the launch boundary
+  // non-shell and hidden, and refuse newline/control-character command strings.
+  if (!server.command || /[\0\r\n]/.test(server.command)) {
+    throw new Error("MCP server command contains unsupported control characters.");
+  }
+  if (process.platform === "win32" && !/^[A-Za-z]:[\\/]/.test(server.command)) {
+    throw new Error("On Windows, configured MCP server commands must use an absolute executable path.");
+  }
   const child = nodeSpawn(server.command, server.args ?? [], {
     cwd: server.cwd,
     shell: false,
+    windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
   });
   let buffer = "";
@@ -74,10 +88,19 @@ function defaultTransport(server: McpServerConfig): McpTransport {
   child.stdout?.setEncoding("utf8");
   child.stdout?.on("data", (chunk: string) => {
     buffer += chunk;
+    if (buffer.length > MAX_MCP_LINE_BYTES) {
+      child.kill();
+      buffer = "";
+      return;
+    }
     let newline = buffer.indexOf("\n");
     while (newline >= 0) {
       const line = buffer.slice(0, newline).trim();
       buffer = buffer.slice(newline + 1);
+      if (line.length > MAX_MCP_LINE_BYTES) {
+        child.kill();
+        return;
+      }
       if (line) lineHandler(line);
       newline = buffer.indexOf("\n");
     }
@@ -215,6 +238,9 @@ export function createMcpClient(options: {
         notify("notifications/initialized");
         const listed = await request("tools/list");
         const raw = Array.isArray(listed.tools) ? listed.tools : [];
+        if (raw.length > MAX_MCP_TOOLS) {
+          throw new Error(`${server.id} advertised too many tools (${raw.length}); refusing the MCP server.`);
+        }
         tools = raw
           .map((entry) => {
             const item = entry as { name?: unknown; description?: unknown; inputSchema?: unknown };
@@ -245,7 +271,7 @@ export function createMcpClient(options: {
       try {
         const result = await request("tools/call", { name, arguments: args });
         const content = Array.isArray(result.content) ? result.content : [];
-        const text = content
+        let text = content
           .map((part) => {
             const item = part as { type?: unknown; text?: unknown };
             return item.type === "text" && typeof item.text === "string" ? item.text : "";
@@ -253,9 +279,16 @@ export function createMcpClient(options: {
           .filter(Boolean)
           .join("\n")
           .trim();
-        // `isError` is the server reporting a tool-level failure, not a transport fault.
+        const truncated = text.length > MAX_MCP_OUTPUT_BYTES;
+        if (truncated) text = text.slice(0, MAX_MCP_OUTPUT_BYTES);
+        // MCP output is data, never authority. Explicitly label and bound it before
+        // returning it to the model so a malicious server cannot drown the context or
+        // masquerade instructions as Vesper policy.
+        const safeText = text
+          ? `[UNTRUSTED MCP OUTPUT from ${server.id}]\n${text}${truncated ? "\n[output truncated]" : ""}`
+          : (result.isError === true ? "[UNTRUSTED MCP OUTPUT: server reported an error.]" : "[UNTRUSTED MCP OUTPUT: no textual result.]");
         const ok = result.isError !== true;
-        return { ok, text: text || (ok ? "The tool returned no text." : "The tool reported an error.") };
+        return { ok, text: safeText };
       } catch (error) {
         return { ok: false, text: errorText(error) };
       }
@@ -279,8 +312,10 @@ export function toToolSpec(
     properties?: Record<string, { type?: unknown; description?: unknown; enum?: unknown }>;
     required?: unknown;
   };
-  const properties: ToolSpec["parameters"]["properties"] = {};
+  const properties: ToolSpec["parameters"]["properties"] = Object.create(null) as ToolSpec["parameters"]["properties"];
+  let propertyCount = 0;
   for (const [key, value] of Object.entries(schema.properties ?? {})) {
+    if (propertyCount >= MAX_MCP_TOOL_PROPERTIES) break;
     // An MCP server is untrusted input, and `properties["__proto__"] = {...}` sets the
     // prototype of the map rather than adding a key — which made every undeclared
     // argument resolve as declared.
@@ -297,17 +332,22 @@ export function toToolSpec(
     }
     properties[key] = {
       type,
-      ...(typeof value.description === "string" ? { description: value.description } : {}),
-      ...(Array.isArray(value.enum) ? { enum: value.enum.map((item) => String(item)) } : {}),
+      ...(typeof value.description === "string"
+        ? { description: value.description.slice(0, MAX_MCP_DESCRIPTION_CHARS) }
+        : {}),
+      ...(Array.isArray(value.enum)
+        ? { enum: value.enum.slice(0, 64).map((item) => String(item).slice(0, 512)) }
+        : {}),
     };
+    propertyCount += 1;
   }
   const required = Array.isArray(schema.required)
-    ? schema.required.filter((item): item is string => typeof item === "string" && item in properties)
+    ? schema.required.filter((item): item is string => typeof item === "string" && Object.hasOwn(properties, item))
     : [];
 
   return {
     name: namespacedToolName(serverId, tool.name),
-    description: `[${serverId}] ${tool.description}`,
+    description: `[UNTRUSTED MCP TOOL METADATA: ${serverId}] ${tool.description}`,
     permission,
     parameters: { type: "object", properties, required },
     specialist: serverId,

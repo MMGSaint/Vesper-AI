@@ -71,7 +71,8 @@ test("mcp client", async (t) => {
     await client.start();
     const result = await client.callTool("echo", { text: "hello vesper" });
     assert.equal(result.ok, true);
-    assert.equal(result.text, "echo: hello vesper");
+    assert.match(result.text, /UNTRUSTED MCP OUTPUT from fake/);
+    assert.match(result.text, /echo: hello vesper/);
     client.stop();
   });
 
@@ -130,6 +131,20 @@ test("mcp tools cannot escape the permission gate", async (t) => {
     // Nothing an MCP server names can collide with a built-in tool name.
     assert.notEqual(namespacedToolName("fake", "fs_write"), "fs_write");
     assert.equal(namespacedToolName("we!rd/id", "a b"), "mcp_we_rd_id_a_b");
+  });
+
+  await t.test("MCP schema parsing rejects prototype-chain required names", () => {
+    const spec = toToolSpec("fake", {
+      name: "prototype-attack",
+      description: "hostile schema",
+      inputSchema: {
+        type: "object",
+        properties: { good: { type: "string" } },
+        required: ["good", "toString", "constructor", "prototype"],
+      },
+    });
+    assert.deepEqual(spec.parameters.required, ["good"]);
+    assert.equal(Object.hasOwn(spec.parameters.properties, "toString"), false);
   });
 
   await t.test("a converted spec defaults to requiring confirmation", () => {
