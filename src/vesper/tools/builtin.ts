@@ -33,17 +33,22 @@
       {},
     ),
     async () => {
-      if (!voiceSession) {
-        return { ok: false, epistemic: "could_not_access", summary: "Voice session is not attached." };
+      if (!voice?.audio) {
+        return { ok: false, epistemic: "could_not_access", summary: "Physical audio is not available." };
       }
-      const hold = voiceSession.holdPtt();
-      if (!hold.ok) return { ok: false, epistemic: "could_not_access", summary: hold.summary };
-      const result = await voiceSession.releasePtt();
+      const captured = await voice.audio.captureWav(voice.captureSeconds);
+      if (!captured.available || !captured.audio) {
+        return { ok: false, epistemic: "could_not_access", summary: captured.detail };
+      }
+      const transcript = await voice.stt.transcribe(captured.audio);
+      if (!transcript.available || !transcript.text.trim()) {
+        return { ok: false, epistemic: "could_not_access", summary: transcript.detail };
+      }
       return {
-        ok: result.ok,
-        epistemic: result.ok ? "checked" : "could_not_access",
-        summary: result.summary,
-        ...(result.transcript ? { data: { transcript: result.transcript } as unknown as JsonObject } : {}),
+        ok: true,
+        epistemic: "checked",
+        summary: transcript.detail,
+        data: { transcript: transcript.text.trim() } as unknown as JsonObject,
       };
     },
   );
