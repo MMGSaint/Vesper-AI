@@ -3,9 +3,10 @@
 Phase: **distributed and portable architecture, on top of the retracted
 "software-only complete" claim.**
 
-Current validation, on a Linux development host: **491 tests**, **25 security tests**,
-typecheck and hygiene clean. CI and CodeQL results for the distributed branch are
-recorded in the section for that work, and are not claimed before they are observed.
+Current validation is tracked by the repository commands rather than a hard-coded test
+count: `npm test`, `npm run security`, typecheck and hygiene. This avoids status drift
+when regression tests are added. Hardware-dependent validation still requires the
+physical Windows target.
 
 For what the distributed layer does and does not do, see
 [distributed.md](distributed.md). For portable/USB, see [portable.md](portable.md).
@@ -178,8 +179,10 @@ Nothing below has been observed. See `docs/known-limitations.md`.
 
 ## Blocked — requires an external API
 
-- The real PC optimizer API is unpublished. The adapter, its transport hardening, and
-  its audit trail are ready; the contract is a placeholder until the real one exists.
+- The NEXUS companion contract is no longer a placeholder: Vesper uses the local
+  named-pipe / Unix-socket NDJSON boundary. The remaining unknown is real target-PC
+  behavior — whether live NEXUS is installed, listening, and reporting the expected
+  Windows/AMD evidence.
 
 ## Genuinely not implemented (software-only work that remains)
 
@@ -202,7 +205,8 @@ state, feeding the event log so correlation can use it).
 3. Install Ollama and/or llama.cpp with Vulkan; pull an embedding model
 4. Re-run first-boot and the benchmark harness, and record the real numbers
 5. Validate tray, startup registration, toasts, and application control
-6. Point the optimizer adapter at the real API when it is published
+6. Enable the Vesper↔NEXUS local IPC path only after NEXUS has passed its first-PC validation; start with read-only status/capabilities/telemetry/recommendation calls
+7. Grant mutating NEXUS scopes only after the read-only path is proven on the target machine
 
 When hardware becomes available, **validate every hardware-dependent item rather than
 simulating success**.
