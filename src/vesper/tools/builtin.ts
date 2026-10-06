@@ -187,6 +187,66 @@ export function registerBuiltinTools(input: {
   );
 
   registry.register(
+    spec("optimizer_performance_evidence", "Read NEXUS performance evidence including telemetry and, when available, PresentMon frame metrics for the current workload.", "read", {
+      windowMs: { type: "number", description: "Evidence window in milliseconds" },
+      applicationId: { type: "string", description: "Optional known application id such as squad or cyberpunk-2077" },
+    }),
+    async (args) => {
+      try {
+        const windowMs = typeof args.windowMs === "number" ? args.windowMs : 30_000;
+        const applicationId = typeof args.applicationId === "string" ? args.applicationId : undefined;
+        if (!optimizer.getPerformanceEvidence) {
+          return { ok: false, epistemic: "could_not_access", summary: "This optimizer adapter does not expose rich performance evidence." };
+        }
+        const evidence = await optimizer.getPerformanceEvidence(windowMs, applicationId);
+        return evidence === null
+          ? { ok: false, epistemic: "could_not_access", summary: "NEXUS did not return performance evidence." }
+          : { ok: true, epistemic: "checked", summary: "Retrieved NEXUS performance evidence.", data: evidence as JsonObject };
+      } catch (error) {
+        return { ok: false, epistemic: "could_not_access", summary: "Performance evidence failed: " + (error instanceof Error ? error.message : String(error)) };
+      }
+    },
+  );
+
+  registry.register(
+    spec("optimizer_decision_evidence", "Read why NEXUS made a specific optimization decision, including measurements, safety findings, and rollback state.", "read", {
+      outcomeId: { type: "string", description: "NEXUS optimization outcome id" },
+    }, ["outcomeId"]),
+    async (args) => {
+      const outcomeId = str(args, "outcomeId");
+      if (!outcomeId) return { ok: false, epistemic: "could_not_access", summary: "outcomeId is required." };
+      try {
+        if (!optimizer.getDecisionEvidence) {
+          return { ok: false, epistemic: "could_not_access", summary: "This optimizer adapter does not expose rich decision evidence." };
+        }
+        const evidence = await optimizer.getDecisionEvidence(outcomeId);
+        return evidence === null
+          ? { ok: false, epistemic: "could_not_access", summary: "No decision evidence was found for that outcome." }
+          : { ok: true, epistemic: "checked", summary: "Retrieved the NEXUS decision trail.", data: evidence as JsonObject };
+      } catch (error) {
+        return { ok: false, epistemic: "could_not_access", summary: "Decision evidence failed: " + (error instanceof Error ? error.message : String(error)) };
+      }
+    },
+  );
+
+  registry.register(
+    spec("optimizer_topology", "Read the current Windows CPU Set/cache topology exposed by NEXUS.", "read", {}),
+    async () => {
+      try {
+        if (!optimizer.getTopology) {
+          return { ok: false, epistemic: "could_not_access", summary: "This optimizer adapter does not expose topology evidence." };
+        }
+        const topology = await optimizer.getTopology();
+        return topology === null
+          ? { ok: false, epistemic: "could_not_access", summary: "NEXUS did not return topology evidence." }
+          : { ok: true, epistemic: "checked", summary: "Retrieved live NEXUS CPU topology evidence.", data: topology as JsonObject };
+      } catch (error) {
+        return { ok: false, epistemic: "could_not_access", summary: "Topology evidence failed: " + (error instanceof Error ? error.message : String(error)) };
+      }
+    },
+  );
+
+  registry.register(
     spec("system_info", "Read the current hardware snapshot.", "read", {}),
     async () => {
       const snapshot = hardware.snapshot();
