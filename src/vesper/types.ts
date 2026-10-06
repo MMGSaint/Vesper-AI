@@ -546,6 +546,8 @@ export interface OptimizerTelemetry {
   hardware: HardwareSnapshot;
   bound: "cpu" | "gpu" | "io" | "idle" | "unknown";
   notes: string[];
+  /** Provenance of the telemetry payload; only live can feed safety-sensitive proactivity. */
+  fidelity: "live" | "simulated" | "mocked" | "unverified" | "unavailable";
 }
 
 export interface OptimizerHealth {
