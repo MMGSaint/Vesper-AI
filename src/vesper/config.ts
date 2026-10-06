@@ -313,6 +313,12 @@ export const vesperConfigSchema = z.object({
       sttArgs: [],
       ttsArgs: [],
     }),
+  /** Background Sentinel is deliberately off until the owner explicitly enables proactive observation. */
+  proactivity: z
+    .object({
+      enabled: z.boolean().default(false),
+    })
+    .default({ enabled: false }),
   notifications: z
     .object({
       enabled: z.boolean().default(true),
@@ -469,6 +475,7 @@ const SECURITY_SECTIONS = [
   "knowledgeSources",
   "models",
   "optimizer",
+  "proactivity",
   "dataDir",
 ];
 
