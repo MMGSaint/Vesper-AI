@@ -62,6 +62,7 @@ export function createModelRouter(input: {
     id: "ollama",
     baseUrl: input.config.models.endpoints.ollama,
     defaultModel: input.config.models.roles.everyday?.model ?? "qwen2.5:14b",
+    avoidGpuWhen: input.gpuContentionGuard,
   });
   const llamacpp = createOpenAiCompatProvider({
     id: "llamacpp",
