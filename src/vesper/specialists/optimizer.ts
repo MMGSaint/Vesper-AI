@@ -25,6 +25,7 @@ export interface OptimizerAdapter {
   }>;
   requestExperiment?(input: { applicationId: string; repetitions?: number; maxCandidates?: number; practicalThresholdPercent?: number }): Promise<{
     accepted: boolean;
+    kept: boolean;
     summary: string;
     data?: JsonObject;
   }>;
@@ -167,7 +168,7 @@ export function createMockOptimizer(hardware: SimulatedHardware, log?: Logger): 
         applicationId: input.applicationId,
       });
       const result = await call("/experiment", { method: "POST", body: JSON.stringify(input) });
-      if (!result.ok) return { accepted: false, summary: `I could not access the optimizer: ${result.error}` };
+      if (!result.ok) return { accepted: false, kept: false, summary: `I could not access the optimizer: ${result.error}` };
       const payload = asObject(result.data);
       const accepted = payload?.accepted === true;
       const summary = safeTextOr(payload?.summary, "The optimizer did not return an experiment result.");
