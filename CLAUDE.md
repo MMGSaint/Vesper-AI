@@ -55,7 +55,7 @@ Do **not** fabricate benchmark numbers. First-boot on the physical PC must disco
 
 ## Target hardware (not yet physically validated)
 
-- CPU: AMD Ryzen 9 9950X
+- CPU: AMD Ryzen 9 9950X3D3D
 - GPU: AMD Radeon RX 7900 XT (20 GB)
 - RAM: 96 GB
 - OS: Windows

@@ -63,7 +63,7 @@ The benchmark harness **refuses to invent numbers** when no real local generatio
 
 ## Target hardware (not physically validated here)
 
-AMD Ryzen 9 9950X + Radeon RX 7900 XT 20 GB + 96 GB RAM + Windows.
+AMD Ryzen 9 9950X3D3D + Radeon RX 7900 XT 20 GB + 96 GB RAM + Windows.
 
 The target PC is currently **off**. Use capability discovery. Do not hard-code Vesper so it can only run on that machine.
 

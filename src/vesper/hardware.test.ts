@@ -8,7 +8,7 @@ describe("hardware", () => {
     const runtime = await testRuntime();
     const snap = runtime.hardware.snapshot();
     assert.equal(snap.mode, "simulated");
-    assert.equal(snap.cpu.name, "AMD Ryzen 9 9950X");
+    assert.equal(snap.cpu.name, "AMD Ryzen 9 9950X3D");
     assert.equal(snap.gpu?.name, "AMD Radeon RX 7900 XT");
     assert.equal(snap.gpu?.vramGB, 20);
     assert.equal(snap.ram.totalGB, 96);
