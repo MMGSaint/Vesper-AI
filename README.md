@@ -18,13 +18,13 @@ A TypeScript assistant runtime with:
 - first-boot hardware/backend discovery
 - a benchmark harness that refuses fake numbers
 - diagnostics, doctor/self-check, and recovery
-- a mock PC-optimizer adapter with a strict HTTP transport boundary
+- a NEXUS PC-optimizer adapter using a local named-pipe / Unix-socket NDJSON boundary; mocked optimizer behavior remains explicitly simulated in tests
 - Windows host/tray architecture and packaging scripts
 - gaming / VRChat / OBS context with observed vs inferred conclusions
 - a simulated host for the target machine (Ryzen 9 9950X, RX 7900 XT 20 GB, 96 GB RAM)
 - a versioned companion contract (`vesper.client` v1) with scoped sessions and honest capability states
 
-The physical target PC was **off** during this implementation. Hardware snapshots are simulated unless discovery is live on that machine.
+The physical target PC was **off** during this implementation. Hardware snapshots are simulated unless discovery is live on that machine. Vesper does not control AMD Adrenalin per-game profiles or driver-level tuning; those remain outside the NEXUS contract.
 
 ## Commands
 
