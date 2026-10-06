@@ -25,7 +25,7 @@ export interface DiscoverySubjects {
   models: {
     status(): { available: { id: string; kind: string; available: boolean }[] };
   };
-  voice: { status(): { available: boolean; audioAvailable?: boolean; stt: string; tts: string }; };
+  voice: { status(): { enabled: boolean; available: boolean; audioAvailable?: boolean; stt: string; tts: string } };
   optimizer: {
     getStatus(): Promise<{ available: boolean; mode: "mock" | "live" | "unavailable"; detail: string }>;
   };
