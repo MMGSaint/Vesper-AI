@@ -59,14 +59,18 @@ describe("McpManager", () => {
         enabled: true,
         servers: [{ id: "demo", command: "demo-server" }],
         permission: "confirm",
+        transportFactory: () => fakeTransport as never,
       },
       registry,
     );
-    const clientFactory = undefined;
-    void clientFactory;
-    // The production manager uses the MCP factory; this test verifies the public
-    // registry contract separately through a fake configured client boundary.
-    assert.equal(manager.status().enabled, true);
-    assert.deepEqual(manager.status().configured, ["demo"]);
+
+    const started = await manager.start();
+    assert.equal(started.running[0], "demo");
+    assert.deepEqual(started.tools, ["mcp_demo_echo"]);
+    assert.equal(registered[0]?.name, "mcp_demo_echo");
+    assert.equal(registered[0]?.permission, "confirm");
+    const result = await registered[0]?.handler({ text: "hello" });
+    assert.equal((result as { summary?: string }).summary, "mcp-ok");
+    manager.stop();
   });
 });
