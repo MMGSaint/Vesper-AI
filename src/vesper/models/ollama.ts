@@ -59,6 +59,8 @@ export interface OllamaOptions {
    * capability — which is why the opt-in stays opt-in.
    */
   think?: boolean;
+  /** Optional live workload guard. When true, new requests are forced CPU-side. */
+  avoidGpuWhen?: () => Promise<boolean>;
 }
 
 export function nativeRoot(baseUrl: string): string {
@@ -145,6 +147,8 @@ export function createOllamaProvider(options: OllamaOptions) {
   let available = false;
   let detail = "Not probed yet.";
   let tags: OllamaTag[] = [];
+  let gpuGuardCheckedAt = 0;
+  let cachedAvoidGpu = false;
 
   async function getJson<T>(path: string, timeoutMs: number): Promise<T | null> {
     const link = linkAbort(undefined, timeoutMs);
@@ -272,6 +276,12 @@ export function createOllamaProvider(options: OllamaOptions) {
 
     async complete(request: CompletionRequest, model: string): Promise<CompletionResult> {
       const startedAt = Date.now();
+      if (options.avoidGpuWhen && Date.now() - gpuGuardCheckedAt >= 2000) {
+        gpuGuardCheckedAt = Date.now();
+        try { cachedAvoidGpu = await options.avoidGpuWhen(); }
+        catch { cachedAvoidGpu = false; }
+      }
+      const avoidGpu = options.avoidGpuWhen ? cachedAvoidGpu : false;
       const timeoutMs = options.timeoutMs ?? 120_000;
       const link = linkAbort(request.signal, timeoutMs);
       const wantsStream = typeof request.onDelta === "function";
@@ -283,6 +293,7 @@ export function createOllamaProvider(options: OllamaOptions) {
         options: {
           temperature: request.temperature ?? 0.5,
           ...(request.maxTokens ? { num_predict: request.maxTokens } : {}),
+          ...(avoidGpu ? { num_gpu: 0 } : {}),
         },
       };
       if (request.tools?.length) {
