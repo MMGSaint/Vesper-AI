@@ -516,6 +516,8 @@ export interface ApprovedApp {
   id: string;
   name: string;
   executable: string;
+  /** Absolute launch target. A filename alone is never sufficient to launch an app. */
+  launchPath?: string;
   aliases: string[];
   workspaces?: string[];
 }
