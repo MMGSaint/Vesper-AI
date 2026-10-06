@@ -30,7 +30,33 @@ describe("foreign host tool ceiling", () => {
     assert.match(result.result?.summary ?? "", /foreign host/);
   });
 
-  it("keeps non-host-owned task/memory tools available to portable Vesper", () => {
+  it("blocks private memory and owner-history access on a foreign host", () => {
+    const registry = new ToolRegistry({} as never, createLogger(), new Map(), undefined, "foreign");
+    registry.register(
+      {
+        name: "memory_search",
+        description: "memory",
+        permission: "read",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      } as never,
+      async () => ({
+        ok: true,
+        summary: "should never execute",
+        epistemic: "checked",
+      }),
+    );
+    const result = registry.invoke({
+      name: "memory_search",
+      args: {},
+      workspaceId: "general",
+    });
+    return result.then((record) => {
+      assert.equal(record.result?.ok, false);
+      assert.match(record.result?.summary ?? "", /foreign host/);
+    });
+  });
+
+  it("keeps non-host-owned task creation and knowledge access available to portable Vesper", () => {
     const registry = new ToolRegistry({} as never, createLogger(), new Map(), undefined, "foreign");
     registry.register(
       {
@@ -45,6 +71,6 @@ describe("foreign host tool ceiling", () => {
         epistemic: "checked",
       }),
     );
-    assert.equal(registry.get("memory_search")?.spec.name, "memory_search");
+    assert.equal(registry.get("task_create")?.spec.name, "task_create");
   });
 });
