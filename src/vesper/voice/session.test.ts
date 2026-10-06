@@ -12,15 +12,23 @@ describe("voice session", () => {
     assert.equal(session.diagnostics().hardwareValidated, false);
   });
 
-  it("supports push-to-talk and interrupt on the simulated provider", async () => {
+  it("supports push-to-talk capture on the simulated provider", async () => {
     const session = createVoiceSession(createSimulatedVoice());
     const held = session.holdPtt();
     assert.equal(held.ok, true);
     const released = await session.releasePtt();
     assert.equal(released.ok, true);
+    assert.equal(released.transcript, "simulated transcript");
+    assert.equal(session.diagnostics().hardwareValidated, true);
+  });
+
+  it("can synthesize, play, and interrupt spoken output", async () => {
+    const session = createVoiceSession(createSimulatedVoice());
+    const spoken = await session.speak("hello");
+    assert.equal(spoken.ok, true);
+    assert.equal(session.mode(), "idle");
     session.holdPtt();
-    const interrupted = session.interrupt();
-    assert.equal(interrupted.ok, true);
+    assert.equal(session.interrupt().ok, true);
     assert.equal(session.mode(), "interrupted");
   });
 });
