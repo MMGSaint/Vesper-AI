@@ -12,6 +12,7 @@ function observation(overrides: Partial<ProactiveObservation> = {}): ProactiveOb
     gpuVramUsedGB: 10,
     gpuVramTotalGB: 20,
     performanceState: 'gpu',
+    telemetryFidelity: 'live',
     ...overrides,
   };
 }
@@ -91,4 +92,27 @@ test('sentinel applies a global alert budget across issue types', () => {
   assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 90 })).length, 1);
   now = 1;
   assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 75, gpuUtilizationPct: 99 })).length, 0);
+});
+
+
+test('sentinel ignores finite sensor values from non-live telemetry', () => {
+  const engine = new ProactivityEngine(
+    { getTelemetry: async () => { throw new Error('unused'); } } as never,
+    { emit: () => ({ id: 'evt' }) } as never,
+    { push: () => ({ id: 'note' }) } as never,
+    { minSamplesForAlert: 1 },
+  );
+
+  assert.equal(
+    engine.evaluate(observation({ gpuTemperatureC: 99, telemetryFidelity: 'mocked' })).length,
+    0,
+  );
+  assert.equal(
+    engine.evaluate(observation({ gpuTemperatureC: 99, telemetryFidelity: 'unverified' })).length,
+    0,
+  );
+  assert.equal(
+    engine.evaluate(observation({ gpuTemperatureC: 99, telemetryFidelity: 'live' })).some((i) => i.id === 'gpu-hot'),
+    true,
+  );
 });
