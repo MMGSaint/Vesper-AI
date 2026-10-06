@@ -163,6 +163,10 @@ export class LocalCompanionTransport {
     const server = this.server;
     this.server = null;
     this.activeConnections = 0;
+    for (const socket of this.sockets) {
+      socket.destroy();
+    }
+    this.sockets.clear();
     if (server) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -201,9 +205,14 @@ export class LocalCompanionTransport {
       socket.destroy();
     });
 
+    this.sockets.add(socket);
+    let cleaned = false;
     const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       if (this.activeConnections > 0) this.activeConnections -= 1;
       this.connectionWindows.delete(socket);
+      this.sockets.delete(socket);
     };
     socket.once("close", cleanup);
     socket.once("error", cleanup);
