@@ -32,14 +32,14 @@ export const vesperConfigSchema = z.object({
       mode: z.enum(["auto", "simulated", "live"]).default("auto"),
       target: z
         .object({
-          cpu: z.string().default("AMD Ryzen 9 9950X"),
+          cpu: z.string().default("AMD Ryzen 9 9950X3D3D"),
           gpu: z.string().default("AMD Radeon RX 7900 XT"),
           vramGB: z.number().default(20),
           ramGB: z.number().default(96),
           os: z.string().default("Windows"),
         })
         .default({
-          cpu: "AMD Ryzen 9 9950X",
+          cpu: "AMD Ryzen 9 9950X3D3D",
           gpu: "AMD Radeon RX 7900 XT",
           vramGB: 20,
           ramGB: 96,
@@ -49,7 +49,7 @@ export const vesperConfigSchema = z.object({
     .default({
       mode: "auto",
       target: {
-        cpu: "AMD Ryzen 9 9950X",
+        cpu: "AMD Ryzen 9 9950X3D3D",
         gpu: "AMD Radeon RX 7900 XT",
         vramGB: 20,
         ramGB: 96,
