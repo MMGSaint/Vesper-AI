@@ -153,8 +153,8 @@ export function createOpenWakeWordDetector(
           const model = typeof message.model === "string" ? message.model : "configured model";
           onWake(\`openWakeWord detected \${model} (score \${score.toFixed(3)}).\`);
         }
-        if (message.ok === false || message.detail) {
-          lastDetail = message.detail ?? "openWakeWord reported an error.";
+        if (message.ok !== true && message.detail) {
+          lastDetail = message.detail;
           onError(lastDetail);
         }
       });
