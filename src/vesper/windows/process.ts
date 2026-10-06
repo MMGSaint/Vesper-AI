@@ -8,6 +8,7 @@
  */
 
 import { spawn as nodeSpawn } from "node:child_process";
+import path from "node:path";
 import { isSafeExecutableName, parseTasklistCsv } from "../security.ts";
 import type { ProcessInfo } from "../types.ts";
 import {
@@ -33,6 +34,9 @@ export interface DetachedLaunch {
 export type DetachedLauncher = (command: string, args: string[]) => DetachedLaunch;
 
 export const defaultDetachedLauncher: DetachedLauncher = (command, args) => {
+  if (!path.isAbsolute(command)) {
+    return { ok: false, pid: null, error: "Detached application launches require an explicit absolute executable path." };
+  }
   try {
     const child = nodeSpawn(command, args, {
       detached: true,
