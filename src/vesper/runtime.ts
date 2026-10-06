@@ -32,6 +32,7 @@ import { TaskExecutorRegistry, TaskScheduler, registerBuiltinExecutors } from ".
 import { AutonomyGovernor, defaultAutonomyPolicy } from "./autonomy.ts";
 import { CheckpointStore } from "./checkpoint.ts";
 import { NotificationHub } from "./notifications.ts";
+import { ProactivityEngine } from "./proactivity.ts";
 import { createSimulatedHardware, type SimulatedHardware } from "./hardware/simulated.ts";
 import {
   createMockOptimizer,
@@ -138,6 +139,8 @@ export class VesperRuntime {
   readonly probes: HardwareProbeRegistry;
   readonly correctionProducer: OptimizerCorrectionProducer;
   readonly notifications: NotificationHub;
+  /** Background Sentinel: observes NEXUS telemetry without enabling microphone capture. */
+  readonly proactivity: ProactivityEngine;
   readonly hardware: SimulatedHardware;
   readonly windows: WindowsHost;
   readonly optimizer: OptimizerAdapter;
@@ -237,6 +240,11 @@ export class VesperRuntime {
     this.voiceSession = parts.voiceSession;
     this.scheduler = parts.scheduler;
     this.benchmark = parts.benchmark;
+    this.proactivity = new ProactivityEngine(this.optimizer, this.events, this.notifications, {
+      intervalMs: this.config.agent.idleIntervalMs,
+      minSamplesForAlert: 3,
+      cooldownMs: this.config.notifications.cooldownMs,
+    });
   }
 
   async start() {
@@ -253,6 +261,8 @@ export class VesperRuntime {
     await this.seedMemories();
     this.started = true;
     await this.background.start();
+    // Sentinel is opt-in only through the existing daemon lifecycle; it never starts a microphone or capture session.
+    this.proactivity.start();
     if (this.config.agent.idleEventDriven) {
       this.scheduler.start();
     }
@@ -437,6 +447,7 @@ export class VesperRuntime {
     this.readiness.advanceTo("STOPPING");
     this.started = false;
     this.memory.clearSession();
+    this.proactivity.stop();
     this.scheduler.stop();
     // Stop the TASK scheduler too. Until an executor could do real work this was
     // harmless; now that one can invoke tools, an in-flight executor needs the abort
