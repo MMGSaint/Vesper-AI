@@ -1207,8 +1207,12 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
   });
   const gate = createPermissionGate(config.permissions, log);
   const confirmations = new Map<string, PendingConfirmation>();
-  const tools = new ToolRegistry(gate, log, confirmations, async (id) =>
-    (await devices.get(id))?.trust ?? "unknown",
+  const tools = new ToolRegistry(
+    gate,
+    log,
+    confirmations,
+    async (id) => (await devices.get(id))?.trust ?? "unknown",
+    hostPosture,
   );
   const autonomy = new AutonomyGovernor({
     policy: defaultAutonomyPolicy(),
