@@ -6,7 +6,7 @@ describe("config", () => {
   it("loads defaults with workspaces and target hardware", () => {
     const config = defaultConfig();
     assert.equal(config.identity.name, "Vesper");
-    assert.equal(config.hardware.target.cpu, "AMD Ryzen 9 9950X");
+    assert.equal(config.hardware.target.cpu, "AMD Ryzen 9 9950X3D");
     assert.equal(config.hardware.target.gpu, "AMD Radeon RX 7900 XT");
     assert.equal(config.hardware.target.vramGB, 20);
     assert.equal(config.hardware.target.ramGB, 96);
