@@ -172,7 +172,7 @@ Nothing below has been observed. See `docs/known-limitations.md`.
 
 - Live AMD telemetry, clocks, power, temperatures
 - Real Vulkan vs ROCm throughput on the 7900 XT
-- Native tray icon, HKCU startup, toast delivery, `tasklist`, application launch/close
+- Native tray icon, toast delivery, `tasklist`, application launch/close
 - Actual Ollama / llama.cpp model assignment and benchmarking
 - Installer, uninstaller, and reset executed on Windows
 
