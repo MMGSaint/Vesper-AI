@@ -39,6 +39,8 @@ export interface IssueSessionInput {
 }
 
 const DEFAULT_TTL_MS = 15 * 60 * 1000;
+const MAX_SESSIONS = 64;
+const MAX_DEVICE_LABEL_CHARS = 120;
 
 export class ClientSessionStore {
   private readonly sessions = new Map<string, ClientSession>();
@@ -63,15 +65,21 @@ export class ClientSessionStore {
         `Device ${input.deviceId} is ${trust}; only an enrolled and approved device can open a session.`,
       );
     }
+    const now = Date.now();
+    for (const [id, session] of this.sessions) {
+      if (Date.parse(session.expiresAt) <= now) this.sessions.delete(id);
+    }
+    if (this.sessions.size >= MAX_SESSIONS) {
+      return clientError("UNAVAILABLE", "Too many active companion sessions; revoke an existing session first.");
+    }
     const requested = normalizeScopes(input.scopes ?? DEFAULT_COMPANION_SCOPES);
     const scopes = capScopesForTrust(requested, trust);
-    const now = Date.now();
     const ttl = Math.min(Math.max(input.ttlMs ?? DEFAULT_TTL_MS, 30_000), 60 * 60 * 1000);
     const session: ClientSession = {
       id: createId("session"),
       token: randomBytes(24).toString("base64url"),
       deviceId: input.deviceId,
-      deviceLabel: input.deviceLabel?.trim() || "unnamed-device",
+      deviceLabel: (input.deviceLabel?.trim() || "unnamed-device").slice(0, MAX_DEVICE_LABEL_CHARS),
       scopes,
       issuedAt: new Date(now).toISOString(),
       expiresAt: new Date(now + ttl).toISOString(),
