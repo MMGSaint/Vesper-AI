@@ -23,6 +23,30 @@ export function createUnavailableTts(id: string, detail: string): TextToSpeech {
 }
 
 export function createSimulatedVoice(): VoiceModule {
+  const audio: VoiceAudioIo = {
+    id: "simulated-audio",
+    platform: "win32",
+    ffmpeg: "simulated",
+    ffplay: "simulated",
+    async listInputDevices() {
+      return { available: true, devices: ["Simulated Microphone"], detail: "Simulated audio input." };
+    },
+    async captureWav() {
+      return { available: true, audio: new Uint8Array(44), device: "Simulated Microphone", detail: "Simulated microphone capture." };
+    },
+    async playWav() {
+      return { available: true, detail: "Simulated speaker playback." };
+    },
+    status() {
+      return {
+        available: true,
+        devices: ["Simulated Microphone"],
+        selectedDevice: "Simulated Microphone",
+        detail: "Simulated audio I/O.",
+      };
+    },
+  };
+
   const stt: SpeechToText = {
     id: "simulated-stt",
     async transcribe() {
