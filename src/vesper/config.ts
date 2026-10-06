@@ -483,6 +483,7 @@ const SECURITY_SECTIONS = [
   "models",
   "optimizer",
   "voice",
+  "mcp",
   "proactivity",
   "dataDir",
 ];
