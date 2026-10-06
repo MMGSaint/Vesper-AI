@@ -1,6 +1,7 @@
 export type CliCommand =
   | { kind: "repl"; skipDiscovery: boolean }
   | { kind: "ask"; text: string; json: boolean; skipDiscovery: boolean }
+  | { kind: "voice-once"; skipDiscovery: boolean }
   | { kind: "help" }
   | { kind: "version" }
   | { kind: "diagnostics"; skipDiscovery: boolean }
@@ -30,6 +31,7 @@ const COMMANDS = new Set([
   "--export-memory",
   "--client-hello",
   "--ask",
+  "--voice-once",
   "--first-boot-report",
   "--startup-status",
   "--enable-startup",
@@ -84,6 +86,8 @@ export function parseCli(argv: string[]): CliCommand {
       return { kind: "export-memory" };
     case "--client-hello":
       return { kind: "client-hello", skipDiscovery };
+    case "--voice-once":
+      return { kind: "voice-once", skipDiscovery };
     case "--first-boot-report":
       return { kind: "first-boot-report" };
     case "--startup-status":
@@ -112,6 +116,7 @@ Usage:
 Commands:
   (none)            Start the interactive console (or background mode with no TTY)
   --ask "<text>"    Ask one question, print the answer, exit
+  --voice-once      Capture one local microphone utterance, answer it, and speak the response
   --help, -h        Show this help
   --version, -V     Print version
   --diagnostics     Print a diagnostics report and exit
