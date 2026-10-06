@@ -1,4 +1,5 @@
 import type { VoiceAudioIo } from "./audio.ts";
+import type { WakeWordDetector } from "./openwakeword.ts";
 
 export interface SpeechToText {
   id: string;
@@ -18,6 +19,7 @@ export interface VoiceModule {
   pushToTalkBound: boolean;
   captureSeconds: number;
   speakResponses: boolean;
+  wakeDetector: WakeWordDetector | null;
   available(): boolean;
   audioAvailable(): boolean;
   status(): {
