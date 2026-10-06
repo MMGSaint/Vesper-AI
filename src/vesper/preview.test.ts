@@ -25,7 +25,7 @@ describe("action previews", () => {
     assert.equal(preview.executed, false);
     assert.equal(preview.reversibility, "reversible");
     assert.equal(preview.affected[0], "notes/example.txt");
-    assert.match(preview.sideEffects[0] ?? "", /character\\(s\\) of content/);
+    assert.match(preview.sideEffects[0] ?? "", /character\(s\) of content/);
     assert.doesNotMatch(formatPreview(preview), /super-secret/);
   });
 
