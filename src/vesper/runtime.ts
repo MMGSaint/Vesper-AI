@@ -1512,7 +1512,26 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Vespe
       const active = runtimeRef.current;
       if (!active) return "Vesper runtime is not ready.";
       const turn = await active.chat(text);
-      return turn.reply;
+      return {
+        reply: turn.reply,
+        ...(turn.pendingConfirmations[0]?.id
+          ? { pendingConfirmationId: turn.pendingConfirmations[0].id }
+          : {}),
+      };
+    },
+    onConfirm: async (confirmationId, approve) => {
+      const active = runtimeRef.current;
+      if (!active) return "Vesper runtime is not ready.";
+      const turn = await active.chat(approve ? "approve" : "no", {
+        confirmId: confirmationId,
+        approve,
+      });
+      return {
+        reply: turn.reply,
+        ...(turn.pendingConfirmations[0]?.id
+          ? { pendingConfirmationId: turn.pendingConfirmations[0].id }
+          : {}),
+      };
     },
     onReply: async (reply) => {
       const active = runtimeRef.current;
