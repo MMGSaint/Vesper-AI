@@ -64,10 +64,11 @@ Implemented and tested but **not wired**, stated plainly rather than counted as 
 - **Presence between machines.** A device records its own presence; nothing heartbeats
   across devices, again for want of a transport.
 
-Not built: cross-device network transport/pairing, a mobile client application, portable
-packaging, and Windows isolation. Local same-machine companion IPC is now implemented. The voice runtime now has both the default STT-backed wake
-phrase and an optional openWakeWord backend with a local model. Production MCP server
-configuration is now implemented and opt-in.
+Not built: cross-device network transport/pairing, a mobile client application, and Windows
+isolation. Local same-machine companion IPC and a foreign-host portable launcher are now
+implemented. The voice runtime has both the default STT-backed wake phrase and an optional
+openWakeWord backend with a local model. Production MCP server configuration is implemented
+and opt-in.
 
 ## The earlier retraction, kept for the record
 
@@ -225,7 +226,8 @@ simulating success**.
 
 ## Integration
 
-All of this work is **merged into `main`** as of `f1b08e7`.
+All current feature passes are merged into `main`; the repository history after the original
+retraction includes voice, cloud, MCP, local companion IPC, and portable foreign-host hardening.
 
 PR #6 had taken only the first commit of this line of work; PR #7 integrated the
 remaining 23. `agent/continuation` was a strict descendant of `main` — merge-base *was*
