@@ -33,6 +33,8 @@ export interface LocalBackendOptions {
   spawnImpl?: typeof nodeSpawn;
   /** SHA-256 pin for the production executable. */
   expectedSha256?: string;
+  /** Test-only escape hatch for injected fake binaries; production leaves this true. */
+  requireAbsolutePath?: boolean;
   /** Overrides the temp directory; tests use this to keep everything inspectable. */
   workDir?: string;
 }
@@ -83,7 +85,7 @@ export function createWhisperStt(
           ],
           timeoutMs: options.timeoutMs ?? 120_000,
           spawnImpl: options.spawnImpl,
-          requireAbsolutePath: true,
+          requireAbsolutePath: options.requireAbsolutePath ?? true,
           expectedSha256: options.expectedSha256,
         });
 
@@ -156,7 +158,7 @@ export function createPiperTts(options: LocalBackendOptions & { speaker?: number
           stdin: trimmed,
           timeoutMs: options.timeoutMs ?? 60_000,
           spawnImpl: options.spawnImpl,
-          requireAbsolutePath: true,
+          requireAbsolutePath: options.requireAbsolutePath ?? true,
           expectedSha256: options.expectedSha256,
         });
 
