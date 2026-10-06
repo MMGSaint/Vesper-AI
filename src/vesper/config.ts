@@ -141,6 +141,8 @@ export const vesperConfigSchema = z.object({
         id: z.string(),
         name: z.string(),
         executable: z.string(),
+        /** Explicit executable path used for launch; absence makes the app observation-only. */
+        launchPath: z.string().optional(),
         aliases: z.array(z.string()).default([]),
         workspaces: z.array(z.string()).optional(),
       }),
