@@ -729,3 +729,26 @@ export function parseConfig(input: unknown): ParsedConfig {
   }
 
   if (!result.success) return unrecoverable();
+  const uniqueRejected = [...new Set(rejected)];
+  return {
+    config: result.data,
+    ok: uniqueRejected.length === 0,
+    errors: [...new Set(errors)],
+    rejected: uniqueRejected,
+    securityRelevant: uniqueRejected.some(isSecurityPath),
+  };
+}
+
+export function stricterPermission(
+  declared: PermissionLevel,
+  override?: PermissionLevel,
+): PermissionLevel {
+  const rank: Record<PermissionLevel, number> = {
+    read: 0,
+    safe: 1,
+    confirm: 2,
+    never: 3,
+  };
+  if (!override) return declared;
+  return rank[override] > rank[declared] ? override : declared;
+}
