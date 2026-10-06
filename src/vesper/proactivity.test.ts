@@ -59,7 +59,7 @@ test('sentinel rearms only after evidence clears and cooldown permits it', () =>
     { getTelemetry: async () => { throw new Error('unused'); } } as never,
     { emit: () => ({ id: 'evt' }) } as never,
     { push: () => ({ id: 'note' }) } as never,
-    { minSamplesForAlert: 2, cooldownMs: 100, maxAlertsPerWindow: 10, now: () => now },
+    { minSamplesForAlert: 2, cooldownMs: 200, maxAlertsPerWindow: 10, now: () => now },
   );
 
   assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 90 })).length, 0);
@@ -75,7 +75,7 @@ test('sentinel rearms only after evidence clears and cooldown permits it', () =>
   assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 90 })).length, 0);
   now = 150;
   assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 90 })).length, 0);
-  now = 151;
+  now = 202;
   assert.equal(engine.evaluate(observation({ capturedAtMs: now, gpuTemperatureC: 90 })).length, 1);
 });
 
