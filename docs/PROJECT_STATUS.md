@@ -64,9 +64,9 @@ Implemented and tested but **not wired**, stated plainly rather than counted as 
 - **Presence between machines.** A device records its own presence; nothing heartbeats
   across devices, again for want of a transport.
 
-Not built: any transport, pairing flow, or listener; a mobile client application;
-portable packaging or Windows isolation. See the "Genuinely not implemented" section
-below for why the transport in particular is not being built unattended.
+Not built: cross-device network transport/pairing, a mobile client application, portable
+packaging, Windows isolation, and a dedicated low-power wake-word DSP backend. The voice
+runtime now has an opt-in STT-backed wake phrase and local physical audio boundary.
 
 ## The earlier retraction, kept for the record
 
@@ -173,7 +173,6 @@ Nothing below has been observed. See `docs/known-limitations.md`.
 - Live AMD telemetry, clocks, power, temperatures
 - Real Vulkan vs ROCm throughput on the 7900 XT
 - Native tray icon, HKCU startup, toast delivery, `tasklist`, application launch/close
-- Microphone capture and speaker playback
 - Actual Ollama / llama.cpp model assignment and benchmarking
 - Installer, uninstaller, and reset executed on Windows
 
@@ -195,8 +194,20 @@ Stated plainly rather than classified as complete:
   the in-process gateway are ready for it.
 
 Completed since that list was first written: the **MCP client** (real stdio JSON-RPC,
-namespaced and permission-gated) and **OBS WebSocket** (observed recording and streaming
-state, feeding the event log so correlation can use it).
+namespaced and permission-gated), **OBS WebSocket** (observed recording and streaming
+state, feeding the event log), the local **voice audio/STT/TTS path**, opt-in **wake phrase**,
+spoken confirmation continuation, durable **correction learning**, and optional **xAI cloud
+fallback**.
+
+## Completed in the current implementation pass
+
+- Physical microphone capture and speaker playback boundary via FFmpeg/DirectShow + ffplay.
+- One-shot `voice-once` command: microphone → local STT → normal Vesper cognition/tool loop → local TTS.
+- Opt-in `Hey Vesper` wake phrase activation, entirely local until the recognized command enters the normal agent path.
+- Spoken `yes/approve/do it` and `no/cancel` continuation for pending confirmation actions.
+- Correction records are now injected back into cognition as attributed evidence without changing policy, trust, or autonomy.
+- Optional xAI cloud fallback can be activated with `models.allowOptionalCloud=true` and `XAI_API_KEY`; local backends still win first.
+- Tray start-on-login now actually writes/removes the existing per-user HKCU Run entry instead of only changing an in-memory flag.
 
 ## Next on the real PC
 
