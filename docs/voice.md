@@ -6,10 +6,13 @@ interface is never degraded by voice being absent.
 ## Where the line sits
 
 Converting **an audio buffer to text**, and **text to an audio buffer**, is software.
-It is implemented and tested against a fake binary, including argv safety.
+It is implemented and tested against local-process boundaries, including argv safety.
 
-Opening a **microphone** or a **speaker** is hardware. Vesper does neither, anywhere.
-`available()` means "can convert buffers", never "an audio device works".
+Opening a **microphone** or a **speaker** is hardware. Vesper now has an explicit Windows
+audio boundary for both: FFmpeg/DirectShow capture and ffplay playback. The adapter is still
+hardware dependent until the target PC successfully captures and plays real audio.
+`available()` continues to describe conversion capability; `audioAvailable()` separately
+describes discovered physical audio I/O.
 
 ## Backends
 
@@ -34,7 +37,8 @@ it arrives verbatim, never shell-expanded.
 text. Push-to-talk is a boolean preference (`voice.pushToTalk`); binding an actual
 Windows hotkey is HARDWARE DEPENDENT and not applied here.
 
-Wake word is deliberately out of scope for the MVP.
+Wake-phrase activation is implemented as an opt-in local loop. It is STT-backed rather than a dedicated low-power DSP detector; a dedicated openWakeWord/ONNX backend can replace that detector later without changing the audio or agent boundary.
 
-Classification: **IMPLEMENTED + TESTED** for buffer conversion, provider discovery, and
-the session state machine. **DOCUMENTED BUT NOT IMPLEMENTED** for physical audio.
+Spoken confirmations are supported: when a voice turn queues a confirm-tier action, the next wake-phrase command `yes/approve/do it` or `no/cancel` is routed through the same confirmation path as the text interface.
+
+Classification: **IMPLEMENTED + TESTED** for buffer conversion, provider discovery, physical-audio orchestration, session capture/playback, wake-phrase orchestration, and spoken confirmation routing. **IMPLEMENTED + HARDWARE DEPENDENT** for real microphone/speaker operation on the target Windows machine.

@@ -373,6 +373,13 @@ async function main() {
     return;
   }
 
+  if (command.kind === "voice-once") {
+    const result = await runtime.voiceOnce();
+    console.log(JSON.stringify(result, null, 2));
+    await shutdown(result.ok ? 0 : 2, "voice-once");
+    return;
+  }
+
   if (command.kind === "client-hello") {
     console.log(
       JSON.stringify(

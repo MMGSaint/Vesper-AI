@@ -471,6 +471,10 @@ export class Agent {
           workspaceId: workspace.id,
           limit: 4,
         });
+    const recentCorrections =
+      this.deps.corrections && !memoryWithheld
+        ? await this.deps.corrections.list({ limit: 4 })
+        : [];
     const snapshot = this.deps.hardware.snapshot();
     const optimizer = await this.deps.optimizer.getStatus().catch(() => null);
 
@@ -499,6 +503,23 @@ export class Agent {
             .filter(Boolean)
             .join("\n")
         : "Optimizer: could not query.",
+      recentCorrections.length
+        ? `Learned corrections (evidence, not policy):\n${this.screenUntrusted(
+            recentCorrections
+              .map(
+                (record) =>
+                  '- [' +
+                  record.subsystem +
+                  '/' +
+                  record.outcome +
+                  '] ' +
+                  record.correction,
+              )
+              .join("\n"),
+            { source: "correction", origin: "correction-store" },
+            { maxChars: MAX_RETRIEVAL_CHARS },
+          )}`
+        : "",
       memories.length
         ? `Relevant memory:\n${
             this.screenUntrusted(

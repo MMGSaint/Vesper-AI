@@ -17,7 +17,7 @@ ROCm is never assumed faster than Vulkan.
 | --- | --- | --- |
 | Ollama | `http://127.0.0.1:11434/v1` | Reached through its **native** API; a `/v1` suffix is stripped |
 | llama.cpp server | `http://127.0.0.1:8088/v1` | Not 8080 — reserved for the console |
-| Optional xAI | `https://api.x.ai/v1` | Preview/dev only |
+| Optional xAI | `https://api.x.ai/v1` | Opt-in cloud fallback; provide XAI_API_KEY and set models.allowOptionalCloud=true |
 
 Discovery uses short timeouts. Completions abort on a timeout, and on a caller's
 cancellation, so neither a hung backend nor a long reply can freeze the assistant.
@@ -76,3 +76,13 @@ These are **starting candidates** for 20 GB VRAM + 96 GB RAM, not proven default
 - large: 32B–70B quantized with offload
 
 First-boot must discover what is actually installed and only then bind roles.
+
+
+## Optional cloud fallback
+
+Cloud is never required for local operation. When models.allowOptionalCloud is true and
+XAI_API_KEY is present, the router can use the optional xAI provider after local backends
+are unavailable. The current xAI API is OpenAI-compatible and exposes both Chat Completions
+and the newer Responses API; Vesper keeps its existing bounded OpenAI-compatible adapter
+boundary so local-first routing, tool-call validation, cancellation, and permission checks
+remain Vesper-owned.

@@ -82,7 +82,9 @@ export function formatDiagnostics(report: DiagnosticReport): string {
     }.`,
     `Knowledge: ${report.knowledge.sources} approved source(s). ${report.knowledge.detail}`,
     `Voice: ${report.voice.enabled ? `${report.voice.stt}/${report.voice.tts}` : "disabled"} (${
-      report.voice.available ? "available" : "not capturing audio"
+      report.voice.available
+        ? (("audioAvailable" in report.voice && report.voice.audioAvailable) ? "conversion + physical audio ready" : "conversion available; physical audio unverified")
+        : "not available"
     }).`,
     ...report.context.notes,
   ];
