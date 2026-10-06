@@ -93,6 +93,7 @@ export class VoiceActivationController {
   private loopPromise: Promise<void> | null = null;
   private sequence = 0;
   private pendingConfirmationId: string | null = null;
+  private pendingConfirmationExpiresAt = 0;
 
   constructor(options: VoiceActivationOptions) {
     this.voice = options.voice;
@@ -156,8 +157,15 @@ export class VoiceActivationController {
           continue;
         }
 
-        const commandInWindow = textAfterWakePhrase(transcript.text, this.wakePhrase);
-        if (!wakePhraseHeard(transcript.text, this.wakePhrase)) {
+        const hasWakePhrase = wakePhraseHeard(transcript.text, this.wakePhrase);
+        const affirmative = /^(yes|yeah|yep|sure|approve|approved|do it|go ahead|confirm)$/i.test(transcript.text.trim());
+        const negative = /^(no|nope|cancel|deny|decline|don't|do not)$/i.test(transcript.text.trim());
+        const confirmationPending =
+          Boolean(this.pendingConfirmationId) &&
+          Date.now() <= this.pendingConfirmationExpiresAt &&
+          Boolean(this.onConfirm);
+
+        if (!hasWakePhrase && !(confirmationPending && (affirmative || negative))) {
           await sleep(100);
           continue;
         }
@@ -165,8 +173,11 @@ export class VoiceActivationController {
         this.sequence += 1;
         this.onEvent?.("wake", "Wake phrase detected (activation #" + this.sequence + ").");
 
-        let command = commandInWindow;
-        if (!command) {
+        let command = hasWakePhrase
+          ? textAfterWakePhrase(transcript.text, this.wakePhrase)
+          : transcript.text.trim();
+
+        if (hasWakePhrase && !command) {
           const commandAudio = await audio.captureWav(this.commandSeconds);
           if (!commandAudio.available || !commandAudio.audio) {
             this.onEvent?.("error", commandAudio.detail);
@@ -188,17 +199,19 @@ export class VoiceActivationController {
         }
 
         let result: VoiceCommandResult | string;
-        const affirmative = /^(yes|yeah|yep|sure|approve|approved|do it|go ahead|confirm)$/i.test(command.trim());
-        const negative = /^(no|nope|cancel|deny|decline|don't|do not)$/i.test(command.trim());
+        const commandAffirmative = /^(yes|yeah|yep|sure|approve|approved|do it|go ahead|confirm)$/i.test(command.trim());
+        const commandNegative = /^(no|nope|cancel|deny|decline|don't|do not)$/i.test(command.trim());
 
-        if (this.pendingConfirmationId && (affirmative || negative) && this.onConfirm) {
-          result = await this.onConfirm(this.pendingConfirmationId, affirmative);
+        if (this.pendingConfirmationId && Date.now() <= this.pendingConfirmationExpiresAt && (commandAffirmative || commandNegative) && this.onConfirm) {
+          result = await this.onConfirm(this.pendingConfirmationId, commandAffirmative);
           this.pendingConfirmationId =
             typeof result === "string" ? null : (result.pendingConfirmationId ?? null);
+          if (!this.pendingConfirmationId) this.pendingConfirmationExpiresAt = 0;
         } else {
           result = await this.onCommand(command);
           this.pendingConfirmationId =
             typeof result === "string" ? null : (result.pendingConfirmationId ?? null);
+          this.pendingConfirmationExpiresAt = this.pendingConfirmationId ? Date.now() + 30_000 : 0;
         }
 
         const reply = typeof result === "string" ? result : result.reply;
